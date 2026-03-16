@@ -1,0 +1,135 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build-tauri:
+    name: Build Tauri App
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            artifact_name: build-macos
+            bundle_path: src-tauri/target/universal-apple-darwin/release/bundle/
+            release_assets: "**/*.dmg"
+            build_command: "pnpm tauri build -- --target universal-apple-darwin"
+          - platform: windows-latest
+            artifact_name: build-windows
+            bundle_path: src-tauri/target/release/bundle/
+            release_assets: |
+              **/*.msi
+              **/*.exe
+            build_command: "pnpm tauri build"
+          - platform: ubuntu-22.04
+            artifact_name: build-linux
+            bundle_path: src-tauri/target/release/bundle/
+            release_assets: |
+              **/*.deb
+              **/*.AppImage
+            build_command: "pnpm tauri build"
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4 # Fetches the source code from the repository
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 10 # Uses exactly pnpm v10 as requested
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20 # Uses Node.js 20
+          cache: 'pnpm' # Enables automatic pnpm caching
+          cache-dependency-path: 'pnpm-lock.yaml'
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add macOS Rust targets
+        if: matrix.platform == 'macos-latest'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Caches the src-tauri target directory for faster rebuilds
+          workspaces: './src-tauri -> target'
+          cache-on-failure: true
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libgtk-3-dev \
+            patchelf
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile # Ensures reproducible builds using the lockfile
+
+      - name: Build frontend
+        run: pnpm run build # Runs vite build which outputs to dist/
+
+      - name: Build Tauri App
+        run: ${{ matrix.build_command }} # Platform-specific build command
+        env:
+          # Injected for app signing/notarization if secrets are present
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      # Upload artifacts on develop branch push for 7 days
+      - name: Upload Build Artifacts
+        if: github.ref == 'refs/heads/develop'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.bundle_path }}
+          retention-days: 7
+
+      # Version extraction and Release on main branch push
+      - name: Get App Version (Unix)
+        if: github.ref == 'refs/heads/main' && matrix.platform != 'windows-latest'
+        shell: bash
+        run: |
+          # Extracts version field from tauri.conf.json using jq
+          echo "APP_VERSION=$(jq -r '.version' src-tauri/tauri.conf.json)" >> $GITHUB_ENV
+          # Calculates short SHA for unique tag naming
+          echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+      - name: Get App Version (Windows)
+        if: github.ref == 'refs/heads/main' && matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          # Extracts version property using PowerShell's native json support
+          $config = Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json
+          echo "APP_VERSION=$($config.version)" >> $env:GITHUB_ENV
+          # Calculates short SHA for unique tag naming
+          echo "short_sha=$(git rev-parse --short HEAD)" >> $env:GITHUB_ENV
+
+      - name: Create or Update GitHub Release
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          # Tag format: v<version>-<short_sha>
+          tag_name: v${{ env.APP_VERSION }}-${{ env.short_sha }}
+          release_name: "Scribeshade ${{ env.APP_VERSION }}"
+          prerelease: false
+          token: ${{ secrets.GITHUB_TOKEN }}
+          files: ${{ matrix.release_assets }} # Uploads platform-specific assets defined in matrix
