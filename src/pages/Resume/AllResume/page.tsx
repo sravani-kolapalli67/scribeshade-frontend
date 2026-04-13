@@ -1,8 +1,5 @@
 import { useState } from "react";
 import ListOfResumes, { Resume } from "@/components/Resume/ListOfResumes";
-import ResumeUpload from "@/components/Resume/ResumeUpload";
-import ResumePreview from "@/components/Resume/ResumePreview";
-import { Button } from "@/components/ui/button";
 
 export default function AllResumes() {
   const userId = localStorage.getItem("userId");
@@ -11,7 +8,7 @@ export default function AllResumes() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      {/* <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold text-foreground">Resume</h1>
         <div className="flex gap-3">
           <Button
@@ -24,24 +21,13 @@ export default function AllResumes() {
             Start Session
           </Button>
         </div>
-      </div>
+      </div> */}
 
-      {/* Upload Area */}
-      <ResumeUpload userId={userId || ""} />
-
-      {/* Main Content Grid */}
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        <div className="lg:col-span-1">
-          <ListOfResumes
-            userId={userId || ""}
-            onSelectResume={setSelectedResume}
-            selectedResumeId={selectedResume?.id}
-          />
-        </div>
-        <div className="lg:col-span-2">
-          <ResumePreview resume={selectedResume} />
-        </div>
-      </div>
+      <ListOfResumes
+        userId={userId || ""}
+        onSelectResume={setSelectedResume}
+        selectedResumeId={selectedResume?.id}
+      />
     </div>
   );
 }

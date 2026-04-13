@@ -12,7 +12,7 @@ export function useSyncUser() {
         const token = await getToken();
         if (!token) return;
 
-        const response = await fetch("http://localhost:3000/api/auth/me", {
+        const response = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/auth/me`, {
           method: "GET",
           headers: {
             "Content-Type": "application/json",

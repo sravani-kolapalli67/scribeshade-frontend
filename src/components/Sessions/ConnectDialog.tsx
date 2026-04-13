@@ -1,0 +1,374 @@
+import * as React from "react";
+import { useNavigate } from "react-router-dom";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Globe,
+  Cpu,
+  Info,
+  Sparkles,
+  MonitorSmartphone,
+  Video,
+  Users,
+  Phone,
+  ChevronLeft,
+  Monitor,
+  Tv2,
+  ExternalLink,
+  AlertCircle,
+  Cast,
+} from "lucide-react";
+import { cn } from "@/lib/utils";
+import { toast } from "sonner";
+
+interface ConnectDialogProps {
+  open: boolean;
+  onClose: () => void;
+  sessionId: string;
+  companyName: string;
+  jobTitle: string;
+  extraContext: string;
+  language: string;
+  simpleLanguage: boolean;
+  aiModel: string;
+}
+
+const LANGUAGES = [
+  { value: "English", label: "English" },
+  { value: "Spanish", label: "Spanish" },
+  { value: "French", label: "French" },
+  { value: "German", label: "German" },
+  { value: "Hindi", label: "Hindi" },
+  { value: "Arabic", label: "Arabic" },
+  { value: "Chinese", label: "Chinese" },
+  { value: "Portuguese", label: "Portuguese" },
+  { value: "Japanese", label: "Japanese" },
+];
+
+const AI_MODELS = [
+  {
+    value: "Gemini 2.0 Flash",
+    label: "Gemini 2.0 Flash",
+    recommended: true,
+    speed: "Fast",
+  },
+  {
+    value: "Gemini 1.5 Flash",
+    label: "Gemini 1.5 Flash",
+    recommended: false,
+    speed: "Fast",
+  },
+];
+
+const HOW_TO_CONNECT = [
+  { icon: Video, label: "Zoom" },
+  { icon: Users, label: "Meet" },
+  { icon: Monitor, label: "Teams" },
+  { icon: Tv2, label: "Webex" },
+  { icon: Phone, label: "Phone" },
+];
+
+export function ConnectDialog({
+  open,
+  onClose,
+  sessionId,
+  companyName,
+  jobTitle,
+  extraContext,
+  language: initialLanguage,
+  simpleLanguage: initialSimple,
+  aiModel: initialAIModel,
+}: ConnectDialogProps) {
+  const navigate = useNavigate();
+  const [language, setLanguage] = React.useState(initialLanguage);
+  const [simpleLanguage, setSimpleLanguage] = React.useState(initialSimple);
+  const [aiModel, setAIModel] = React.useState(initialAIModel);
+  const [activating, setActivating] = React.useState(false);
+
+  // Sync props when dialog reopens with new session
+  React.useEffect(() => {
+    if (open) {
+      setLanguage(initialLanguage);
+      setSimpleLanguage(initialSimple);
+      setAIModel(initialAIModel);
+    }
+  }, [open, initialLanguage, initialSimple, initialAIModel]);
+
+  const handleActivate = async () => {
+    setActivating(true);
+    try {
+      // 1. Request screen share
+      await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: true,
+      });
+
+      // 2. Call activate API
+      const res = await fetch(
+        `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionId}/activate`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ language, simpleLanguage, aiModel }),
+        },
+      );
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.message || "Failed to activate session");
+      }
+
+      // 3. Navigate to session
+      onClose();
+      navigate(`/sessions/${sessionId}`);
+    } catch (err: any) {
+      if (
+        err?.name === "NotAllowedError" ||
+        err?.message?.includes("Permission denied")
+      ) {
+        toast.error(
+          "Screen sharing was denied. Please allow screen sharing to continue.",
+        );
+      } else {
+        toast.error(err?.message || "Failed to activate session.");
+      }
+    } finally {
+      setActivating(false);
+    }
+  };
+
+  const selectedModel = AI_MODELS.find((m) => m.value === aiModel);
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="sm:max-w-lg border-none shadow-2xl rounded-3xl p-0 overflow-hidden bg-background">
+        <DialogHeader className="pt-6 px-7 pb-0">
+          <DialogTitle className="text-xl font-bold tracking-tight">
+            Connect
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="px-7 pb-7 pt-3 space-y-5">
+          {/* Context Summary */}
+          <p className="text-sm text-muted-foreground leading-relaxed">
+            This is an Interview Session for a position{" "}
+            <span className="font-bold text-foreground">
+              &quot;{jobTitle || "Software Developer"}&quot;
+            </span>{" "}
+            at{" "}
+            <span className="font-bold text-foreground">
+              &quot;{companyName || "Company"}&quot;
+            </span>
+            {extraContext && (
+              <>
+                {" "}
+                and{" "}
+                <span
+                  className="text-primary font-semibold underline underline-offset-2 cursor-pointer"
+                  title={extraContext}
+                >
+                  extra context
+                </span>
+                .
+              </>
+            )}
+            .
+          </p>
+
+          {/* Language + Simple Row */}
+          <div className="grid grid-cols-2 gap-4 items-end">
+            <div className="space-y-2">
+              <div className="flex items-center gap-1.5">
+                <Globe className="h-3.5 w-3.5 text-primary" />
+                <Label className="text-xs font-bold">Language</Label>
+                <Info className="h-3 w-3 text-muted-foreground cursor-help" />
+              </div>
+              <Select value={language} onValueChange={setLanguage}>
+                <SelectTrigger className="h-10 rounded-xl bg-background border-border/80 text-sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="rounded-xl">
+                  {LANGUAGES.map((lang) => (
+                    <SelectItem key={lang.value} value={lang.value} className="py-2">
+                      {lang.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center gap-1.5">
+                <Label className="text-xs font-bold">Simple</Label>
+                <Info className="h-3 w-3 text-muted-foreground cursor-help" />
+              </div>
+              <div className="h-10 flex items-center">
+                <Switch
+                  checked={simpleLanguage}
+                  onCheckedChange={setSimpleLanguage}
+                  className="data-[state=checked]:bg-black dark:data-[state=checked]:bg-white"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* AI Model */}
+          <div className="space-y-2">
+            <div className="flex items-center gap-1.5">
+              <Cpu className="h-3.5 w-3.5 text-primary" />
+              <Label className="text-xs font-bold">AI Model</Label>
+              <Info className="h-3 w-3 text-muted-foreground cursor-help" />
+            </div>
+            <Select value={aiModel} onValueChange={setAIModel}>
+              <SelectTrigger className="h-10 rounded-xl bg-background border-border/80 text-sm">
+                <SelectValue>
+                  {selectedModel && (
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="h-3.5 w-3.5 text-amber-500 fill-amber-500 shrink-0" />
+                      <span className="font-medium">{selectedModel.label}</span>
+                      {selectedModel.recommended && (
+                        <Badge className="bg-black dark:bg-white text-white dark:text-black hover:bg-black px-1.5 py-0 h-4 text-[9px] uppercase font-bold">
+                          Recommended
+                        </Badge>
+                      )}
+                      <span className="text-xs text-muted-foreground">
+                        {selectedModel.speed}
+                      </span>
+                    </div>
+                  )}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent className="rounded-xl">
+                {AI_MODELS.map((model) => (
+                  <SelectItem key={model.value} value={model.value} className="py-2.5">
+                    <div className="flex items-center gap-2">
+                      <span>{model.label}</span>
+                      {model.recommended && (
+                        <Badge
+                          variant="outline"
+                          className="text-[9px] h-4 px-1 uppercase border-black"
+                        >
+                          Recommended
+                        </Badge>
+                      )}
+                    </div>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {/* Screen Share Notice */}
+          <div className="flex items-start gap-2.5 p-3 rounded-xl bg-muted/40 border border-border/50">
+            <AlertCircle className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
+            <p className="text-[12px] text-muted-foreground leading-relaxed">
+              Make sure to select the{" "}
+              <span className="font-bold text-foreground">
+                &quot;Also share tab audio&quot;
+              </span>{" "}
+              option when sharing the screen.
+            </p>
+          </div>
+
+          {/* How to Connect */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-muted-foreground uppercase tracking-widest">
+                How to Connect:
+              </span>
+              <button className="flex items-center gap-1 text-xs text-primary font-semibold hover:underline">
+                <Video className="h-3 w-3" />
+                Video Tutorial
+                <ExternalLink className="h-3 w-3" />
+              </button>
+            </div>
+            <div className="flex items-center gap-2">
+              {HOW_TO_CONNECT.map(({ icon: Icon, label }) => (
+                <div
+                  key={label}
+                  className="flex flex-col items-center gap-1 group cursor-pointer"
+                  title={label}
+                >
+                  <div className="h-9 w-9 rounded-xl bg-muted/50 border border-border/50 flex items-center justify-center transition-all group-hover:bg-muted group-hover:border-border shadow-sm">
+                    <Icon className="h-4 w-4 text-muted-foreground group-hover:text-foreground transition-colors" />
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Mock Interview Promo */}
+            <div className="flex items-start gap-3 p-3 rounded-xl border border-border/50 bg-muted/20">
+              <div className="h-16 w-24 shrink-0 rounded-lg bg-muted flex items-center justify-center overflow-hidden border border-border/40">
+                <div className="flex flex-col items-center gap-1">
+                  <MonitorSmartphone className="h-5 w-5 text-muted-foreground" />
+                  <Cast className="h-3 w-3 text-muted-foreground" />
+                </div>
+              </div>
+              <div className="space-y-1">
+                <p className="text-[12px] text-muted-foreground leading-relaxed">
+                  Instead of a call tab, you can also share a{" "}
+                  <span className="font-bold text-foreground">
+                    mock interview
+                  </span>{" "}
+                  on YouTube and test ScribeShade that way.
+                </p>
+                <button className="text-[12px] text-primary font-semibold hover:underline flex items-center gap-1">
+                  Example video: Mock Interview
+                  <ExternalLink className="h-3 w-3" />
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Footer Actions */}
+          <div className="flex items-center gap-3 pt-1">
+            <Button
+              variant="outline"
+              onClick={onClose}
+              disabled={activating}
+              className="gap-2 h-11 px-6 rounded-xl font-semibold border-border hover:bg-muted/50 transition-all shadow-sm"
+            >
+              <ChevronLeft className="h-4 w-4" />
+              Back
+            </Button>
+            <Button
+              onClick={handleActivate}
+              disabled={activating}
+              className={cn(
+                "flex-1 h-11 rounded-xl font-bold text-sm shadow-lg hover:shadow-xl active:scale-95 transition-all gap-2",
+                "bg-[#0f172a] dark:bg-white text-white dark:text-black",
+              )}
+            >
+              {activating ? (
+                <>
+                  <div className="h-4 w-4 border-2 border-current border-t-transparent animate-spin rounded-full" />
+                  Connecting...
+                </>
+              ) : (
+                <>
+                  <Cast className="h-4 w-4" />
+                  Activate and Connect
+                </>
+              )}
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}

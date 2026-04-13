@@ -34,9 +34,7 @@
   },
   "plugins": {
     "fs": {
-      "scope": {
-        "allow": ["$APPLOCALDATA/resumes/**"]
-      }
+        "requireLiteralLeadingDot": true
     }
   }
 }

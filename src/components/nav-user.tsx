@@ -1,10 +1,7 @@
-import { useUser, useClerk } from "@clerk/clerk-react"
-import { Link } from "react-router-dom"
-import {
-  Avatar,
-  AvatarFallback,
-  AvatarImage,
-} from "@/components/ui/avatar"
+import { useState } from "react";
+import { useUser, useClerk } from "@clerk/clerk-react";
+import { useNavigate } from "react-router-dom";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -13,25 +10,37 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+} from "@/components/ui/dropdown-menu";
 import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
   useSidebar,
-} from "@/components/ui/sidebar"
-import { ChevronsUpDownIcon, SparklesIcon, BadgeCheckIcon, CreditCardIcon, BellIcon, LogOutIcon } from "lucide-react"
+} from "@/components/ui/sidebar";
+
+import {
+  ChevronsUpDownIcon,
+  BadgeCheckIcon,
+  CreditCardIcon,
+  BellIcon,
+  LogOutIcon,
+} from "lucide-react";
+import { SettingsDialog } from "./SettingsDialog";
+import { AccountDialog } from "./Account/AccountDialog";
 
 export function NavUser() {
-  const { user } = useUser()
-  const { signOut } = useClerk()
-  const { isMobile } = useSidebar()
+  const { user } = useUser();
+  const { signOut } = useClerk();
+  const { isMobile } = useSidebar();
+  const [isAccountOpen, setIsAccountOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const navigate = useNavigate();
 
-  if (!user) return null
+  if (!user) return null;
 
-  const name = user.fullName || user.username || "User"
-  const email = user.primaryEmailAddress?.emailAddress || ""
-  const avatar = user.imageUrl
+  const name = user.fullName || user.username || "User";
+  const email = user.primaryEmailAddress?.emailAddress || "";
+  const avatar = user.imageUrl;
 
   return (
     <SidebarMenu>
@@ -44,7 +53,9 @@ export function NavUser() {
             >
               <Avatar className="h-8 w-8 rounded-lg">
                 <AvatarImage src={avatar} alt={name} />
-                <AvatarFallback className="rounded-lg">{name.charAt(0)}</AvatarFallback>
+                <AvatarFallback className="rounded-lg">
+                  {name.charAt(0)}
+                </AvatarFallback>
               </Avatar>
               <div className="grid flex-1 text-left text-sm leading-tight">
                 <span className="truncate font-medium">{name}</span>
@@ -63,7 +74,9 @@ export function NavUser() {
               <div className="flex items-center gap-2 px-1 py-1.5 text-left text-sm">
                 <Avatar className="h-8 w-8 rounded-lg">
                   <AvatarImage src={avatar} alt={name} />
-                  <AvatarFallback className="rounded-lg">{name.charAt(0)}</AvatarFallback>
+                  <AvatarFallback className="rounded-lg">
+                    {name.charAt(0)}
+                  </AvatarFallback>
                 </Avatar>
                 <div className="grid flex-1 text-left text-sm leading-tight">
                   <span className="truncate font-medium">{name}</span>
@@ -73,24 +86,28 @@ export function NavUser() {
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
             <DropdownMenuGroup>
-              <DropdownMenuItem>
-                <SparklesIcon />
-                Upgrade to Pro
+              <DropdownMenuItem
+                className="cursor-pointer"
+                onSelect={() => setIsAccountOpen(true)}
+              >
+                <BadgeCheckIcon />
+                Account
               </DropdownMenuItem>
-            </DropdownMenuGroup>
-            <DropdownMenuSeparator />
-            <DropdownMenuGroup>
-              <Link to="/account">
-                <DropdownMenuItem className="cursor-pointer">
-                  <BadgeCheckIcon />
-                  Account
-                </DropdownMenuItem>
-              </Link>
-              <DropdownMenuItem>
+              <DropdownMenuItem
+                className="cursor-pointer"
+                onSelect={() => setIsSettingsOpen(true)}
+              >
+                <CreditCardIcon />
+                Settings
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className="cursor-pointer"
+                onSelect={() => navigate("/billing")}
+              >
                 <CreditCardIcon />
                 Billing
               </DropdownMenuItem>
-              <DropdownMenuItem>
+              <DropdownMenuItem className="cursor-pointer">
                 <BellIcon />
                 Notifications
               </DropdownMenuItem>
@@ -103,6 +120,12 @@ export function NavUser() {
           </DropdownMenuContent>
         </DropdownMenu>
       </SidebarMenuItem>
+
+      <AccountDialog isOpen={isAccountOpen} onClose={setIsAccountOpen} />
+      <SettingsDialog
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+      />
     </SidebarMenu>
-  )
+  );
 }

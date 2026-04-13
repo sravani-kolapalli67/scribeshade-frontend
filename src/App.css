@@ -143,6 +143,15 @@
 
 @theme inline {
   --color-brand: #458FFF;
+  --color-brand-muted: #F0F6FF;
+  --color-brand-subtle: #DBEAFF;
+  --color-brand-hover: #1A73FF;
+  --color-brand-active: #0066CC;
+  --color-brand-text: #003366;
+  --color-light-code-bg: #FAFCFF;
+  --color-light-code-header: #F1F5F9;
+  --color-light-code-text: #1E293B;
+  --color-light-code-border: #E2E8F0;
   --font-sans: "Geist Variable", sans-serif;
 
   --color-sidebar-ring: var(--sidebar-ring);
@@ -220,6 +229,29 @@
   --radius-3xl: calc(var(--radius) * 2.2);
 
   --radius-4xl: calc(var(--radius) * 2.6);
+
+  --color-brand-glow: color-mix(in srgb, var(--color-brand) 40%, transparent);
+}
+
+@utility shadow-glow {
+  box-shadow: 0 10px 40px -10px var(--color-brand-glow);
+}
+
+@utility shadow-glow-lg {
+  box-shadow: 0 20px 50px -10px var(--color-brand-glow);
+}
+
+@utility border-glow {
+  border: 1px solid var(--color-brand);
+  box-shadow: inset 0 0 10px var(--color-brand-glow), 0 0 15px var(--color-brand-glow);
+}
+
+@utility no-scrollbar {
+  &::-webkit-scrollbar {
+    display: none;
+  }
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }
 
 /* 

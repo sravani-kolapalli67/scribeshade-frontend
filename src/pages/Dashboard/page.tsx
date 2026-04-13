@@ -1,10 +1,17 @@
+import { OnboardingStepper } from "@/components/Dashboard/OnboardingStepper";
+import { DownloadApp } from "@/components/Dashboard/DownloadApp";
+import { SubscriptionPricing } from "@/components/Subscription/SubscriptionPricing";
+
 export default function Dashboard() {
   return (
-    <div className="space-y-4">
-      <h1 className="text-3xl font-bold">Dashboard</h1>
-      <p className="text-muted-foreground">
-        Welcome to your ScribeShade dashboard.
-      </p>
+    <div className="flex flex-col space-y-6 w-full max-w-7xl mx-auto py-6">
+      <OnboardingStepper />
+      <div className="w-full py-12 my-12">
+        <SubscriptionPricing />
+      </div>
+      <div className="px-4 w-full">
+        <DownloadApp />
+      </div>
     </div>
   );
 }

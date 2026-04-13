@@ -6,10 +6,8 @@
   "permissions": [
     "core:default",
     "opener:default",
-    "dialog:allow-open",
-    "fs:allow-read-file",
-    "fs:allow-write-file",
-    "fs:allow-app-local-data-dir",
-    "fs:allow-copy-file"
-  ]
+    "opener:allow-open-path"
+    
+]
 }
+
