@@ -9,7 +9,6 @@ import {
   Download,
   Copy,
   Check,
-  X,
   MessageCircle,
   Star,
   FileText,

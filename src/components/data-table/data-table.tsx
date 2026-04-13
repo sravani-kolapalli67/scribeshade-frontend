@@ -55,11 +55,8 @@ import { useTableConfig } from "./utils/table-config";
 import { useTableColumnResize } from "./hooks/use-table-column-resize";
 import { preprocessSearch } from "./utils/search";
 import {
-  createSortingHandler,
   createColumnFiltersHandler,
   createColumnVisibilityHandler,
-  createPaginationHandler,
-  createColumnSizingHandler,
   createSortingState,
 } from "./utils/table-state-handlers";
 import { createKeyboardNavigationHandler } from "./utils/keyboard-navigation";

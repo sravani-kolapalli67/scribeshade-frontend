@@ -9,7 +9,7 @@ import {
   MarkerType,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { systemProjects, type SystemProject } from "./data";
+import { systemProjects } from "./data";
 import {
   ProjectHeaderNode,
   ArchitectureNode,
@@ -119,7 +119,7 @@ export function ProjectCanvas() {
 
         allEdges.push(
           makeEdge(headerId, archId, "#458fff", true),
-          makeEdge(headerId, flowId, "#458fff", true)
+          makeEdge(headerId, flowId, "#458fff", true),
         );
 
         // ── Column 2: TechStack + CollabTools + Purpose ───────────────────
@@ -172,7 +172,7 @@ export function ProjectCanvas() {
         allEdges.push(
           makeEdge(archId, techId, "#94a3b8", false),
           makeEdge(flowId, collabId, "#94a3b8", false),
-          makeEdge(flowId, purposeId, "#94a3b8", false)
+          makeEdge(flowId, purposeId, "#94a3b8", false),
         );
 
         // ── Column 3: Data Domains ────────────────────────────────────────
@@ -191,7 +191,7 @@ export function ProjectCanvas() {
 
         allEdges.push(
           makeEdge(techId, dataId, "#94a3b8", false),
-          makeEdge(purposeId, dataId, "#94a3b8", false)
+          makeEdge(purposeId, dataId, "#94a3b8", false),
         );
 
         // ── Column 4: Database Schema ─────────────────────────────────────
@@ -290,7 +290,7 @@ function makeEdge(
   source: string,
   target: string,
   color: string,
-  animated: boolean
+  animated: boolean,
 ) {
   return {
     id: `edge-${source}-${target}`,

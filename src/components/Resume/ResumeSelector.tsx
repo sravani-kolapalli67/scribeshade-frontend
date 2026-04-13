@@ -2,7 +2,6 @@
 
 import * as React from "react";
 import { FileText } from "lucide-react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Select,
   SelectContent,
@@ -10,7 +9,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { cn } from "@/lib/utils";
 
 export interface Resume {
   id: string;
@@ -39,11 +37,7 @@ interface ResumeSelectorProps {
   filter?: (resume: Resume) => boolean;
 }
 
-export function ResumeSelector({
-  onSelect,
-  className,
-  filter,
-}: ResumeSelectorProps) {
+export function ResumeSelector({ onSelect, filter }: ResumeSelectorProps) {
   const [resumes, setResumes] = React.useState<Resume[]>([]);
   const [selectedResumeId, setSelectedResumeId] = React.useState<string>("");
   const [loading, setLoading] = React.useState(true);

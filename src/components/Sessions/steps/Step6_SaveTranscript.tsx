@@ -1,5 +1,5 @@
 import { Switch } from "@/components/ui/switch";
-import { FileText, Save, Clock } from "lucide-react";
+import { Save } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface Step6Props {

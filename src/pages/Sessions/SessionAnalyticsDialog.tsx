@@ -21,7 +21,6 @@ import {
 import {
   Activity,
   TrendingUp,
-  Award,
   Calendar,
   Building2,
   ThumbsUp,

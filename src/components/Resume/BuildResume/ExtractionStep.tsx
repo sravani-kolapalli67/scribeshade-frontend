@@ -5,7 +5,7 @@ import {
   ResumeSelector,
   type Resume,
 } from "@/components/Resume/ResumeSelector";
-import { Checkbox } from "@/components/ui/checkbox";
+// import { Checkbox } from "@/components/ui/checkbox";
 
 interface ExtractionStepProps {
   onSelectResume: (resume: Resume | null) => void;
@@ -14,12 +14,7 @@ interface ExtractionStepProps {
   fields: { id: string; label: string }[];
 }
 
-export function ExtractionStep({
-  onSelectResume,
-  options,
-  onChangeOption,
-  fields,
-}: ExtractionStepProps) {
+export function ExtractionStep({ onSelectResume }: ExtractionStepProps) {
   return (
     <div className="space-y-2 py-2">
       <div className="flex flex-col gap-2">

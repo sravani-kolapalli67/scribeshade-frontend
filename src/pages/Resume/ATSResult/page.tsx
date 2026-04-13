@@ -2,15 +2,11 @@
 
 import { useLocation, Link, useNavigate } from "react-router-dom";
 import {
-  CheckCircle2,
   AlertCircle,
   Lightbulb,
   Target,
-  ArrowLeft,
-  Shield,
   ShieldCheck,
   Check,
-  Cross,
   X,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";

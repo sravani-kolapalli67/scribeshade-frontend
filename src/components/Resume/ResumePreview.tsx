@@ -1,6 +1,6 @@
-import { FileTextIcon, DownloadIcon, EyeIcon } from "lucide-react";
+import { FileTextIcon } from "lucide-react";
 import { Resume } from "./ListOfResumes";
-import { Button } from "@/components/ui/button";
+// import { Button } from "@/components/ui/button";
 
 interface ResumePreviewProps {
   resume: Resume | null;

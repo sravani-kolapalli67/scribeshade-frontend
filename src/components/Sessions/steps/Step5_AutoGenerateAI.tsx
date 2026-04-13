@@ -1,4 +1,4 @@
-import { Sparkles, MessageSquare } from "lucide-react";
+import { Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Switch } from "@/components/ui/switch";
 

@@ -17,7 +17,6 @@ import { cn } from "@/lib/utils";
 import { SourceSelectionStep } from "./BuildResume/SourceSelectionStep";
 import { ExtractionStep } from "./BuildResume/ExtractionStep";
 import { ManualEntryStep } from "./BuildResume/ManualEntryStep";
-import { TemplateSelectionStep } from "./BuildResume/TemplateSelectionStep";
 import { ProcessingStep } from "./BuildResume/ProcessingStep";
 import { type Resume } from "@/components/Resume/ResumeSelector";
 

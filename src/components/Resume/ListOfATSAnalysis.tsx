@@ -7,16 +7,16 @@ import { FileText, Eye } from "lucide-react";
 
 import type { ExportableData } from "@/components/data-table/utils/export-utils";
 
-interface ATSAnalysisData {
-  id: string;
-  score: number;
-  summary: string;
-  strengths: string[];
-  weaknesses: string[];
-  missingKeywords: string[];
-  suggestions: string[];
-  createdAt: string;
-}
+// interface ATSAnalysisData {
+//   id: string;
+//   score: number;
+//   summary: string;
+//   strengths: string[];
+//   weaknesses: string[];
+//   missingKeywords: string[];
+//   suggestions: string[];
+//   createdAt: string;
+// }
 
 interface AnalyzedResume extends ExportableData {
   id: string;
@@ -39,7 +39,7 @@ export default function ListOfATSAnalysis() {
     }
 
     const res = await fetch(
-      `${import.meta.env.VITE_BACKEND_URL}/api/resume/all-ats?userId=${userId}`
+      `${import.meta.env.VITE_BACKEND_URL}/api/resume/all-ats?userId=${userId}`,
     );
     const data = await res.json();
 
@@ -69,7 +69,8 @@ export default function ListOfATSAnalysis() {
     if (score >= 50)
       return {
         label: "Fair",
-        color: "text-yellow-600 dark:text-yellow-500 bg-yellow-500/10 border-yellow-500/20",
+        color:
+          "text-yellow-600 dark:text-yellow-500 bg-yellow-500/10 border-yellow-500/20",
       };
     return {
       label: "Needs Work",

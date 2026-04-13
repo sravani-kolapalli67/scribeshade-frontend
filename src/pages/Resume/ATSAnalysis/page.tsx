@@ -1,5 +1,4 @@
 import ListOfATSAnalysis from "@/components/Resume/ListOfATSAnalysis";
-import { ATSAnalysisDialog } from "@/components/Resume/ATSAnalysisDialog";
 
 export default function ATSAnalysisPage() {
   return (

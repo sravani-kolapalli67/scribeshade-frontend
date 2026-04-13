@@ -1,12 +1,3 @@
-import { Link } from "react-router-dom";
-import {
-  Breadcrumb,
-  BreadcrumbItem,
-  BreadcrumbLink,
-  BreadcrumbList,
-  BreadcrumbPage,
-  BreadcrumbSeparator,
-} from "@/components/ui/breadcrumb";
 import { ProjectCanvas } from "@/components/AI projects/ProjectCanvas";
 
 export default function ProjectRecommendations() {
