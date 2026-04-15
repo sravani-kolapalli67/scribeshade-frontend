@@ -17,6 +17,8 @@ interface AIChatPanelProps {
   onAnalyzeScreen: () => void;
   onExit: () => void;
   isFullscreen?: boolean;
+  isFreeSession?: boolean;
+  timerText?: string | null;
 }
 
 export const AIChatPanel = ({
@@ -31,13 +33,20 @@ export const AIChatPanel = ({
   onAnalyzeScreen,
   onExit,
   isFullscreen = false,
+  isFreeSession = false,
+  timerText = null,
 }: AIChatPanelProps) => {
   return (
     <div className={cn(
         "h-full flex flex-col overflow-hidden relative transition-all duration-300", 
         isFullscreen ? "bg-transparent" : "bg-white"
     )}>
-      <ChatHeader onExit={onExit} isFullscreen={isFullscreen} />
+      <ChatHeader 
+        onExit={onExit} 
+        isFullscreen={isFullscreen} 
+        isFreeSession={isFreeSession} 
+        timerText={timerText} 
+      />
 
       <div className="flex-1 flex flex-col overflow-hidden relative">
         <ChatMessageList

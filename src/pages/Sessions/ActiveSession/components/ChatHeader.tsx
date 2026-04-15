@@ -6,12 +6,16 @@ interface ChatHeaderProps {
   onExit: () => void;
   title?: string;
   isFullscreen?: boolean;
+  isFreeSession?: boolean;
+  timerText?: string | null;
 }
 
 export const ChatHeader = ({
   onExit,
   title = "ScribeShade",
   isFullscreen = false,
+  isFreeSession = false,
+  timerText = null,
 }: ChatHeaderProps) => {
   return (
     <header
@@ -42,19 +46,21 @@ export const ChatHeader = ({
 
       <div className="flex items-center gap-4">
         {/* Timer Badge (HUD Style) */}
-        <div
-          className={cn(
-            "flex items-center gap-3 px-3 py-1.5 border border-white/20 rounded-xl text-sm font-bold shadow-sm",
-            isFullscreen
-              ? "bg-black/40 text-white backdrop-blur-sm"
-              : "bg-white/20 text-slate-600",
-          )}
-        >
-          <Clock className="h-4 w-4 text-rose-500" />
-          <span>
-            5 mins <span className="text-slate-400 text-xs">(Free)</span>
-          </span>
-        </div>
+        {timerText && (
+          <div
+            className={cn(
+              "flex items-center gap-3 px-3 py-1.5 border border-white/20 rounded-xl text-sm font-bold shadow-sm",
+              isFullscreen
+                ? "bg-black/40 text-white backdrop-blur-sm"
+                : "bg-white/20 text-slate-600",
+            )}
+          >
+            <Clock className="h-4 w-4 text-rose-500" />
+            <span>
+              {timerText} {isFreeSession && <span className="text-slate-400 text-xs">(Free)</span>}
+            </span>
+          </div>
+        )}
 
         {/* Action Row */}
         <div className="flex items-center gap-2">

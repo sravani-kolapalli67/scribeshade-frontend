@@ -1,9 +1,11 @@
-import { useState } from "react";
-import { useParams } from "react-router-dom";
+import { useState, useCallback } from "react";
+import { useParams, useNavigate } from "react-router-dom";
 import { useDeepgram } from "@/hooks/useDeepgram";
 import { useScreenShare } from "@/hooks/useScreenShare";
 import { useAIChat } from "@/hooks/useAIChat";
 import { useKeyboardShortcut } from "@/hooks/useKeyboardShortcut";
+import { useFreeSessionTimer } from "@/hooks/useFreeSessionTimer";
+import { toast } from "sonner";
 
 import {
   ResizableHandle,
@@ -19,9 +21,41 @@ import { Transcript, type Message } from "./Transcript";
 
 export default function ActiveSession() {
   const { id } = useParams();
+  const navigate = useNavigate();
   const [isEndSessionDialogOpen, setIsEndSessionDialogOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
+
+  const onTimeUp = useCallback(async () => {
+    if (!id) return;
+    
+    toast.info("Free session time is up! Ending session...", {
+      duration: 3000,
+    });
+
+    try {
+      const transcript = messages.map(m => `[${m.sender}]: ${m.text}`).join('\n');
+      await fetch(
+        `${import.meta.env.VITE_BACKEND_URL}/api/session/${id}/deactivate`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ transcript }),
+        },
+      );
+    } catch (error) {
+      console.error("Error auto-deactivating session:", error);
+    } finally {
+      navigate("/sessions");
+    }
+  }, [id, messages, navigate]);
+
+  const { isFreeSession, formattedTime } = useFreeSessionTimer({
+    sessionId: id,
+    onTimeUp,
+  });
 
   const { stream, videoRef, startShare, captureScreenshot } = useScreenShare();
 
@@ -142,6 +176,8 @@ export default function ActiveSession() {
     onAiAnswer,
     onAnalyzeScreen,
     onExit: () => setIsEndSessionDialogOpen(true),
+    isFreeSession,
+    timerText: formattedTime,
   };
 
   return (
