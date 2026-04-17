@@ -21,7 +21,7 @@ export function Step2_ResumeSelector({ onSelect, selectedResumeId }: Step2Props)
           <FileText className="h-4 w-4 text-primary" />
           <span className="text-sm font-medium">Your Resumes</span>
         </div>
-        <ResumeSelector onSelect={onSelect} />
+        <ResumeSelector onSelect={onSelect} value={selectedResumeId || undefined} />
       </div>
 
       {selectedResumeId && (

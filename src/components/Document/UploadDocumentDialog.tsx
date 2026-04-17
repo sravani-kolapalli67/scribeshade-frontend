@@ -14,7 +14,9 @@ import { cn } from "@/lib/utils";
 
 const isTauri = () => typeof window !== "undefined" && "__TAURI__" in window;
 
-export default function UploadDocumentDialog() {
+const API = import.meta.env.VITE_BACKEND_URL || "";
+
+export default function UploadDocumentDialog({ userId }: { userId: string }) {
   const [open, setOpen] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
@@ -36,9 +38,7 @@ export default function UploadDocumentDialog() {
   };
 
   const validateFile = (file: File) => {
-    const allowed = [
-      "application/pdf",
-    ];
+    const allowed = ["application/pdf"];
 
     if (!allowed.includes(file.type)) {
       alert("Only PDF allowed");
@@ -120,15 +120,31 @@ export default function UploadDocumentDialog() {
 
     setLoading(true);
 
+    if (!userId) {
+      setLoading(false);
+      alert("Missing User ID. Please try refreshing the page.");
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append("document", file);
+    formData.append("userId", userId);
+
     try {
-      // Mock upload delay
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      
-      console.log("Mock Uploaded:", file.name);
-      
-      // Dispatch event to refresh table if applicable later
+      const res = await fetch(`${API}/api/document/upload`, {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || "Upload failed");
+      }
+
+      // Dispatch event to refresh table
       window.dispatchEvent(new Event("documentUploaded"));
-      
+
       setOpen(false);
       resetState();
     } catch (error: any) {
@@ -142,7 +158,7 @@ export default function UploadDocumentDialog() {
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
-        <Button className="flex items-center gap-2 bg-brand hover:bg-brand/90 text-white rounded-lg px-4 py-2 transition-all shadow-sm">
+        <Button className="gap-2 px-6 py-6 rounded-xl bg-black dark:bg-white text-white dark:text-black hover:opacity-90 transition-all font-semibold shadow-lg">
           <UploadIcon className="h-4 w-4" />
           Upload Document
         </Button>
@@ -216,18 +232,19 @@ export default function UploadDocumentDialog() {
           )}
         </div>
 
-        <DialogFooter className="sm:justify-between flex-row justify-between w-full">
+        <DialogFooter className="sm:justify-between flex-row justify-between">
           <Button
             variant="outline"
             onClick={() => handleOpenChange(false)}
             disabled={loading}
+            className="rounded-xl font-semibold px-6 h-10"
           >
             Cancel
           </Button>
           <Button
             onClick={uploadToServer}
             disabled={!file || loading}
-            className="bg-brand text-white hover:bg-brand/90"
+            className="bg-black dark:bg-white text-white dark:text-black hover:opacity-90 transition-all font-semibold rounded-xl px-6 h-10 shadow-md"
           >
             {loading ? "Uploading..." : "Upload"}
           </Button>

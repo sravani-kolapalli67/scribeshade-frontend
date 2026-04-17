@@ -35,6 +35,7 @@ export default function ActiveSession() {
 
     try {
       const transcript = messages.map(m => `[${m.sender}]: ${m.text}`).join('\n');
+      const aiUsage = parseInt(localStorage.getItem(`aiUsage_${id}`) || "0");
       await fetch(
         `${import.meta.env.VITE_BACKEND_URL}/api/session/${id}/deactivate`,
         {
@@ -42,9 +43,10 @@ export default function ActiveSession() {
           headers: {
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ transcript }),
+          body: JSON.stringify({ transcript, aiUsage }),
         },
       );
+      localStorage.removeItem(`aiUsage_${id}`);
     } catch (error) {
       console.error("Error auto-deactivating session:", error);
     } finally {

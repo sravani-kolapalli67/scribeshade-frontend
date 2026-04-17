@@ -58,7 +58,7 @@ const Navbar = () => {
         {isResumePage && <UploadResumeDialog userId={userId} />}
         {isATSAnalysisPage && <ATSAnalysisDialog />}
         {isBuildResumePage && <BuildResumeDialog />}
-        {isDocumentPage && <UploadDocumentDialog />}
+        {isDocumentPage && <UploadDocumentDialog userId={userId} />}
         {isAIProjectsPage && <GenerateProjectDialog />}
       </div>
     </nav>

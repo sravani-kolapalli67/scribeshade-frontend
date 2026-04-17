@@ -94,6 +94,15 @@ export function ConnectDialog({
   simpleLanguage: initialSimple,
   aiModel: initialAIModel,
 }: ConnectDialogProps) {
+  console.log("ConnectDialog", {
+    sessionId,
+    companyName,
+    jobTitle,
+    extraContext,
+    language: initialLanguage,
+    simpleLanguage: initialSimple,
+    aiModel: initialAIModel,
+  });
   const navigate = useNavigate();
   const [language, setLanguage] = React.useState(initialLanguage);
   const [simpleLanguage, setSimpleLanguage] = React.useState(initialSimple);
@@ -204,7 +213,11 @@ export function ConnectDialog({
                 </SelectTrigger>
                 <SelectContent className="rounded-xl">
                   {LANGUAGES.map((lang) => (
-                    <SelectItem key={lang.value} value={lang.value} className="py-2">
+                    <SelectItem
+                      key={lang.value}
+                      value={lang.value}
+                      className="py-2"
+                    >
                       {lang.label}
                     </SelectItem>
                   ))}
@@ -255,7 +268,11 @@ export function ConnectDialog({
               </SelectTrigger>
               <SelectContent className="rounded-xl">
                 {AI_MODELS.map((model) => (
-                  <SelectItem key={model.value} value={model.value} className="py-2.5">
+                  <SelectItem
+                    key={model.value}
+                    value={model.value}
+                    className="py-2.5"
+                  >
                     <div className="flex items-center gap-2">
                       <span>{model.label}</span>
                       {model.recommended && (

@@ -10,42 +10,29 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-export interface Resume {
+export interface Document {
   id: string;
   filename: string;
-  path: string;
-  size?: number | string;
-  resumeContext?: string;
   uploadedAt: string;
-  userId?: string;
-  score?: number;
-  ats: boolean;
-  atsAnalysis?: {
-    id: string;
-    score: number;
-    summary: string;
-    strengths: string[];
-    weaknesses: string[];
-    missingKeywords: string[];
-    suggestions: string[];
-  };
+  path?: string;
+  size?: number | string;
 }
 
-interface ResumeSelectorProps {
-  onSelect?: (resume: Resume) => void;
+interface DocumentSelectorProps {
+  onSelect?: (document: Document) => void;
   value?: string;
   className?: string;
-  filter?: (resume: Resume) => boolean;
+  filter?: (document: Document) => boolean;
 }
 
-export function ResumeSelector({ onSelect, value, filter }: ResumeSelectorProps) {
-  const [resumes, setResumes] = React.useState<Resume[]>([]);
-  const [selectedResumeId, setSelectedResumeId] = React.useState<string>(value || "");
+export function DocumentSelector({ onSelect, value, filter }: DocumentSelectorProps) {
+  const [documents, setDocuments] = React.useState<Document[]>([]);
+  const [selectedDocumentId, setSelectedDocumentId] = React.useState<string>(value || "");
 
   // Update internal state if value prop changes
   React.useEffect(() => {
     if (value !== undefined) {
-      setSelectedResumeId(value);
+      setSelectedDocumentId(value);
     }
   }, [value]);
   const [loading, setLoading] = React.useState(true);
@@ -61,7 +48,7 @@ export function ResumeSelector({ onSelect, value, filter }: ResumeSelectorProps)
     if (!id) return;
 
     setLoading(true);
-    fetch(`${import.meta.env.VITE_BACKEND_URL}/api/resume/list?userId=${id}`, {
+    fetch(`${import.meta.env.VITE_BACKEND_URL}/api/document/list?userId=${id}`, {
       method: "GET",
       headers: {
         "Content-Type": "application/json",
@@ -70,36 +57,36 @@ export function ResumeSelector({ onSelect, value, filter }: ResumeSelectorProps)
       .then((res) => res.json())
       .then((response) => {
         // Handle both flat array and wrapped response formats
-        let resumeList: Resume[] = Array.isArray(response)
+        let docList: Document[] = Array.isArray(response)
           ? response
           : (response.data ?? []);
 
         // Apply filter if provided
         if (filter) {
-          resumeList = resumeList.filter(filter);
+          docList = docList.filter(filter);
         }
 
-        setResumes(resumeList);
+        setDocuments(docList);
       })
-      .catch((err) => console.error("Error fetching resumes:", err))
+      .catch((err) => console.error("Error fetching documents:", err))
       .finally(() => setLoading(false));
   }, [id, filter]);
 
   const handleValueChange = (value: string) => {
-    setSelectedResumeId(value);
-    const selected = resumes.find((r) => r.id === value);
+    setSelectedDocumentId(value);
+    const selected = documents.find((doc) => doc.id === value);
     if (selected) {
       onSelect?.(selected);
     }
   };
 
-  const selectedResume = resumes.find((r) => r.id === selectedResumeId);
+  const selectedDocument = documents.find((doc) => doc.id === selectedDocumentId);
 
   return (
     <Select
-      value={selectedResumeId}
+      value={selectedDocumentId}
       onValueChange={handleValueChange}
-      disabled={loading || resumes.length === 0}
+      disabled={loading || documents.length === 0}
     >
       <SelectTrigger className="h-12 w-full px-4 rounded-xl border-border/80 bg-background hover:bg-muted/30 transition-all focus:ring-primary/20 py-6">
         <SelectValue
@@ -110,39 +97,39 @@ export function ResumeSelector({ onSelect, value, filter }: ResumeSelectorProps)
               </div>
               <span className="truncate text-sm font-medium text-foreground/80">
                 {loading
-                  ? "Loading resumes..."
-                  : resumes.length > 0
-                    ? "Select a resume"
-                    : "No resumes found"}
+                  ? "Loading documents..."
+                  : documents.length > 0
+                    ? "Select a document"
+                    : "No documents found"}
               </span>
             </div>
           }
         >
-          {selectedResume && (
+          {selectedDocument && (
             <div className="flex items-center gap-3 py-1">
               <div className="flex shrink-0 items-center justify-center h-8 w-8 rounded-lg bg-muted text-muted-foreground/80">
                 <FileText className="h-5 w-5" />
               </div>
               <span className="truncate text-sm font-medium text-foreground/80">
-                {selectedResume.filename}
+                {selectedDocument.filename}
               </span>
             </div>
           )}
         </SelectValue>
       </SelectTrigger>
       <SelectContent className="rounded-xl border-border/60 shadow-lg">
-        {resumes.map((resume) => (
+        {documents.map((doc) => (
           <SelectItem
-            key={resume.id}
-            value={resume.id}
+            key={doc.id}
+            value={doc.id}
             className="py-3 px-4 focus:bg-primary/5 focus:text-primary transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-3">
               <FileText className="h-5 w-5 text-muted-foreground" />
               <div className="flex flex-col">
-                <span className="text-sm font-medium">{resume.filename}</span>
+                <span className="text-sm font-medium">{doc.filename}</span>
                 <span className="text-[10px] text-muted-foreground">
-                  {resume.uploadedAt}
+                  {new Date(doc.uploadedAt).toLocaleDateString()}
                 </span>
               </div>
             </div>
@@ -150,15 +137,5 @@ export function ResumeSelector({ onSelect, value, filter }: ResumeSelectorProps)
         ))}
       </SelectContent>
     </Select>
-    // <Card className={cn("w-full shadow-none border-border/50", className)}>
-    //   <CardHeader className="py-4 px-6 border-b border-border/40">
-    //     <CardTitle className="text-sm font-semibold text-foreground/90">
-    //       Resume to Use
-    //     </CardTitle>
-    //   </CardHeader>
-    //   <CardContent className="p-6">
-
-    //   </CardContent>
-    // </Card>
   );
 }

@@ -236,18 +236,19 @@ export default function UploadResumeDialog({ userId }: { userId: string }) {
           )}
         </div>
 
-        <DialogFooter className="sm:justify-between flex-row justify-between w-full">
+        <DialogFooter className="sm:justify-between flex-row justify-between">
           <Button
             variant="outline"
             onClick={() => handleOpenChange(false)}
             disabled={loading}
+            className="rounded-xl font-semibold px-6 h-10"
           >
             Cancel
           </Button>
           <Button
             onClick={uploadToServer}
             disabled={!file || loading}
-            className="bg-black text-white hover:bg-black/90"
+            className="bg-black dark:bg-white text-white dark:text-black hover:opacity-90 transition-all font-semibold rounded-xl px-6 h-10 shadow-md"
           >
             {loading ? "Uploading..." : "Upload"}
           </Button>

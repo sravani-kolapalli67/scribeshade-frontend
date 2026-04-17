@@ -20,7 +20,7 @@ import {
 // Define Session interface
 interface Session extends ExportableData {
   id: string;
-  company: string;
+  companyName: string;
   jobDescription: string;
   mode: "url" | "manual";
   free: boolean;
@@ -126,11 +126,11 @@ export default function Sessions() {
   const columns: ColumnDef<Session>[] = useMemo(
     () => [
       {
-        accessorKey: "company",
+        accessorKey: "companyName",
         header: "Company Name",
         cell: ({ row }) => (
           <span className="font-bold text-foreground truncate max-w-48 block">
-            {row.getValue("company")}
+            {row.getValue("companyName") || (row.original as any).company?.name || ""}
           </span>
         ),
       },
@@ -229,13 +229,13 @@ export default function Sessions() {
         exportConfig={{
           entityName: "Sessions",
           columnMapping: {
-            company: "Company Name",
+            companyName: "Company Name",
             jobDescription: "Description",
             aiUsage: "AI Usage",
             createdAt: "Created At",
           },
           columnWidths: [{ wch: 20 }, { wch: 40 }, { wch: 10 }, { wch: 15 }],
-          headers: ["company", "jobDescription", "aiUsage", "createdAt"],
+          headers: ["companyName", "jobDescription", "aiUsage", "createdAt"],
         }}
         fetchByIdsFn={async () => []}
       />
