@@ -1,6 +1,7 @@
 import { Button } from "@/components/ui/button";
-import { Clock, ExternalLink } from "lucide-react";
+import { ExternalLink } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { SessionTimer } from "./SessionTimer";
 
 interface ChatHeaderProps {
   onExit: () => void;
@@ -28,9 +29,6 @@ export const ChatHeader = ({
     >
       <div className="flex items-center gap-3">
         <div className="flex items-center gap-2">
-          {/* <div className="h-8 w-8 bg-brand/10 rounded-lg flex items-center justify-center">
-            <BotIcon className="h-5 w-5 text-brand" />
-          </div> */}
           <span
             className={cn(
               "text-xl font-bold tracking-tight",
@@ -45,35 +43,33 @@ export const ChatHeader = ({
       </div>
 
       <div className="flex items-center gap-4">
-        {/* Timer Badge (HUD Style) */}
-        {timerText && (
-          <div
-            className={cn(
-              "flex items-center gap-3 px-3 py-1.5 border border-white/20 rounded-xl text-sm font-bold shadow-sm",
-              isFullscreen
-                ? "bg-black/40 text-white backdrop-blur-sm"
-                : "bg-white/20 text-slate-600",
-            )}
-          >
-            <Clock className="h-4 w-4 text-rose-500" />
-            <span>
-              {timerText} {isFreeSession && <span className="text-slate-400 text-xs">(Free)</span>}
-            </span>
-          </div>
-        )}
+        <SessionTimer
+          timerText={timerText}
+          isFreeSession={isFreeSession}
+          isFullscreen={isFullscreen}
+        />
 
-        {/* Action Row */}
         <div className="flex items-center gap-2">
-          <Button
+          {/* <Button
             variant="outline"
-            className="h-10 w-10 p-0 rounded-xl border-slate-200 bg-white/50 backdrop-blur-sm hover:bg-white shadow-sm"
+            className={cn(
+              "h-10 w-10 p-0 rounded-xl border transition-all",
+              isFullscreen
+                ? "bg-white/5 border-white/20 hover:bg-white/10"
+                : "border-slate-200 bg-white/50 backdrop-blur-sm hover:bg-white shadow-sm",
+            )}
             title="External Link"
           >
-            <ExternalLink className="h-5 w-5 text-slate-400" />
-          </Button>
+            <ExternalLink
+              className={cn(
+                "h-5 w-5",
+                isFullscreen ? "text-white/70" : "text-slate-400",
+              )}
+            />
+          </Button> */}
           <Button
             onClick={onExit}
-            className="bg-red-500 hover:bg-red-600 text-white px-6 rounded-xl font-bold h-10 shadow-[0_4px_12px_rgba(239,68,68,0.2)] border-none"
+            className="bg-red-500 hover:bg-red-600 text-white px-6 rounded-xl font-bold h-10 shadow-[0_4px_12px_rgba(239,68,68,0.2)] border-none transition-all active:scale-95"
           >
             Exit
           </Button>

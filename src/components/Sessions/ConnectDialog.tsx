@@ -1,5 +1,4 @@
 import * as React from "react";
-import { useNavigate } from "react-router-dom";
 import {
   Dialog,
   DialogContent,
@@ -38,7 +37,8 @@ import { toast } from "sonner";
 
 interface ConnectDialogProps {
   open: boolean;
-  onClose: () => void;
+  onSuccess: () => void;
+  onCancel: () => void;
   sessionId: string;
   companyName: string;
   jobTitle: string;
@@ -85,7 +85,8 @@ const HOW_TO_CONNECT = [
 
 export function ConnectDialog({
   open,
-  onClose,
+  onSuccess,
+  onCancel,
   sessionId,
   companyName,
   jobTitle,
@@ -94,16 +95,15 @@ export function ConnectDialog({
   simpleLanguage: initialSimple,
   aiModel: initialAIModel,
 }: ConnectDialogProps) {
-  console.log("ConnectDialog", {
-    sessionId,
-    companyName,
-    jobTitle,
-    extraContext,
-    language: initialLanguage,
-    simpleLanguage: initialSimple,
-    aiModel: initialAIModel,
-  });
-  const navigate = useNavigate();
+  //   console.log("ConnectDialog", {
+  //     sessionId,
+  //     companyName,
+  //     jobTitle,
+  //     extraContext,
+  //     language: initialLanguage,
+  //     simpleLanguage: initialSimple,
+  //     aiModel: initialAIModel,
+  //   });
   const [language, setLanguage] = React.useState(initialLanguage);
   const [simpleLanguage, setSimpleLanguage] = React.useState(initialSimple);
   const [aiModel, setAIModel] = React.useState(initialAIModel);
@@ -121,13 +121,7 @@ export function ConnectDialog({
   const handleActivate = async () => {
     setActivating(true);
     try {
-      // 1. Request screen share
-      await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: true,
-      });
-
-      // 2. Call activate API
+      // 1. Call activate API
       const res = await fetch(
         `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionId}/activate`,
         {
@@ -142,9 +136,8 @@ export function ConnectDialog({
         throw new Error(err.message || "Failed to activate session");
       }
 
-      // 3. Navigate to session
-      onClose();
-      navigate(`/sessions/${sessionId}`);
+      // 3. Trigger success callback
+      onSuccess();
     } catch (err: any) {
       if (
         err?.name === "NotAllowedError" ||
@@ -164,7 +157,7 @@ export function ConnectDialog({
   const selectedModel = AI_MODELS.find((m) => m.value === aiModel);
 
   return (
-    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+    <Dialog open={open} onOpenChange={(v) => !v && onCancel()}>
       <DialogContent className="sm:max-w-lg border-none shadow-2xl rounded-3xl p-0 overflow-hidden bg-background">
         <DialogHeader className="pt-6 px-7 pb-0">
           <DialogTitle className="text-xl font-bold tracking-tight">
@@ -356,7 +349,7 @@ export function ConnectDialog({
           <div className="flex items-center gap-3 pt-1">
             <Button
               variant="outline"
-              onClick={onClose}
+              onClick={onCancel}
               disabled={activating}
               className="gap-2 h-11 px-6 rounded-xl font-semibold border-border hover:bg-muted/50 transition-all shadow-sm"
             >

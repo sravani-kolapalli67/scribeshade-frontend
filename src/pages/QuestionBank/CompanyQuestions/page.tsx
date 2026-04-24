@@ -1,4 +1,4 @@
-import { useMemo, useState, useCallback } from "react";
+import { useMemo, useState, useCallback, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { MOCK_COMPANIES, Question } from "../data";
 import { FileText } from "lucide-react";
@@ -22,40 +22,66 @@ const CompanyQuestions = () => {
   const [difficulty, setDifficulty] = useState<string>("all");
   const [industry, setIndustry] = useState<string>("all");
   const [language, setLanguage] = useState<string>("all");
+  const [companyMetaData, setCompanyMetaData] = useState<{
+    name: string;
+  } | null>(null);
 
-  const company = MOCK_COMPANIES.find((c) => c.id === companyId);
+  useEffect(() => {
+    if (companyId) {
+      fetch(`${import.meta.env.VITE_BACKEND_URL}/api/company/${companyId}`)
+        .then((res) => res.json())
+        .then((data) => setCompanyMetaData(data))
+        .catch((err) => console.error("Fetch Metadata Error:", err));
+    }
+  }, [companyId]);
 
-  const fetchQuestions = useCallback(async (params: any) => {
-    if (!company)
-      return {
-        success: false,
-        data: [],
-        pagination: { page: 1, limit: 10, total_pages: 0, total_items: 0 },
-      };
+  const fetchQuestions = useCallback(
+    async (params: any) => {
+      try {
+        if (!companyId) return { success: false, data: [] };
 
-    const search = (params.search || "").toLowerCase();
-    
-    const filtered = company.questions.filter((q) => {
-      const matchesSearch = q.title.toLowerCase().includes(search) || 
-                           q.category.toLowerCase().includes(search);
-      const matchesDifficulty = difficulty === "all" || q.difficulty === difficulty;
-      const matchesIndustry = industry === "all" || q.industry === industry;
-      const matchesLanguage = language === "all" || q.language === language;
-      
-      return matchesSearch && matchesDifficulty && matchesIndustry && matchesLanguage;
-    });
+        const res = await fetch(
+          `${import.meta.env.VITE_BACKEND_URL}/api/qa/company/${companyId}`,
+        );
+        if (!res.ok) throw new Error("Failed to fetch questions");
+        const questions = await res.json();
 
-    return {
-      success: true,
-      data: filtered,
-      pagination: {
-        page: 1,
-        limit: filtered.length || 1,
-        total_pages: 1,
-        total_items: filtered.length,
-      },
-    };
-  }, [company, difficulty, industry, language]);
+        const search = (params.search || "").toLowerCase();
+
+        const filtered = questions.filter((q: any) => {
+          const matchesSearch =
+            (q.ques || "").toLowerCase().includes(search) ||
+            (q.category || "").toLowerCase().includes(search);
+          const matchesDifficulty =
+            difficulty === "all" || q.difficulty === difficulty;
+          const matchesIndustry = industry === "all" || q.industry === industry;
+          const matchesLanguage = language === "all" || q.language === language;
+
+          return (
+            matchesSearch &&
+            matchesDifficulty &&
+            matchesIndustry &&
+            matchesLanguage
+          );
+        });
+
+        return {
+          success: true,
+          data: filtered,
+          pagination: {
+            page: 1,
+            limit: filtered.length || 1,
+            total_pages: 1,
+            total_items: filtered.length,
+          },
+        };
+      } catch (error) {
+        console.error("fetchQuestions Error:", error);
+        return { success: false, data: [] };
+      }
+    },
+    [companyId, difficulty, industry, language],
+  );
 
   const columns: ColumnDef<Question>[] = useMemo(
     () => [
@@ -66,7 +92,7 @@ const CompanyQuestions = () => {
           <div
             onClick={() =>
               navigate(
-                `/questions/company/${company?.id}/question/${row.original.id}`,
+                `/questions/company/${companyId}/question/${row.original.id}`,
               )
             }
             className="flex items-center gap-4 cursor-pointer group"
@@ -75,27 +101,9 @@ const CompanyQuestions = () => {
               <FileText className="w-4 h-4" />
             </div>
             <span className="font-medium text-gray-900 group-hover:text-brand transition-colors">
-              {row.getValue("title")}
+              {(row.original as any).ques}
             </span>
           </div>
-        ),
-      },
-      {
-        accessorKey: "industry",
-        header: "Industry",
-        cell: ({ row }) => (
-          <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700 border border-blue-100">
-            {row.getValue("industry")}
-          </span>
-        ),
-      },
-      {
-        accessorKey: "language",
-        header: "Language",
-        cell: ({ row }) => (
-          <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-brand-muted text-brand-active border border-brand-subtle">
-            {row.getValue("language")}
-          </span>
         ),
       },
       {
@@ -119,14 +127,23 @@ const CompanyQuestions = () => {
           );
         },
       },
+      {
+        accessorKey: "industry",
+        header: "Industry",
+        cell: ({ row }) => (
+          <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700 border border-blue-100">
+            {row.getValue("industry")}
+          </span>
+        ),
+      },
     ],
-    [navigate, company?.id],
+    [navigate, companyId],
   );
 
-  if (!company) {
+  if (!companyId) {
     return (
       <div className="p-6">
-        <h1 className="text-xl font-bold text-red-600">Company not found</h1>
+        <h1 className="text-xl font-bold text-red-600">Company ID missing</h1>
         <button
           onClick={() => navigate("/questions/all")}
           className="text-indigo-600 hover:underline mt-4"
@@ -153,7 +170,7 @@ const CompanyQuestions = () => {
             <BreadcrumbSeparator />
             <BreadcrumbItem>
               <BreadcrumbPage className="font-medium tracking-tight text-gray-900 text-sm">
-                {company.name}
+                {companyMetaData?.name || "Loading..."}
               </BreadcrumbPage>
             </BreadcrumbItem>
           </BreadcrumbList>

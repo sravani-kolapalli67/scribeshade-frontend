@@ -1,8 +1,42 @@
-export type Industry = "DSA" | "Full Stack" | "Data Science" | "DevOps" | "System Design" | "Mobile" | "Cloud";
-export const INDUSTRIES: Industry[] = ["DSA", "Full Stack", "Data Science", "DevOps", "System Design", "Mobile", "Cloud"];
+export type Industry =
+  | "DSA"
+  | "Full Stack"
+  | "Data Science"
+  | "DevOps"
+  | "System Design"
+  | "Mobile"
+  | "Cloud";
+export const INDUSTRIES: Industry[] = [
+  "DSA",
+  "Full Stack",
+  "Data Science",
+  "DevOps",
+  "System Design",
+  "Mobile",
+  "Cloud",
+];
 
-export type Language = "JavaScript" | "TypeScript" | "Python" | "Java" | "C++" | "C" | "C#" | "Go" | "General";
-export const LANGUAGES: Language[] = ["JavaScript", "TypeScript", "Python", "Java", "C++", "C", "C#", "Go", "General"];
+export type Language =
+  | "JavaScript"
+  | "TypeScript"
+  | "Python"
+  | "Java"
+  | "C++"
+  | "C"
+  | "C#"
+  | "Go"
+  | "General";
+export const LANGUAGES: Language[] = [
+  "JavaScript",
+  "TypeScript",
+  "Python",
+  "Java",
+  "C++",
+  "C",
+  "C#",
+  "Go",
+  "General",
+];
 
 export type Question = {
   id: string;
@@ -28,7 +62,8 @@ export const MOCK_COMPANIES: Company[] = [
     id: "google",
     name: "Google",
     questionCount: 45,
-    description: "Questions frequently asked in Google interviews, focusing on DSA and System Design.",
+    description:
+      "Questions frequently asked in Google interviews, focusing on DSA and System Design.",
     questions: [
       {
         id: "g1",
@@ -37,7 +72,8 @@ export const MOCK_COMPANIES: Company[] = [
         industry: "DSA",
         language: "C++",
         category: "Arrays",
-        answer: "Use a Hash Map to store the difference between the target and the current element. As you iterate through the array, if the current element exists in the map, you have found the pair. Space complexity is O(N) and Time complexity is O(N)."
+        answer:
+          "Use a Hash Map to store the difference between the target and the current element. As you iterate through the array, if the current element exists in the map, you have found the pair. Space complexity is O(N) and Time complexity is O(N).",
       },
       {
         id: "g2",
@@ -46,7 +82,8 @@ export const MOCK_COMPANIES: Company[] = [
         industry: "System Design",
         language: "Java",
         category: "Design",
-        answer: "Use a Hash Map paired with a Doubly Linked List. The hash map provides O(1) access to nodes, and the doubly linked list allows O(1) addition and removal of nodes to keep track of the most and least recently used items."
+        answer:
+          "Use a Hash Map paired with a Doubly Linked List. The hash map provides O(1) access to nodes, and the doubly linked list allows O(1) addition and removal of nodes to keep track of the most and least recently used items.",
       },
       {
         id: "g3",
@@ -55,15 +92,17 @@ export const MOCK_COMPANIES: Company[] = [
         industry: "DSA",
         language: "Python",
         category: "Graphs",
-        answer: "Use Breadth-First Search (BFS). Represent words as nodes and add edges if words differ by a single character. Start BFS from the beginword, finding the shortest path to the endword."
-      }
-    ]
+        answer:
+          "Use Breadth-First Search (BFS). Represent words as nodes and add edges if words differ by a single character. Start BFS from the beginword, finding the shortest path to the endword.",
+      },
+    ],
   },
   {
     id: "microsoft",
     name: "Microsoft",
     questionCount: 32,
-    description: "Common Microsoft interview questions, emphasizing problem-solving and string manipulation.",
+    description:
+      "Common Microsoft interview questions, emphasizing problem-solving and string manipulation.",
     questions: [
       {
         id: "m1",
@@ -72,7 +111,8 @@ export const MOCK_COMPANIES: Company[] = [
         industry: "DSA",
         language: "C",
         category: "Linked List",
-        answer: "Maintain three pointers: prev, current, and next. Iterate through the list, storing the next node, pointing current.next to prev, moving prev to current, and current to next. Finally, the new head is prev."
+        answer:
+          "Maintain three pointers: prev, current, and next. Iterate through the list, storing the next node, pointing current.next to prev, moving prev to current, and current to next. Finally, the new head is prev.",
       },
       {
         id: "m2",
@@ -81,15 +121,17 @@ export const MOCK_COMPANIES: Company[] = [
         industry: "DSA",
         language: "TypeScript",
         category: "Arrays",
-        answer: "Sort the intervals based on the start time. Iterate through the intervals, constantly updating the end time of the last merged interval if the current interval overlaps with it."
-      }
-    ]
+        answer:
+          "Sort the intervals based on the start time. Iterate through the intervals, constantly updating the end time of the last merged interval if the current interval overlaps with it.",
+      },
+    ],
   },
   {
     id: "amazon",
     name: "Amazon",
     questionCount: 68,
-    description: "Amazon specific questions mainly focused on Leadership Principles and practical coding algorithms.",
+    description:
+      "Amazon specific questions mainly focused on Leadership Principles and practical coding algorithms.",
     questions: [
       {
         id: "a1",
@@ -98,7 +140,8 @@ export const MOCK_COMPANIES: Company[] = [
         industry: "DSA",
         language: "Go",
         category: "Graphs",
-        answer: "Iterate over the 2D grid. Whenever you find a '1' (land), increment the island count and use DFS or BFS to mark or change all connected '1's to '0's (water) to avoid double counting."
+        answer:
+          "Iterate over the 2D grid. Whenever you find a '1' (land), increment the island count and use DFS or BFS to mark or change all connected '1's to '0's (water) to avoid double counting.",
       },
       {
         id: "a2",
@@ -107,15 +150,17 @@ export const MOCK_COMPANIES: Company[] = [
         industry: "Data Science",
         language: "Python",
         category: "Machine Learning",
-        answer: "Use Collaborative Filtering or Content-Based Filtering. For collaborative filtering, you can use matrix factorization techniques like SVD or neural networks to predict user-item ratings based on historical data."
-      }
-    ]
+        answer:
+          "Use Collaborative Filtering or Content-Based Filtering. For collaborative filtering, you can use matrix factorization techniques like SVD or neural networks to predict user-item ratings based on historical data.",
+      },
+    ],
   },
   {
     id: "meta",
     name: "Meta",
     questionCount: 29,
-    description: "Meta questions, heavily reliant on graph theory and fast-paced algorithmic puzzles.",
+    description:
+      "Meta questions, heavily reliant on graph theory and fast-paced algorithmic puzzles.",
     questions: [
       {
         id: "f1",
@@ -124,7 +169,8 @@ export const MOCK_COMPANIES: Company[] = [
         industry: "DSA",
         language: "JavaScript",
         category: "Strings",
-        answer: "Use two pointers from both ends of the string moving inwards. If you encounter a mismatch, you can either skip the left character or the right character. Check if either resulting substring is a genuine palindrome."
+        answer:
+          "Use two pointers from both ends of the string moving inwards. If you encounter a mismatch, you can either skip the left character or the right character. Check if either resulting substring is a genuine palindrome.",
       },
       {
         id: "f2",
@@ -133,10 +179,11 @@ export const MOCK_COMPANIES: Company[] = [
         industry: "System Design",
         language: "General",
         category: "Networking",
-        answer: "Use WebSockets for real-time bidirectional communication. Implement a message broker like Redis or RabbitMQ for scalability, and store chat history in a database like Cassandra or MongoDB for fast writes and reads."
-      }
-    ]
-  }
+        answer:
+          "Use WebSockets for real-time bidirectional communication. Implement a message broker like Redis or RabbitMQ for scalability, and store chat history in a database like Cassandra or MongoDB for fast writes and reads.",
+      },
+    ],
+  },
 ];
 
 export type UserQuestion = Question & {
@@ -151,8 +198,9 @@ export const USER_QUESTIONS: UserQuestion[] = [
     industry: "DSA",
     language: "JavaScript",
     category: "Trees",
-    answer: "You can reverse a binary tree (also known as inverting it) by recursively swapping the left and right children of every node. If the tree is empty, return null. Otherwise, recursively invert the left subtree, recursively invert the right subtree, and then swap them.",
-    createdAt: "2023-10-25"
+    answer:
+      "You can reverse a binary tree (also known as inverting it) by recursively swapping the left and right children of every node. If the tree is empty, return null. Otherwise, recursively invert the left subtree, recursively invert the right subtree, and then swap them.",
+    createdAt: "2023-10-25",
   },
   {
     id: "u2",
@@ -161,8 +209,9 @@ export const USER_QUESTIONS: UserQuestion[] = [
     industry: "Full Stack",
     language: "JavaScript",
     category: "JavaScript",
-    answer: "The event loop is a mechanism that allows JavaScript to perform non-blocking I/O operations despite being single-threaded. It constantly checks the call stack to see if it's empty, and if so, pushes the first task from the task queue onto the call stack to execute it.",
-    createdAt: "2023-11-02"
+    answer:
+      "The event loop is a mechanism that allows JavaScript to perform non-blocking I/O operations despite being single-threaded. It constantly checks the call stack to see if it's empty, and if so, pushes the first task from the task queue onto the call stack to execute it.",
+    createdAt: "2023-11-02",
   },
   {
     id: "u3",
@@ -171,8 +220,9 @@ export const USER_QUESTIONS: UserQuestion[] = [
     industry: "System Design",
     language: "Go",
     category: "System Design",
-    answer: "A rate limiter can be implemented using various algorithms like Token Bucket, Leaking Bucket, Fixed Window Counter, or Sliding Window Log. The Token Bucket is commonly used, where tokens are added to a bucket at a fixed rate, and each request consumes a token. If the bucket is empty, requests are dropped.",
-    createdAt: "2023-11-15"
+    answer:
+      "A rate limiter can be implemented using various algorithms like Token Bucket, Leaking Bucket, Fixed Window Counter, or Sliding Window Log. The Token Bucket is commonly used, where tokens are added to a bucket at a fixed rate, and each request consumes a token. If the bucket is empty, requests are dropped.",
+    createdAt: "2023-11-15",
   },
   {
     id: "u4",
@@ -232,6 +282,6 @@ private:
 - **Space Complexity**: **O(1)**, as we are only storing the start and end indices of the best result. This is better than the **O(n^2)** space required for the Dynamic Programming approach.
 - **Corner Cases handled**: Empty strings, single-character strings, and strings with all identical characters.
 - **Advanced mention**: If asked about a more optimal solution, you can mention **Manacher's Algorithm**, which solves this in **O(n)** time.`,
-    createdAt: "2024-04-07"
-  }
+    createdAt: "2024-04-07",
+  },
 ];

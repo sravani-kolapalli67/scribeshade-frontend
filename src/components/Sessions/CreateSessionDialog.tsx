@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Dialog,
   DialogContent,
@@ -21,7 +22,6 @@ import { Step4_LanguageAISettings } from "./steps/Step4_LanguageAISettings";
 import { Step5_AutoGenerateAI } from "./steps/Step5_AutoGenerateAI";
 import { Step6_SaveTranscript } from "./steps/Step6_SaveTranscript";
 import { Step7_Review } from "./steps/Step7_Review";
-import { ConnectDialog } from "./ConnectDialog";
 import { type Resume } from "@/components/Resume/ResumeSelector";
 import { type Document } from "@/components/Document/DocumentSelector";
 import { toast } from "sonner";
@@ -49,11 +49,10 @@ const INITIAL_SESSION_DATA = {
 export default function CreateSessionDialog({
   isFree = false,
 }: CreateSessionDialogProps) {
+  const navigate = useNavigate();
   const [open, setOpen] = React.useState(false);
   const [step, setStep] = React.useState<Step>(1);
   const [loading, setLoading] = React.useState(false);
-  const [connectDialogOpen, setConnectDialogOpen] = React.useState(false);
-  const [connectData, setConnectData] = React.useState<any>(null);
   const [createdSessionId, setCreatedSessionId] = React.useState<string | null>(
     null,
   );
@@ -122,19 +121,23 @@ export default function CreateSessionDialog({
       if (response.ok) {
         const newSessionId = result.id || result.sessionId || "";
         setCreatedSessionId(newSessionId);
-        setConnectData({
-          sessionId: newSessionId,
-          companyName: sessionData.companyName,
-          jobTitle: sessionData.jobDescription.slice(0, 60),
-          extraContext: sessionData.instructions,
-          language: sessionData.language,
-          simpleLanguage: sessionData.simpleLanguage,
-          aiModel: sessionData.aiModel,
-        });
         setOpen(false);
         resetDialog();
-        // Open the Connect dialog
-        setConnectDialogOpen(true);
+        // Redirect to ActiveSession page and show ConnectDialog there
+        navigate(`/sessions/${newSessionId}`, {
+          state: {
+            showConnect: true,
+            connectData: {
+              sessionId: newSessionId,
+              companyName: sessionData.companyName,
+              jobTitle: sessionData.jobDescription.slice(0, 60),
+              extraContext: sessionData.instructions,
+              language: sessionData.language,
+              simpleLanguage: sessionData.simpleLanguage,
+              aiModel: sessionData.aiModel,
+            },
+          },
+        });
       } else {
         console.error("Failed to create session:", result.error);
         toast.error(result.error || "Failed to create session");
@@ -294,19 +297,6 @@ export default function CreateSessionDialog({
           </div>
         </DialogContent>
       </Dialog>
-
-      {/* Connect Dialog — appears after session is created */}
-      <ConnectDialog
-        open={connectDialogOpen}
-        onClose={() => setConnectDialogOpen(false)}
-        sessionId={connectData?.sessionId || ""}
-        companyName={connectData?.companyName || ""}
-        jobTitle={connectData?.jobTitle || ""}
-        extraContext={connectData?.extraContext || ""}
-        language={connectData?.language || "English"}
-        simpleLanguage={connectData?.simpleLanguage || false}
-        aiModel={connectData?.aiModel || "Gemini 2.0 Flash"}
-      />
     </>
   );
 }

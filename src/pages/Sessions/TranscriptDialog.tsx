@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useMemo } from "react";
-import { Dialog, DialogContent } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import {
@@ -23,8 +23,10 @@ import { oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
 export interface Message {
   id?: string;
   role: string; // AI_ASSISTANT | USER | INTERVIEWER
-  content: string;
-  timestamp: string; // ISO string
+  content?: string;
+  question?: string;
+  answer?: string;
+  timestamp?: string; // ISO string
 }
 
 interface Interaction {
@@ -53,70 +55,6 @@ export function TranscriptDialog({
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Group messages into interactions (Question + AI Answer)
-  const interactions = useMemo(() => {
-    const result: Interaction[] = [];
-    let currentQuestion = "";
-    let lastTimestamp = "";
-
-    messages.forEach((msg, idx) => {
-      const isAI = msg.role === "AI" || msg.role === "AI_ASSISTANT";
-
-      if (isAI) {
-        const text = msg.content;
-
-        // Find positions using flexible regex (handles various markdown/spacing)
-        const qRegex = /(?:\*\*|###)?\s*Extracted Question\s*:\s*/i;
-        const aRegex = /(?:\*\*|###)?\s*Suggested Answer\s*:\s*/i;
-
-        const qMatch = qRegex.exec(text);
-        const aMatch = aRegex.exec(text);
-
-        let extractedQ = null;
-        let suggestedA = text;
-
-        if (qMatch) {
-          const qStart = qMatch.index + qMatch[0].length;
-          const qEnd = aMatch ? aMatch.index : text.indexOf("\n", qStart);
-          extractedQ = text
-            .slice(qStart, qEnd === -1 ? text.length : qEnd)
-            .replace(/[*#_]+$|^[*#_]+/g, "")
-            .trim();
-        }
-
-        if (aMatch) {
-          suggestedA = text.slice(aMatch.index + aMatch[0].length).trim();
-        }
-
-        result.push({
-          id: msg.id || `int-${idx}`,
-          question:
-            extractedQ || currentQuestion || "Screen Analysis / Manual Trigger",
-          answer: suggestedA,
-          timestamp: msg.timestamp || lastTimestamp,
-        });
-        currentQuestion = ""; // Reset after pairing
-      } else {
-        // Append context from transcribing audio
-        if (currentQuestion) currentQuestion += "\n\n";
-        currentQuestion += msg.content;
-        lastTimestamp = msg.timestamp;
-      }
-    });
-
-    // If there's a leftover question without an AI answer, show it
-    if (currentQuestion) {
-      result.push({
-        id: `unanswered-${Date.now()}`,
-        question: currentQuestion,
-        answer: "", // No AI response yet
-        timestamp: lastTimestamp,
-      });
-    }
-
-    return result;
-  }, [messages]);
-
   // Fetch session details from backend
   useEffect(() => {
     if (isOpen && sessionId) {
@@ -140,6 +78,78 @@ export function TranscriptDialog({
     }
   }, [isOpen, sessionId]);
 
+  // Group messages into interactions (Question + AI Answer)
+  const interactions = useMemo(() => {
+    const result: Interaction[] = [];
+    let currentQuestion = "";
+    let lastTimestamp = "";
+
+    messages.forEach((msg, idx) => {
+      const isAI = msg.role === "AI" || msg.role === "AI_ASSISTANT";
+
+      if (isAI) {
+        // Priority 1: Structured fields from backend
+        if (msg.question || msg.answer) {
+          result.push({
+            id: msg.id || `int-${idx}`,
+            question: msg.question || "Screen Analysis / Manual Trigger",
+            answer: msg.answer || "",
+            timestamp: msg.timestamp || lastTimestamp,
+          });
+        } else {
+          // Priority 2: Backwards compatibility/Legacy regex parsing of content
+          const text = msg.content || "";
+          const qRegex = /(?:\*\*|###)?\s*Extracted Question\s*:\s*/i;
+          const aRegex = /(?:\*\*|###)?\s*Suggested Answer\s*:\s*/i;
+
+          const qMatch = qRegex.exec(text);
+          const aMatch = aRegex.exec(text);
+
+          let extractedQ = null;
+          let suggestedA = text;
+
+          if (qMatch) {
+            const qStart = qMatch.index + qMatch[0].length;
+            const qEnd = aMatch ? aMatch.index : text.indexOf("\n", qStart);
+            extractedQ = text
+              .slice(qStart, qEnd === -1 ? text.length : qEnd)
+              .replace(/[*#_]+$|^[*#_]+/g, "")
+              .trim();
+          }
+
+          if (aMatch) {
+            suggestedA = text.slice(aMatch.index + aMatch[0].length).trim();
+          }
+
+          result.push({
+            id: msg.id || `int-${idx}`,
+            question: extractedQ || currentQuestion || "Screen Analysis / Manual Trigger",
+            answer: suggestedA,
+            timestamp: msg.timestamp || lastTimestamp,
+          });
+        }
+        currentQuestion = ""; // Reset after pairing
+      } else {
+        // Append context from transcribing audio
+        if (currentQuestion) currentQuestion += "\n\n";
+        currentQuestion += msg.content || "";
+        lastTimestamp = msg.timestamp || "";
+      }
+    });
+
+    // If there's a leftover question without an AI answer, show it
+    if (currentQuestion) {
+      result.push({
+        id: `unanswered-${Date.now()}`,
+        question: currentQuestion,
+        answer: "", // No AI response yet
+        timestamp: lastTimestamp,
+      });
+    }
+
+    return result;
+  }, [messages]);
+
   const handleCopy = (id: string, text: string) => {
     navigator.clipboard.writeText(text);
     setCopiedId(id);
@@ -154,11 +164,13 @@ export function TranscriptDialog({
   const downloadTranscript = () => {
     const content = messages
       .map((m) => {
-        const time = new Date(m.timestamp).toLocaleTimeString([], {
-          hour: "2-digit",
-          minute: "2-digit",
-        });
-        return `[${time}] ${m.role === "AI_ASSISTANT" ? "AI Assistant" : "Interviewer"}: ${m.content}`;
+        const time = m.timestamp
+          ? new Date(m.timestamp).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            })
+          : "00:00";
+        return `[${time}] ${m.role === "AI_ASSISTANT" ? "AI Assistant" : "Interviewer"}: ${m.content || ""}`;
       })
       .join("\n\n---\n\n");
 
@@ -173,15 +185,16 @@ export function TranscriptDialog({
     URL.revokeObjectURL(url);
   };
 
+
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="sm:max-w-5xl w-[calc(100%-2rem)] max-h-[90vh] flex flex-col p-10 gap-0 overflow-y-auto border-none shadow-2xl bg-white rounded-3xl focus-visible:outline-none custom-scrollbar">
         {/* HEADER: Reference-Matched Layout */}
         <div className="flex items-center justify-between mb-8">
           <div className="flex items-center gap-4">
-            <h2 className="text-3xl font-bold text-slate-800 tracking-tight">
+            <DialogTitle className="text-3xl font-bold text-slate-800 tracking-tight">
               Transcript
-            </h2>
+            </DialogTitle>
             <Button
               variant="ghost"
               size="icon"
@@ -275,7 +288,8 @@ export function TranscriptDialog({
                 <TabsContent value="transcript" className="mt-0 outline-none">
                   <div className="space-y-6">
                     {interactions.map((interaction) => {
-                      const hasAnswer = interaction.answer.trim().length > 0;
+                      const hasAnswer =
+                        (interaction.answer || "").trim().length > 0;
 
                       return (
                         <div
@@ -309,20 +323,38 @@ export function TranscriptDialog({
                           </div>
 
                           {/* Segment: Question */}
-                          <div className="flex items-start gap-6 mb-8 relative">
-                            <div className="size-8 flex items-center justify-center shrink-0 mt-0.5 rounded-full bg-indigo-50/50">
-                              <MessageCircle className="size-5 text-indigo-500" />
+                          <div className="flex items-start gap-6 mb-10 relative">
+                            <div className="size-8 flex items-center justify-center shrink-0 mt-0.5 rounded-xl bg-indigo-50 border border-indigo-100 shadow-sm">
+                              <MessageCircle className="size-4 text-indigo-500" />
                             </div>
                             <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-2 mb-3">
-                                <span className="text-xs font-black uppercase tracking-widest text-indigo-500">
-                                  Question
+                              <div className="flex items-center gap-3 mb-4">
+                                <span className="text-[10px] font-black uppercase tracking-[0.2em] text-indigo-500/80">
+                                  Interviewer Question
                                 </span>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  onClick={() => handleCopy(interaction.id + "-q", interaction.question)}
+                                  className="h-6 w-6 rounded-lg hover:bg-indigo-50 text-indigo-400 hover:text-indigo-600 transition-all"
+                                >
+                                  {copiedId === interaction.id + "-q" ? (
+                                    <Check className="size-3 text-emerald-500" />
+                                  ) : (
+                                    <Copy className="size-3" />
+                                  )}
+                                </Button>
                               </div>
-                              <div className="bg-indigo-50/30 rounded-2xl p-6 border border-indigo-100/30">
-                                <span className="text-[15px] leading-relaxed text-slate-600 font-medium break-words">
+                              <div
+                                className="text-[15px] leading-relaxed text-slate-700 font-medium prose prose-indigo max-w-none 
+                                    prose-p:mb-4 last:prose-p:mb-0 prose-strong:text-indigo-600 prose-strong:font-bold 
+                                    prose-ul:list-disc prose-ul:pl-6 prose-li:mb-1
+                                    prose-code:text-indigo-600 prose-code:bg-indigo-50 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-md prose-code:before:content-none prose-code:after:content-none
+                                    prose-pre:bg-indigo-50/50 prose-pre:border prose-pre:border-indigo-100/50 prose-pre:rounded-2xl"
+                              >
+                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
                                   {interaction.question}
-                                </span>
+                                </ReactMarkdown>
                               </div>
                             </div>
                           </div>
@@ -334,10 +366,22 @@ export function TranscriptDialog({
                                 <Star className="size-5 text-amber-500 fill-amber-500" />
                               </div>
                               <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-2 mb-4">
-                                  <span className="text-xs font-black uppercase tracking-widest text-brand">
+                                <div className="flex items-center gap-3 mb-4">
+                                  <span className="text-[10px] font-black uppercase tracking-[0.2em] text-brand/80">
                                     Suggested Answer
                                   </span>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    onClick={() => handleCopy(interaction.id + "-a", interaction.answer)}
+                                    className="h-6 w-6 rounded-lg hover:bg-brand/5 text-brand/40 hover:text-brand transition-all"
+                                  >
+                                    {copiedId === interaction.id + "-a" ? (
+                                      <Check className="size-3 text-emerald-500" />
+                                    ) : (
+                                      <Copy className="size-3" />
+                                    )}
+                                  </Button>
                                 </div>
                                 <div
                                   className="text-[15px] leading-relaxed text-slate-700 font-medium prose prose-slate max-w-none 

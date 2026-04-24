@@ -1,6 +1,6 @@
 import { useMemo, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { USER_QUESTIONS, UserQuestion } from "../data";
+import { UserQuestion } from "../data";
 import { FileQuestion, Calendar } from "lucide-react";
 import { ColumnDef } from "@tanstack/react-table";
 import { DataTable } from "@/components/data-table/data-table";
@@ -8,6 +8,7 @@ import { QuestionFilters } from "../components/QuestionFilters";
 
 const UserQuestions = () => {
   const navigate = useNavigate();
+  const userId = localStorage.getItem("userId");
 
   // Filter states
   const [difficulty, setDifficulty] = useState<string>("all");
@@ -16,43 +17,56 @@ const UserQuestions = () => {
 
   const fetchQuestions = useCallback(
     async (params: any) => {
-      const search = (params.search || "").toLowerCase();
+      try {
+        if (!userId) return { success: false, data: [] };
 
-      const filtered = USER_QUESTIONS.filter((q) => {
-        const matchesSearch =
-          q.title.toLowerCase().includes(search) ||
-          q.category.toLowerCase().includes(search);
-        const matchesDifficulty =
-          difficulty === "all" || q.difficulty === difficulty;
-        const matchesIndustry = industry === "all" || q.industry === industry;
-        const matchesLanguage = language === "all" || q.language === language;
-
-        return (
-          matchesSearch &&
-          matchesDifficulty &&
-          matchesIndustry &&
-          matchesLanguage
+        const res = await fetch(
+          `${import.meta.env.VITE_BACKEND_URL}/api/qa/user/${userId}`,
         );
-      });
+        if (!res.ok) throw new Error("Failed to fetch questions");
+        const questions = await res.json();
 
-      return {
-        success: true,
-        data: filtered,
-        pagination: {
-          page: 1,
-          limit: filtered.length || 1,
-          total_pages: 1,
-          total_items: filtered.length,
-        },
-      };
+        const search = (params.search || "").toLowerCase();
+
+        const filtered = questions.filter((q: any) => {
+          const matchesSearch =
+            (q.ques || "").toLowerCase().includes(search) ||
+            (q.category || "").toLowerCase().includes(search);
+          const matchesDifficulty =
+            difficulty === "all" || q.difficulty === difficulty;
+          const matchesIndustry = industry === "all" || q.industry === industry;
+          const matchesLanguage = language === "all" || q.language === language;
+
+          return (
+            matchesSearch &&
+            matchesDifficulty &&
+            matchesIndustry &&
+            matchesLanguage
+          );
+        });
+
+        return {
+          success: true,
+          data: filtered,
+          pagination: {
+            page: 1,
+            limit: filtered.length || 1,
+            total_pages: 1,
+            total_items: filtered.length,
+          },
+        };
+      } catch (error) {
+        console.error("fetchQuestions Error:", error);
+        return { success: false, data: [] };
+      }
     },
-    [difficulty, industry, language],
+    [userId, difficulty, industry, language],
   );
 
-  const columns: ColumnDef<UserQuestion>[] = useMemo(
+  const columns: ColumnDef<any>[] = useMemo(
     () => [
       {
-        accessorKey: "title",
+        accessorKey: "ques",
         header: "Question Title",
         cell: ({ row }) => (
           <div
@@ -64,8 +78,8 @@ const UserQuestions = () => {
             <div className="w-8 h-8 rounded bg-gray-100 border border-gray-200 flex items-center justify-center text-gray-500 group-hover:bg-brand-muted group-hover:text-brand transition-colors shadow-sm">
               <FileQuestion className="w-4 h-4" />
             </div>
-            <span className="font-medium text-gray-900 group-hover:text-brand transition-colors">
-              {row.getValue("title")}
+            <span className="font-medium text-gray-900 group-hover:text-brand transition-colors truncate max-w-md">
+              {row.getValue("ques")}
             </span>
           </div>
         ),
@@ -130,7 +144,7 @@ const UserQuestions = () => {
   return (
     <div className="flex flex-col h-full ">
       <div className="p-6 overflow-x-auto flex-1">
-        <DataTable<UserQuestion, unknown>
+        <DataTable<any, unknown>
           config={{
             enableSearch: true,
             searchPlaceholder: "Search your questions...",

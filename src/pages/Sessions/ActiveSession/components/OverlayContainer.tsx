@@ -30,7 +30,7 @@ export const OverlayContainer = ({
           <ResizablePanel defaultSize={40} minSize={10}>
             <div
               className={cn(
-                "h-full relative overflow-hidden transition-all duration-500",
+                "h-full relative overflow-hidden transition-all duration-500 flex flex-col",
                 "bg-white/10 text-white border border-white/20",
               )}
             >
@@ -55,7 +55,7 @@ export const OverlayContainer = ({
           <ResizablePanel defaultSize={60} minSize={10}>
             <div
               className={cn(
-                "h-full relative overflow-hidden transition-all duration-500",
+                "h-full relative overflow-hidden transition-all duration-500 flex flex-col",
                 "bg-white/10 text-white border border-white/20",
               )}
             >

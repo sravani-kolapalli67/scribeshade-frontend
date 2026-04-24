@@ -142,16 +142,16 @@
 ---break--- */
 
 @theme inline {
-  --color-brand: #458FFF;
-  --color-brand-muted: #F0F6FF;
-  --color-brand-subtle: #DBEAFF;
-  --color-brand-hover: #1A73FF;
-  --color-brand-active: #0066CC;
+  --color-brand: #458fff;
+  --color-brand-muted: #f0f6ff;
+  --color-brand-subtle: #dbeaff;
+  --color-brand-hover: #1a73ff;
+  --color-brand-active: #0066cc;
   --color-brand-text: #003366;
-  --color-light-code-bg: #FAFCFF;
-  --color-light-code-header: #F1F5F9;
-  --color-light-code-text: #1E293B;
-  --color-light-code-border: #E2E8F0;
+  --color-light-code-bg: #fafcff;
+  --color-light-code-header: #f1f5f9;
+  --color-light-code-text: #1e293b;
+  --color-light-code-border: #e2e8f0;
   --font-sans: "Geist Variable", sans-serif;
 
   --color-sidebar-ring: var(--sidebar-ring);
@@ -243,7 +243,9 @@
 
 @utility border-glow {
   border: 1px solid var(--color-brand);
-  box-shadow: inset 0 0 10px var(--color-brand-glow), 0 0 15px var(--color-brand-glow);
+  box-shadow:
+    inset 0 0 10px var(--color-brand-glow),
+    0 0 15px var(--color-brand-glow);
 }
 
 @utility no-scrollbar {
@@ -261,8 +263,10 @@
   * {
     @apply border-border outline-ring/50;
   }
-  body {
-    @apply bg-background text-foreground;
+  body,
+  html {
+    @apply bg-background text-foreground overflow-x-hidden;
+    width: 100%;
   }
   html {
     @apply font-sans;

@@ -9,22 +9,32 @@ const AllQuestions = () => {
   const navigate = useNavigate();
 
   const fetchCompanies = async (params: any) => {
-    const search = (params.search || "").toLowerCase();
-    const filtered = MOCK_COMPANIES.filter(
-      (c) =>
-        c.name.toLowerCase().includes(search) ||
-        c.description.toLowerCase().includes(search),
-    );
-    return {
-      success: true,
-      data: filtered,
-      pagination: {
-        page: 1,
-        limit: filtered.length || 1,
-        total_pages: 1,
-        total_items: filtered.length,
-      },
-    };
+    try {
+      const res = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/company`);
+      if (!res.ok) throw new Error("Failed to fetch companies");
+      const companies = await res.json();
+
+      const search = (params.search || "").toLowerCase();
+      const filtered = companies.filter(
+        (c: any) =>
+          c.name.toLowerCase().includes(search) ||
+          (c.description && c.description.toLowerCase().includes(search)),
+      );
+
+      return {
+        success: true,
+        data: filtered,
+        pagination: {
+          page: 1,
+          limit: filtered.length || 1,
+          total_pages: 1,
+          total_items: filtered.length,
+        },
+      };
+    } catch (error) {
+      console.error("fetchCompanies Error:", error);
+      return { success: false, data: [] };
+    }
   };
 
   const columns: ColumnDef<Company>[] = useMemo(
@@ -47,22 +57,16 @@ const AllQuestions = () => {
         ),
       },
       {
-        accessorKey: "description",
-        header: "Description",
-        cell: ({ row }) => (
-          <span className="text-gray-600 text-sm max-w-xl truncate block">
-            {row.getValue("description")}
-          </span>
-        ),
-      },
-      {
         accessorKey: "questionCount",
         header: "Available Questions",
-        cell: ({ row }) => (
-          <span className="inline-flex items-center justify-center px-3 py-1 text-xs font-semibold rounded-full bg-brand-muted text-brand-active border border-brand-subtle shadow-sm">
-            {row.getValue("questionCount")} Questions
-          </span>
-        ),
+        cell: ({ row }) => {
+          const count = (row.original as any)._count?.questions || 0;
+          return (
+            <span className="inline-flex items-center justify-center px-3 py-1 text-xs font-semibold rounded-full bg-brand-muted text-brand-active border border-brand-subtle shadow-sm">
+              {count} Questions
+            </span>
+          );
+        },
       },
     ],
     [navigate],

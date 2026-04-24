@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect } from "react";
 
 interface UseDeepgramProps {
   apiKey: string;
@@ -7,9 +7,14 @@ interface UseDeepgramProps {
   inputStream?: MediaStream | null;
 }
 
-export const useDeepgram = ({ apiKey, model = 'nova-3', onTranscript, inputStream }: UseDeepgramProps) => {
-  const [transcript, setTranscript] = useState('');
-  const [interimTranscript, setInterimTranscript] = useState('');
+export const useDeepgram = ({
+  apiKey,
+  model = "nova-3",
+  onTranscript,
+  inputStream,
+}: UseDeepgramProps) => {
+  const [transcript, setTranscript] = useState("");
+  const [interimTranscript, setInterimTranscript] = useState("");
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -21,7 +26,7 @@ export const useDeepgram = ({ apiKey, model = 'nova-3', onTranscript, inputStrea
   const ownsStreamRef = useRef(false);
 
   const startTranscription = useCallback(async () => {
-    if (isTranscribing || isStartingRef.current) return;
+    if (isTranscribing || isStartingRef.current || socketRef.current) return;
 
     try {
       isStartingRef.current = true;
@@ -30,44 +35,53 @@ export const useDeepgram = ({ apiKey, model = 'nova-3', onTranscript, inputStrea
 
       let stream: MediaStream;
       if (inputStream) {
-        stream = inputStream;
-        ownsStreamRef.current = false;
-        // Verify audio tracks exist in the provided stream
-        if (stream.getAudioTracks().length === 0) {
-          // We don't throw here to avoid crashing, but we won't get audio if shared without audio
-          console.warn('Deepgram: Provided inputStream has no audio tracks.');
+        // Create a new stream with only audio tracks to avoid MediaRecorder issues with video
+        const audioTracks = inputStream.getAudioTracks();
+        if (audioTracks.length === 0) {
+          console.error(
+            "Deepgram: No audio tracks found in provided inputStream.",
+          );
+          setError("No audio detected in share. Did you check 'Share audio'?");
+          setIsConnecting(false);
+          isStartingRef.current = false;
+          return;
         }
+        stream = new MediaStream(audioTracks);
+        ownsStreamRef.current = false;
       } else {
-        stream = await navigator.mediaDevices.getUserMedia({ 
-          audio: { 
-            echoCancellation: true, 
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
             noiseSuppression: true,
-            sampleRate: 16000 
-          } 
+            sampleRate: 16000,
+          },
         });
         ownsStreamRef.current = true;
       }
-      
+
       streamRef.current = stream;
 
-      const mediaRecorder = new MediaRecorder(stream, { 
-        mimeType: 'audio/webm;codecs=opus' 
+      const mediaRecorder = new MediaRecorder(stream, {
+        mimeType: "audio/webm;codecs=opus",
       });
       mediaRecorderRef.current = mediaRecorder;
 
-      const socket = new WebSocket(
-        `wss://api.deepgram.com/v1/listen?model=${model}&punctuate=true&interim_results=true&language=en`, 
-        ['token', apiKey]
-      );
+      const url = `wss://api.deepgram.com/v1/listen?model=${model}&punctuate=true&interim_results=true&language=en&smart_format=true&endpointing=300`;
+
+      const socket = new WebSocket(url, ["token", apiKey]);
       socketRef.current = socket;
 
       socket.onopen = () => {
+        if (!mediaRecorderRef.current || socket !== socketRef.current) {
+          socket.close();
+          return;
+        }
         mediaRecorder.ondataavailable = (event) => {
           if (event.data.size > 0 && socket.readyState === WebSocket.OPEN) {
             socket.send(event.data);
           }
         };
-        mediaRecorder.start(250);  // 250ms chunks for low latency
+        mediaRecorder.start(250);
         setIsTranscribing(true);
         setIsConnecting(false);
         isStartingRef.current = false;
@@ -75,90 +89,109 @@ export const useDeepgram = ({ apiKey, model = 'nova-3', onTranscript, inputStrea
       };
 
       socket.onmessage = (event) => {
+        if (socket !== socketRef.current) return;
         const data = JSON.parse(event.data);
-        if (data.type === 'Results' && data.channel?.alternatives?.[0]?.transcript) {
-          const newText = data.channel.alternatives[0].transcript;
+
+        if (data.type === "Results" && data.channel?.alternatives?.[0]) {
+          const alternative = data.channel.alternatives[0];
+          const newText = alternative.transcript;
           const isFinal = data.is_final;
 
           if (isFinal) {
-            setTranscript((prev) => (prev + ' ' + newText).trim());
-            setInterimTranscript('');
-          } else {
+            if (newText.trim()) {
+              setTranscript((prev) => (prev + " " + newText).trim());
+            }
+            setInterimTranscript("");
+          } else if (newText) {
             setInterimTranscript(newText);
           }
 
-          if (onTranscript) {
+          if (onTranscript && (newText.trim() || !isFinal)) {
             onTranscript(newText, isFinal);
           }
         }
       };
 
       socket.onerror = (err) => {
-        console.error('Deepgram Socket Error:', err);
-        setError('Socket error');
+        if (socket !== socketRef.current) return;
+        console.error("Deepgram Socket Error:", err);
+        setError("Connection error occurred");
         setIsConnecting(false);
         isStartingRef.current = false;
+        setIsTranscribing(false);
       };
 
       socket.onclose = () => {
+        if (socket !== socketRef.current) return;
         setIsTranscribing(false);
         setIsConnecting(false);
         isStartingRef.current = false;
-        if (mediaRecorder.state === 'recording') {
-            mediaRecorder.stop();
+        if (mediaRecorder.state === "recording") {
+          mediaRecorder.stop();
         }
       };
     } catch (err) {
-      console.error('Deepgram Permission Error:', err);
-      setError((err as Error).message);
-      setIsConnecting(false);
-      isStartingRef.current = false;
+      if (isStartingRef.current) {
+        console.error("Deepgram Error:", err);
+        setError((err as Error).message);
+        setIsConnecting(false);
+        isStartingRef.current = false;
+        setIsTranscribing(false);
+      }
     }
   }, [apiKey, model, isTranscribing, onTranscript, inputStream]);
 
   const stopTranscription = useCallback(() => {
     isStartingRef.current = false;
     if (socketRef.current) {
-        if (socketRef.current.readyState === WebSocket.OPEN) {
-            socketRef.current.send(JSON.stringify({ type: 'CloseStream' }));
-        }
-        socketRef.current.close();
-        socketRef.current = null;
+      if (socketRef.current.readyState === WebSocket.OPEN) {
+        socketRef.current.send(JSON.stringify({ type: "CloseStream" }));
+      }
+      socketRef.current.close();
+      socketRef.current = null;
     }
-    if (mediaRecorderRef.current?.state === 'recording') {
+    if (mediaRecorderRef.current?.state === "recording") {
       mediaRecorderRef.current.stop();
     }
     mediaRecorderRef.current = null;
-    
-    // Only stop tracks if we own the stream (i.e., we called getUserMedia)
+
     if (streamRef.current && ownsStreamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current.getTracks().forEach((track) => track.stop());
     }
     streamRef.current = null;
-    
+
     setIsTranscribing(false);
     setIsConnecting(false);
   }, []);
 
   const clearTranscript = useCallback(() => {
-    setTranscript('');
-    setInterimTranscript('');
+    setTranscript("");
+    setInterimTranscript("");
   }, []);
+
+  // Handle inputStream changes - stop old transcription and start new one
+  useEffect(() => {
+    if (inputStream && isTranscribing) {
+      stopTranscription();
+      // startTranscription will be called by the outer useEffect in page.tsx
+      // but we need to ensure it's not blocked by stale state
+    }
+  }, [inputStream, stopTranscription]);
 
   useEffect(() => {
     return () => {
-        stopTranscription();
+      stopTranscription();
     };
   }, [stopTranscription]);
 
-  return { 
-    transcript, 
-    interimTranscript, 
-    isTranscribing, 
+  return {
+    transcript,
+    interimTranscript,
+    isTranscribing,
     isConnecting,
-    error, 
-    startTranscription, 
+    error,
+    startTranscription,
     stopTranscription,
-    clearTranscript 
+    clearTranscript,
   };
 };

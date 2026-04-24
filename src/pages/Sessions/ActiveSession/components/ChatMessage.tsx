@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Message } from "../Transcript";
 import { cn } from "@/lib/utils";
-import { Copy, Check } from "lucide-react";
+import { Copy, Check, User } from "lucide-react";
 
 interface ChatMessageProps {
   message: Message;
@@ -35,15 +35,24 @@ function Bot(props: any) {
   );
 }
 
-const CodeBlock = ({ children, isFullscreen, language }: { children: any; isFullscreen: boolean; language?: string }) => {
+const CodeBlock = ({
+  children,
+  isFullscreen,
+  language,
+}: {
+  children: any;
+  isFullscreen: boolean;
+  language?: string;
+}) => {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = () => {
     // Extract text from children
-    const text = children?.[0]?.props?.children || children?.props?.children || children;
-    const finalContent = Array.isArray(text) ? text.join('') : text;
+    const text =
+      children?.[0]?.props?.children || children?.props?.children || children;
+    const finalContent = Array.isArray(text) ? text.join("") : text;
 
-    if (typeof finalContent === 'string') {
+    if (typeof finalContent === "string") {
       navigator.clipboard.writeText(finalContent);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
@@ -51,28 +60,38 @@ const CodeBlock = ({ children, isFullscreen, language }: { children: any; isFull
   };
 
   return (
-    <div className={cn(
+    <div
+      className={cn(
         "rounded-xl overflow-hidden mb-6 border",
-        isFullscreen ? "bg-black/40 border-white/10" : "bg-slate-50 border-slate-200"
-    )}>
+        isFullscreen
+          ? "bg-black/40 border-white/10"
+          : "bg-slate-50 border-slate-200",
+      )}
+    >
       {/* Code Header */}
-      <div className={cn(
-        "px-4 py-2 flex items-center justify-between border-b",
-        isFullscreen ? "bg-white/5 border-white/10" : "bg-slate-100 border-slate-200"
-      )}>
-        <span className={cn(
+      <div
+        className={cn(
+          "px-4 py-2 flex items-center justify-between border-b",
+          isFullscreen
+            ? "bg-white/5 border-white/10"
+            : "bg-slate-100 border-slate-200",
+        )}
+      >
+        <span
+          className={cn(
             "text-[10px] font-bold uppercase tracking-widest",
-            isFullscreen ? "text-slate-400" : "text-slate-500"
-        )}>
-          {language || 'Code'}
+            isFullscreen ? "text-slate-400" : "text-slate-500",
+          )}
+        >
+          {language || "Code"}
         </span>
         <button
           onClick={handleCopy}
           className={cn(
             "flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] font-bold transition-all active:scale-95",
-            isFullscreen 
-                ? "bg-white/10 hover:bg-white/20 text-white" 
-                : "bg-white hover:bg-slate-50 text-slate-600 shadow-sm border border-slate-200"
+            isFullscreen
+              ? "bg-white/10 hover:bg-white/20 text-white"
+              : "bg-white hover:bg-slate-50 text-slate-600 shadow-sm border border-slate-200",
           )}
         >
           {copied ? (
@@ -88,12 +107,14 @@ const CodeBlock = ({ children, isFullscreen, language }: { children: any; isFull
           )}
         </button>
       </div>
-      
+
       {/* Code Content */}
-      <pre className={cn(
-        "p-4 m-0 overflow-x-auto text-[13px] font-mono leading-relaxed",
-        isFullscreen ? "text-white" : "text-slate-800"
-      )}>
+      <pre
+        className={cn(
+          "p-4 m-0 overflow-x-auto text-[13px] font-mono leading-relaxed",
+          isFullscreen ? "text-white" : "text-slate-800",
+        )}
+      >
         {children}
       </pre>
     </div>
@@ -108,8 +129,15 @@ export const ChatMessage = ({
   return (
     <div className="mb-6 animate-in fade-in slide-in-from-bottom-2">
       <div className="flex items-center gap-2 mb-2">
-        <div className="h-6 w-6 rounded-md bg-brand/10 flex items-center justify-center">
-          <Bot className="h-3.5 w-3.5 text-brand" />
+        <div className={cn(
+          "h-6 w-6 rounded-md flex items-center justify-center",
+          message.sender === "User" ? "bg-slate-500/10" : "bg-brand/10"
+        )}>
+          {message.sender === "User" ? (
+            <User className="h-3.5 w-3.5 text-slate-500" />
+          ) : (
+            <Bot className="h-3.5 w-3.5 text-brand" />
+          )}
         </div>
         <span
           className={cn(
@@ -117,7 +145,7 @@ export const ChatMessage = ({
             isFullscreen ? "text-slate-300" : "text-slate-400",
           )}
         >
-          AI Assistant
+          {message.sender === "User" ? "You" : "AI Assistant"}
         </span>
       </div>
       <div
@@ -133,35 +161,38 @@ export const ChatMessage = ({
           "[&_a]:text-brand [&_a]:underline [&_h1]:text-white [&_h2]:text-white [&_h3]:text-white",
         )}
       >
-        <ReactMarkdown 
-            remarkPlugins={[remarkGfm]}
-            components={{
-                pre: ({ children }) => {
-                    const codeElement = children as any;
-                    const language = codeElement?.props?.className?.replace('language-', '') || '';
-                    return (
-                        <CodeBlock isFullscreen={isFullscreen} language={language}>
-                            {children}
-                        </CodeBlock>
-                    );
-                },
-                code: ({ node, inline, children, ...props }: any) => {
-                    if (inline) {
-                        return (
-                            <code 
-                                className={cn(
-                                    "px-1.5 py-0.5 rounded-md text-[13px] font-mono",
-                                    isFullscreen ? "bg-white/10 text-brand" : "bg-slate-100 text-brand"
-                                )} 
-                                {...props}
-                            >
-                                {children}
-                            </code>
-                        );
-                    }
-                    return <code {...props}>{children}</code>;
-                }
-            }}
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          components={{
+            pre: ({ children }) => {
+              const codeElement = children as any;
+              const language =
+                codeElement?.props?.className?.replace("language-", "") || "";
+              return (
+                <CodeBlock isFullscreen={isFullscreen} language={language}>
+                  {children}
+                </CodeBlock>
+              );
+            },
+            code: ({ node, inline, children, ...props }: any) => {
+              if (inline) {
+                return (
+                  <code
+                    className={cn(
+                      "px-1.5 py-0.5 rounded-md text-[13px] font-mono",
+                      isFullscreen
+                        ? "bg-white/10 text-brand"
+                        : "bg-slate-100 text-brand",
+                    )}
+                    {...props}
+                  >
+                    {children}
+                  </code>
+                );
+              }
+              return <code {...props}>{children}</code>;
+            },
+          }}
         >
           {message.text}
         </ReactMarkdown>

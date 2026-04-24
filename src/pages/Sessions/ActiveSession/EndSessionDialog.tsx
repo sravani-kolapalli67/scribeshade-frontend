@@ -30,12 +30,14 @@ export function EndSessionDialog({
   const [option, setOption] = React.useState<"exit" | "end">("exit");
   const [isLoading, setIsLoading] = React.useState(false);
 
-  console.log(transcript);
-
   const handleConfirm = async () => {
     if (option === "end") {
       setIsLoading(true);
       try {
+        const aiUsage = parseInt(
+          localStorage.getItem(`aiUsage_${sessionId}`) || "0",
+          10,
+        );
         const response = await fetch(
           `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionId}/deactivate`,
           {
@@ -43,11 +45,13 @@ export function EndSessionDialog({
             headers: {
               "Content-Type": "application/json",
             },
-            body: JSON.stringify({ transcript }),
+            body: JSON.stringify({ transcript, aiUsage }),
           },
         );
         if (!response.ok) {
           console.error("Failed to deactivate session");
+        } else {
+          localStorage.removeItem(`aiUsage_${sessionId}`);
         }
       } catch (error) {
         console.error("Error deactivating session:", error);

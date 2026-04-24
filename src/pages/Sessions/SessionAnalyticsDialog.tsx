@@ -33,8 +33,10 @@ import {
 interface Message {
   id?: string;
   role: string;
-  content: string;
-  timestamp: string;
+  content?: string;
+  question?: string;
+  answer?: string;
+  timestamp?: string;
 }
 
 interface SessionAnalyticsDialogProps {
@@ -100,15 +102,22 @@ export function SessionAnalyticsDialog({
 
     // Calculate duration
     const timestamps = messages
-      .map((m) => new Date(m.timestamp).getTime())
+      .map((m) => (m.timestamp ? new Date(m.timestamp).getTime() : NaN))
       .filter((t) => !isNaN(t));
-    const startTime = Math.min(...timestamps);
-    const endTime = Math.max(...timestamps);
-    const durationMs = endTime - startTime;
-    const durationMin = Math.round(durationMs / 60000);
+    
+    let durationMin: string | number = "< 1";
+    if (timestamps.length > 0) {
+      const startTime = Math.min(...timestamps);
+      const endTime = Math.max(...timestamps);
+      const durationMs = endTime - startTime;
+      durationMin = Math.round(durationMs / 60000) || "< 1";
+    }
 
     // Calculate average response length
-    const totalChars = aiMessages.reduce((acc, m) => acc + m.content.length, 0);
+    const totalChars = aiMessages.reduce(
+      (acc, m) => acc + (m.answer?.length || m.content?.length || 0),
+      0,
+    );
     const avgChars = aiMessages.length
       ? Math.round(totalChars / aiMessages.length)
       : 0;
@@ -116,7 +125,10 @@ export function SessionAnalyticsDialog({
     // Chart data: Interactions over time (bucketed by minute)
     const chartDataMap: Record<string, number> = {};
     messages.forEach((m) => {
+      if (!m.timestamp) return;
       const date = new Date(m.timestamp);
+      if (isNaN(date.getTime())) return;
+
       const timeKey = date.toLocaleTimeString([], {
         hour: "2-digit",
         minute: "2-digit",
@@ -135,7 +147,7 @@ export function SessionAnalyticsDialog({
       totalMessages: messages.length,
       aiResponses: aiMessages.length,
       questions: interviewerMessages.length,
-      duration: durationMin || "< 1",
+      duration: durationMin,
       avgResponseLength: avgChars,
       aiUsage: session?.aiUsage || 0,
       chartData,

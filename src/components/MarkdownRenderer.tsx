@@ -11,7 +11,7 @@ interface CodeBlockProps {
 
 const CodeBlock = ({ children, className }: CodeBlockProps) => {
   const [copied, setCopied] = useState(false);
-  
+
   // Extract language from className (e.g., "language-js")
   const language = className ? className.replace(/language-/, "") : "code";
 
@@ -48,7 +48,9 @@ const CodeBlock = ({ children, className }: CodeBlockProps) => {
           ) : (
             <>
               <Copy className="w-3.5 h-3.5" />
-              <span className="text-[10px] font-bold uppercase tracking-wider">COPY</span>
+              <span className="text-[10px] font-bold uppercase tracking-wider">
+                COPY
+              </span>
             </>
           )}
         </Button>
@@ -67,7 +69,10 @@ interface MarkdownRendererProps {
   className?: string;
 }
 
-export const MarkdownRenderer = ({ content, className = "" }: MarkdownRendererProps) => {
+export const MarkdownRenderer = ({
+  content,
+  className = "",
+}: MarkdownRendererProps) => {
   return (
     <div className={`markdown-content ${className}`}>
       <ReactMarkdown
@@ -89,27 +94,63 @@ export const MarkdownRenderer = ({ content, className = "" }: MarkdownRendererPr
             );
           },
           // Custom heading styles
-          h1: ({ children }) => <h1 className="text-2xl font-bold mt-8 mb-4 text-gray-900 border-b border-gray-100 pb-2">{children}</h1>,
-          h2: ({ children }) => <h2 className="mt-8 mb-4 text-gray-900 uppercase tracking-wide text-sm font-bold">{children}</h2>,
-          h3: ({ children }) => <h3 className="text-lg mt-6 mb-3 text-gray-900 font-bold">{children}</h3>,
+          h1: ({ children }) => (
+            <h1 className="text-2xl font-bold mt-8 mb-4 text-gray-900 border-b border-gray-100 pb-2">
+              {children}
+            </h1>
+          ),
+          h2: ({ children }) => (
+            <h2 className="mt-8 mb-4 text-gray-900 uppercase tracking-wide text-sm font-bold">
+              {children}
+            </h2>
+          ),
+          h3: ({ children }) => (
+            <h3 className="text-lg mt-6 mb-3 text-gray-900 font-bold">
+              {children}
+            </h3>
+          ),
           // Lists
-          ul: ({ children }) => <ul className="list-disc pl-6 my-4 space-y-2 text-gray-700">{children}</ul>,
-          ol: ({ children }) => <ol className="list-decimal pl-6 my-4 space-y-2 text-gray-700">{children}</ol>,
-          li: ({ children }) => <li className="text-base text-gray-700 font-medium">{children}</li>,
+          ul: ({ children }) => (
+            <ul className="list-disc pl-6 my-4 space-y-2 text-gray-700">
+              {children}
+            </ul>
+          ),
+          ol: ({ children }) => (
+            <ol className="list-decimal pl-6 my-4 space-y-2 text-gray-700">
+              {children}
+            </ol>
+          ),
+          li: ({ children }) => (
+            <li className="text-base text-gray-700 font-medium">{children}</li>
+          ),
           // Paragraphs
-          p: ({ children }) => <p className="mb-4 text-gray-700 leading-relaxed text-base font-medium">{children}</p>,
+          p: ({ children }) => (
+            <p className="mb-4 text-gray-700 leading-relaxed text-base font-medium">
+              {children}
+            </p>
+          ),
           // Tables
           table: ({ children }) => (
             <div className="overflow-x-auto my-6 rounded-xl border border-gray-200 shadow-sm">
               <table className="w-full text-sm text-left">{children}</table>
             </div>
           ),
-          thead: ({ children }) => <thead className="bg-gray-50 border-b border-gray-200 text-xs font-bold text-gray-900 uppercase">{children}</thead>,
+          thead: ({ children }) => (
+            <thead className="bg-gray-50 border-b border-gray-200 text-xs font-bold text-gray-900 uppercase">
+              {children}
+            </thead>
+          ),
           th: ({ children }) => <th className="px-6 py-3">{children}</th>,
-          td: ({ children }) => <td className="px-6 py-4 border-b border-gray-50">{children}</td>,
+          td: ({ children }) => (
+            <td className="px-6 py-4 border-b border-gray-50">{children}</td>
+          ),
           // Bold/Italic
-          strong: ({ children }) => <strong className="font-bold text-gray-900">{children}</strong>,
-          em: ({ children }) => <em className="italic text-gray-700 opacity-90">{children}</em>,
+          strong: ({ children }) => (
+            <strong className="font-bold text-gray-900">{children}</strong>
+          ),
+          em: ({ children }) => (
+            <em className="italic text-gray-700 opacity-90">{children}</em>
+          ),
           // Horizontal rules
           hr: () => <hr className="my-8 border-gray-100" />,
         }}

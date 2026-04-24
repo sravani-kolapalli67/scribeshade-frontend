@@ -1,10 +1,11 @@
 "use client";
 
 import { useState, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
 import { ColumnDef } from "@tanstack/react-table";
 import { DataTable } from "@/components/data-table/data-table";
 import { Button } from "@/components/ui/button";
-import { Trash2, FileText, BarChart3 } from "lucide-react";
+import { Trash2, FileText, BarChart3, Play } from "lucide-react";
 import { TranscriptDialog } from "./TranscriptDialog";
 import { SessionAnalyticsDialog } from "./SessionAnalyticsDialog";
 import type { ExportableData } from "@/components/data-table/utils/export-utils";
@@ -26,6 +27,8 @@ interface Session extends ExportableData {
   free: boolean;
   aiUsage?: number;
   status?: "Ended" | "Active";
+  isActive?: boolean;
+  endedAt?: string | null;
   createdAt: string;
   updatedAt: string;
   autoGenerateResponse: boolean;
@@ -33,6 +36,7 @@ interface Session extends ExportableData {
 }
 
 export default function Sessions() {
+  const navigate = useNavigate();
   const userId = localStorage.getItem("userId");
   const [refreshKey, setRefreshKey] = useState(0);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
@@ -130,7 +134,9 @@ export default function Sessions() {
         header: "Company Name",
         cell: ({ row }) => (
           <span className="font-bold text-foreground truncate max-w-48 block">
-            {row.getValue("companyName") || (row.original as any).company?.name || ""}
+            {row.getValue("companyName") ||
+              (row.original as any).company?.name ||
+              ""}
           </span>
         ),
       },
@@ -173,6 +179,32 @@ export default function Sessions() {
         header: "Actions",
         cell: ({ row }) => (
           <div className="flex items-center justify-end gap-2 pr-2">
+            {!row.original.endedAt && (
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => {
+                  navigate(`/sessions/${row.original.id}`, {
+                    state: {
+                      showConnect: true,
+                      connectData: {
+                        sessionId: row.original.id,
+                        companyName:
+                          row.original.companyName ||
+                          (row.original as any).company?.name,
+                        jobTitle: row.original.jobDescription,
+                        language: "English",
+                        simpleLanguage: false,
+                        aiModel: "Gemini 2.0 Flash",
+                      },
+                    },
+                  });
+                }}
+                className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+              >
+                <Play className="h-4 w-4" />
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="icon"
@@ -180,7 +212,8 @@ export default function Sessions() {
                 setSelectedSessionForAnalytics(row.original);
                 setIsAnalyticsDialogOpen(true);
               }}
-              className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+              className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50 disabled:pointer-events-none"
+              disabled={!row.original.endedAt}
             >
               <BarChart3 className="h-4 w-4" />
             </Button>
@@ -191,7 +224,8 @@ export default function Sessions() {
                 setSelectedSessionId(row.original.id);
                 setIsTranscriptDialogOpen(true);
               }}
-              className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+              className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50 disabled:pointer-events-none"
+              disabled={!row.original.endedAt}
             >
               <FileText className="h-4 w-4" />
             </Button>

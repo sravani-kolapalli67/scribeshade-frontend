@@ -1,128 +1,208 @@
-import { ChevronRight, FileText } from "lucide-react";
+"use client";
+
+import { useState, useCallback, useMemo } from "react";
+import { ColumnDef } from "@tanstack/react-table";
+import { DataTable } from "@/components/data-table/data-table";
+import { DataTableColumnHeader } from "@/components/data-table/column-header";
+import type { ExportableData } from "@/components/data-table/utils/export-utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { DataTable } from "@/components/data-table/data-table";
-import { type ColumnDef } from "@tanstack/react-table";
 import { Link } from "react-router-dom";
+import { ChevronRight, FileText, Calendar, Sparkles } from "lucide-react";
 
-type AIProjectData = {
+interface ProjectRecord extends ExportableData {
   id: string;
-  resume: string;
   position: string;
   jobDescription: string;
-} & Record<string, any>;
-
-const MOCK_PROJECTS: AIProjectData[] = [
-  {
-    id: "1",
-    resume: "Frontend Developer Resume",
-    position: "Senior Frontend Engineer",
-    jobDescription:
-      "Build interactive UI using React, Next.js, and Tailwind CSS. Focus on performance and accessibility.",
-  },
-  {
-    id: "2",
-    resume: "Fullstack Resume",
-    position: "Software Engineer",
-    jobDescription:
-      "Develop full-stack web applications. Experience with Node.js, Express, and PostgreSQL required.",
-  },
-];
+  resumeId: string | null;
+  projects: any[];
+  userId: string;
+  createdAt: string;
+}
 
 export function AIProjectsTable() {
-  const getColumns = (): ColumnDef<AIProjectData, any>[] => [
-    {
-      accessorKey: "resume",
-      header: "Resume",
-      cell: ({ row }) => (
-        <div className="flex items-center gap-3">
-          <div className="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
-            <FileText className="h-4 w-4 text-primary" />
-          </div>
-          <span className="font-medium truncate max-w-[200px]">
-            {row.original.resume}
-          </span>
-        </div>
-      ),
-    },
-    {
-      accessorKey: "position",
-      header: "Position",
-      cell: ({ row }) => (
-        <Badge
-          variant="secondary"
-          className="px-2.5 py-1 rounded-md font-medium text-xs bg-secondary/50 hover:bg-secondary/80 transition-colors border-none"
-        >
-          {row.original.position}
-        </Badge>
-      ),
-    },
-    {
-      id: "actions",
-      header: () => <div className="text-right w-full pr-12">Projects</div>,
-      cell: ({ row }) => (
-        <div className="flex justify-end pr-2">
-          <Link to={`/ai-projects/${row.original.id}`}>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-24 rounded-lg hover:bg-primary hover:text-primary-foreground hover:shadow-md transition-all"
-            >
-              3 Projects <ChevronRight className="h-4 w-4" />
-            </Button>
-          </Link>
-        </div>
-      ),
-      enableSorting: false,
-    },
-  ];
+  const [refreshKey, setRefreshKey] = useState(0);
 
-  const fetchDataFn = async (params: any) => {
-    // Return mock data with a slight delay to simulate network
-    return new Promise<{
-      success: boolean;
-      data: AIProjectData[];
-      pagination: {
-        page: number;
-        limit: number;
-        total_pages: number;
-        total_items: number;
+  const fetchProjects = useCallback(async (params: any) => {
+    const userId = localStorage.getItem("userId");
+    if (!userId) {
+      return {
+        success: false,
+        data: [],
+        pagination: { page: 1, limit: 10, total_pages: 0, total_items: 0 },
       };
-    }>((resolve) => {
-      setTimeout(() => {
-        const page = params?.page || 1;
-        const limit = params?.limit || 10;
-        const total_items = MOCK_PROJECTS.length;
-        const total_pages = Math.ceil(total_items / limit);
-        const startIndex = (page - 1) * limit;
-        const paginatedData = MOCK_PROJECTS.slice(
-          startIndex,
-          startIndex + limit,
-        );
+    }
 
-        resolve({
-          success: true,
-          data: paginatedData,
-          pagination: {
-            page: page,
-            limit: limit,
-            total_pages: total_pages,
-            total_items: total_items,
-          },
+    try {
+      const search = params?.search || "";
+      const limit = params?.limit || 10;
+      const page = params?.page || 1;
+
+      const res = await fetch(
+        `${import.meta.env.VITE_BACKEND_URL}/api/projects/user/${userId}`,
+      );
+      if (!res.ok) throw new Error("Failed to fetch");
+      const data = await res.json();
+
+      const allProjects = Array.isArray(data) ? data : [];
+
+      // Filter by search
+      const filtered = allProjects.filter(
+        (p) =>
+          p.position.toLowerCase().includes(search.toLowerCase()) ||
+          p.jobDescription.toLowerCase().includes(search.toLowerCase()),
+      );
+
+      // Sort
+      if (params?.sort_by) {
+        filtered.sort((a: any, b: any) => {
+          const aValue = a[params.sort_by];
+          const bValue = b[params.sort_by];
+          if (aValue < bValue) return params.sort_order === "asc" ? -1 : 1;
+          if (aValue > bValue) return params.sort_order === "asc" ? 1 : -1;
+          return 0;
         });
-      }, 500);
-    });
-  };
+      }
+
+      // Manual client-side pagination
+      const total_items = filtered.length;
+      const total_pages = Math.ceil(total_items / limit);
+      const startIndex = (page - 1) * limit;
+      const paginatedData = filtered.slice(startIndex, startIndex + limit);
+
+      return {
+        success: true,
+        data: paginatedData,
+        pagination: {
+          page: page,
+          limit: limit,
+          total_pages: total_pages,
+          total_items: total_items,
+        },
+      };
+    } catch (err) {
+      console.error("Failed to fetch projects:", err);
+      return {
+        success: false,
+        data: [],
+        pagination: { page: 1, limit: 10, total_pages: 0, total_items: 0 },
+      };
+    }
+  }, []);
+
+  const handleRefresh = useCallback(() => {
+    setRefreshKey((prev) => prev + 1);
+  }, []);
+
+  const columns: ColumnDef<ProjectRecord>[] = useMemo(
+    () => [
+      {
+        accessorKey: "position",
+        header: ({ column }) => (
+          <DataTableColumnHeader column={column} title="Target Position" />
+        ),
+        cell: ({ row }) => {
+          const project = row.original;
+          return (
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="h-9 w-9 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+                <FileText className="h-4 w-4 text-primary" />
+              </div>
+              <div className="min-w-0">
+                <p className="text-sm font-semibold truncate">
+                  {project.position}
+                </p>
+                <p className="text-xs text-muted-foreground truncate max-w-[300px]">
+                  {project.jobDescription.slice(0, 80)}
+                  {project.jobDescription.length > 80 ? "..." : ""}
+                </p>
+              </div>
+            </div>
+          );
+        },
+      },
+      {
+        accessorKey: "createdAt",
+        header: ({ column }) => (
+          <DataTableColumnHeader column={column} title="Generated Date" />
+        ),
+        cell: ({ row }) => (
+          <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+            <Calendar className="h-3.5 w-3.5" />
+            {new Date(row.getValue("createdAt")).toLocaleDateString("en-US", {
+              month: "short",
+              day: "numeric",
+              year: "numeric",
+            })}
+          </div>
+        ),
+      },
+      {
+        id: "projectCount",
+        header: "Projects",
+        cell: ({ row }) => {
+          const project = row.original;
+          const count = Array.isArray(project.projects)
+            ? project.projects.length
+            : 0;
+          return (
+            <Badge
+              variant="secondary"
+              className="rounded-md px-2.5 py-1 text-xs font-semibold bg-primary/5 text-primary border border-primary/10"
+            >
+              {count} Projects
+            </Badge>
+          );
+        },
+      },
+      {
+        id: "actions",
+        header: () => <div className="text-right">Action</div>,
+        cell: ({ row }) => {
+          const project = row.original;
+          return (
+            <div className="flex justify-end">
+              <Link to={`/ai-projects/${project.id}`}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="rounded-lg text-xs font-semibold gap-1 hover:bg-primary hover:text-primary-foreground transition-all"
+                >
+                  View
+                  <ChevronRight className="h-3.5 w-3.5" />
+                </Button>
+              </Link>
+            </div>
+          );
+        },
+      },
+    ],
+    [],
+  );
 
   return (
-    <div>
+    <div className="space-y-6 animate-in fade-in duration-700">
       <DataTable
-        getColumns={getColumns}
-        fetchDataFn={fetchDataFn}
+        key={refreshKey}
+        getColumns={() => columns}
+        fetchDataFn={fetchProjects}
+        fetchByIdsFn={async () => []}
         idField="id"
         config={{
-          enableUrlState: false, // Internal usage
-          enableColumnResizing: true,
+          enableSearch: true,
+          enableRowSelection: true,
+          enableColumnVisibility: true,
+          enableExport: true,
+          searchPlaceholder: "Search projects...",
+        }}
+        exportConfig={{
+          entityName: "AI Projects",
+          columnMapping: {
+            position: "Position",
+            createdAt: "Generated Date",
+          },
+          columnWidths: [{ wch: 30 }, { wch: 20 }],
+          headers: ["position", "createdAt"],
         }}
       />
     </div>

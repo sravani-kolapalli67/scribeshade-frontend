@@ -12,6 +12,15 @@ export default defineConfig(async () => ({
     postcss: null, // ✅ This fixes your error
   },
 
+  build: {
+    rollupOptions: {
+      input: {
+        main: path.resolve(__dirname, "index.html"),
+        floating: path.resolve(__dirname, "floating.html"),
+      },
+    },
+  },
+
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

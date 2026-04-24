@@ -16,6 +16,7 @@ interface AIChatPanelProps {
   onAiAnswer: () => void;
   onAnalyzeScreen: () => void;
   onExit: () => void;
+  onSend?: () => void;
   isFullscreen?: boolean;
   isFreeSession?: boolean;
   timerText?: string | null;
@@ -32,6 +33,7 @@ export const AIChatPanel = ({
   onAiAnswer,
   onAnalyzeScreen,
   onExit,
+  onSend,
   isFullscreen = false,
   isFreeSession = false,
   timerText = null,
@@ -60,7 +62,12 @@ export const AIChatPanel = ({
         "p-6 pt-2 border-t border-white/10 shrink-0", 
         isFullscreen ? "bg-transparent drop-shadow-xl" : "bg-white border-slate-200/50"
       )}>
-        <ChatInput value={inputMessage} onChange={onInputChange} isFullscreen={isFullscreen} />
+        <ChatInput 
+          value={inputMessage} 
+          onChange={onInputChange} 
+          onSend={onSend}
+          isFullscreen={isFullscreen} 
+        />
         <ChatActionButtons
           onAiAnswer={onAiAnswer}
           onAnalyzeScreen={onAnalyzeScreen}
@@ -68,6 +75,7 @@ export const AIChatPanel = ({
           isAnalyzing={isAnalyzing}
           canAnswer={canAnswer}
           canAnalyze={canAnalyze}
+          isFullscreen={isFullscreen}
         />
       </div>
     </div>

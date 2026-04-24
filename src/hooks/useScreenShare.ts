@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
-export const useScreenShare = () => {
+export const useScreenShare = (options: { autoStart?: boolean } = { autoStart: true }) => {
   const [stream, setStream] = useState<MediaStream | null>(null);
 
   // Keep a ref to the latest stream so the callback ref can access it
@@ -66,7 +66,9 @@ export const useScreenShare = () => {
 
   // Auto-start screen share on mount
   useEffect(() => {
-    startShare();
+    if (options.autoStart) {
+      startShare();
+    }
 
     return () => {
       setStream((prevStream) => {
@@ -76,7 +78,7 @@ export const useScreenShare = () => {
         return null;
       });
     };
-  }, [startShare]);
+  }, [startShare, options.autoStart]);
 
   return {
     stream,
