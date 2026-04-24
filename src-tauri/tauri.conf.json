@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "scribeshade-frontend",
+  "productName": "ScribeShade",
   "version": "0.1.0",
   "identifier": "com.hiddenmindsolutions.scribeshade-frontend",
   "build": {
@@ -26,7 +26,7 @@
       },
       {
         "label": "mini",
-        "title": "ScribeShade Mini-Screen",
+        "title": "ScribeShade Floating Screen",
         "url": "floating.html",
         "width": 800,
         "height": 600,

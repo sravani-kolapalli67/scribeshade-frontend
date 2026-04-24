@@ -13,7 +13,6 @@ fn toggle_floating(app: AppHandle) -> Result<(), String> {
             .position(20f64, 20f64)
             .always_on_top(true)
             .decorations(false)
-            .transparent(true)
             .skip_taskbar(true)
             .build()
             .map_err(|e| e.to_string())?;
