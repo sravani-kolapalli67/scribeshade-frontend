@@ -22,6 +22,8 @@ import { OverlayContainer } from "./components/OverlayContainer";
 import { EndSessionDialog } from "./EndSessionDialog";
 import { Transcript, type Message } from "./Transcript";
 import { ConnectDialog } from "@/components/Sessions/ConnectDialog";
+import { useInactivityObserver } from "@/hooks/useInactivityObserver";
+import { InactivityDialog } from "@/components/Sessions/InactivityDialog";
 
 export default function ActiveSession() {
   const { id } = useParams();
@@ -100,6 +102,11 @@ export default function ActiveSession() {
     sessionId: id,
     onTimeUp,
   });
+
+  const { showDialog: showInactivityDialog, remainingTime, onStayActive } = useInactivityObserver(
+    undefined, // Use default from env
+    endSessionNow
+  );
 
   const { stream, videoRef, startShare, captureScreenshot } = useScreenShare({
     autoStart: !isConnectDialogOpen,
@@ -354,10 +361,13 @@ export default function ActiveSession() {
           micTranscription.interimTranscript ||
           tabTranscription.interimTranscript,
         status:
-          micTranscription.isTranscribing || tabTranscription.isTranscribing
+          micTranscription.isConnecting || tabTranscription.isConnecting
+            ? "Connecting"
+            : micTranscription.isTranscribing || tabTranscription.isTranscribing
             ? "Recording"
             : "Connected",
         isMicActive: micTranscription.isTranscribing,
+        isMicConnecting: micTranscription.isConnecting,
         timerText: formattedTime,
         sessionId: id || null,
       });
@@ -650,6 +660,12 @@ export default function ActiveSession() {
         language={connectData?.language || "English"}
         simpleLanguage={connectData?.simpleLanguage || false}
         aiModel={connectData?.aiModel || "Gemini 2.0 Flash"}
+      />
+
+      <InactivityDialog
+        isOpen={showInactivityDialog}
+        remainingTime={remainingTime}
+        onStayActive={onStayActive}
       />
     </div>
   );

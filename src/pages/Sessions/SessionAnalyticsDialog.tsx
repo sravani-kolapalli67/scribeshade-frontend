@@ -65,28 +65,42 @@ export function SessionAnalyticsDialog({
   session,
 }: SessionAnalyticsDialogProps) {
   const [messages, setMessages] = useState<Message[]>([]);
+  const [feedback, setFeedback] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isAnalyticsLoading, setIsAnalyticsLoading] = useState(false);
   const [isFeedbackOpen, setIsFeedbackOpen] = useState(true);
 
   useEffect(() => {
     if (isOpen && session?.id) {
-      const fetchDetails = async () => {
+      const fetchData = async () => {
         setIsLoading(true);
+        setIsAnalyticsLoading(true);
         try {
-          const res = await fetch(
+          // Fetch session details (for messages/chart)
+          const sessionRes = await fetch(
             `${import.meta.env.VITE_BACKEND_URL}/api/session/${session.id}`,
           );
-          if (res.ok) {
-            const data = await res.json();
+          if (sessionRes.ok) {
+            const data = await sessionRes.json();
             setMessages(data.messages || []);
           }
+
+          // Fetch real analytics data
+          const analyticsRes = await fetch(
+            `${import.meta.env.VITE_BACKEND_URL}/api/session/${session.id}/analytics`,
+          );
+          if (analyticsRes.ok) {
+            const data = await analyticsRes.json();
+            setFeedback(data);
+          }
         } catch (error) {
-          console.error("Error fetching session details for analytics:", error);
+          console.error("Error fetching session analytics:", error);
         } finally {
           setIsLoading(false);
+          setIsAnalyticsLoading(false);
         }
       };
-      fetchDetails();
+      fetchData();
     }
   }, [isOpen, session?.id]);
 
@@ -211,23 +225,23 @@ export function SessionAnalyticsDialog({
               {/* Top Stats Grid */}
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                 {[
-                  { label: "Score", value: "88%" },
-                  { label: "Confidence", value: "94%" },
-                  { label: "Session Quality", value: "Excellent" },
+                  { label: "Score", value: feedback ? `${feedback.score}%` : "N/A" },
+                  { label: "Confidence", value: feedback ? `${feedback.confidence}%` : "N/A" },
+                  { label: "Session Quality", value: feedback?.sessionQuality || "N/A" },
                   {
-                    label: "Avg. Response",
-                    value: analytics?.avgResponseLength,
+                    label: "Avg. Words",
+                    value: feedback?.avgResponseLen || "0",
                   },
                   {
                     label: "Answered",
-                    value: `${analytics?.questions || 14}`,
+                    value: feedback?.answeredCount || "0",
                   },
-                  { label: "AI Assists", value: analytics?.aiResponses || 0 },
+                  { label: "AI Assists", value: feedback?.aiAssistsCount || 0 },
                   {
-                    label: "Avg. Response",
-                    value: "4.2s",
+                    label: "Avg. Time",
+                    value: feedback?.avgResponseTime ? `${feedback.avgResponseTime}s` : "N/A",
                   },
-                  { label: "Verdict", value: "Strong Pass" },
+                  { label: "Verdict", value: feedback?.verdict || "N/A" },
                 ].map((stat, idx) => (
                   <Card
                     key={idx}
@@ -254,7 +268,7 @@ export function SessionAnalyticsDialog({
                   </div>
                   <div className="flex items-center gap-4">
                     <div className="px-3 py-1 bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20 text-sm font-bold rounded-full">
-                      88%
+                      {feedback ? `${feedback.score}%` : "N/A"}
                     </div>
                     {isFeedbackOpen ? (
                       <ChevronUp className="size-5 text-muted-foreground" />
@@ -269,19 +283,19 @@ export function SessionAnalyticsDialog({
                     {/* Pills */}
                     <div className="flex flex-wrap items-center gap-3 mb-10">
                       <div className="px-4 py-1.5 rounded-full bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 text-sm font-semibold flex items-center gap-2 border border-emerald-500/20">
-                        Communication <span className="font-bold">92%</span>
+                        Communication <span className="font-bold">{feedback?.communication || 0}%</span>
                       </div>
                       <div className="px-4 py-1.5 rounded-full bg-blue-500/10 text-blue-700 dark:text-blue-400 text-sm font-semibold flex items-center gap-2 border border-blue-500/20">
-                        Interactivity <span className="font-bold">85%</span>
+                        Interactivity <span className="font-bold">{feedback?.interactivity || 0}%</span>
                       </div>
                       <div className="px-4 py-1.5 rounded-full bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 text-sm font-semibold flex items-center gap-2 border border-emerald-500/20">
-                        Confidence <span className="font-bold">94%</span>
+                        Confidence <span className="font-bold">{feedback?.confidence || 0}%</span>
                       </div>
                       <div className="px-4 py-1.5 rounded-full bg-slate-500/10 text-slate-700 dark:text-slate-400 text-sm font-semibold flex items-center gap-2 border border-slate-500/20">
-                        Technical Depth <span className="font-bold">79%</span>
+                        Technical Depth <span className="font-bold">{feedback?.technicalDepth || 0}%</span>
                       </div>
                       <div className="px-4 py-1.5 rounded-full bg-amber-500/10 text-amber-700 dark:text-amber-400 text-sm font-semibold flex items-center gap-2 border border-amber-500/20">
-                        Conciseness <span className="font-bold">72%</span>
+                        Conciseness <span className="font-bold">{feedback?.conciseness || 0}%</span>
                       </div>
                     </div>
 
@@ -295,19 +309,18 @@ export function SessionAnalyticsDialog({
                           </h4>
                         </div>
                         <ul className="space-y-4">
-                          {[
-                            "Highly interactive and dynamic session, effectively maintained two-way dialogue",
-                            "Consistently demonstrated high confidence through steady, assured communication",
-                            "Strong use of quantified impact and clear examples",
-                            "Direct, poised delivery with excellent problem-solving demeanor",
-                          ].map((item, i) => (
-                            <li key={i} className="flex items-start gap-4">
-                              <Check className="size-5 text-emerald-500 mt-0.5 shrink-0" />
-                              <span className="text-[15px] font-medium text-muted-foreground leading-relaxed">
-                                {item}
-                              </span>
-                            </li>
-                          ))}
+                          {feedback?.strengths && feedback.strengths.length > 0 ? (
+                            feedback.strengths.map((item: string, i: number) => (
+                              <li key={i} className="flex items-start gap-4">
+                                <Check className="size-5 text-emerald-500 mt-0.5 shrink-0" />
+                                <span className="text-[15px] font-medium text-muted-foreground leading-relaxed">
+                                  {item}
+                                </span>
+                              </li>
+                            ))
+                          ) : (
+                            <li className="text-muted-foreground italic">No strengths recorded</li>
+                          )}
                         </ul>
                       </div>
 
@@ -320,43 +333,32 @@ export function SessionAnalyticsDialog({
                           </h4>
                         </div>
                         <ul className="space-y-4">
-                          {[
-                            {
-                              level: "High",
-                              text: "Over-explaining — answers ran a bit longer than necessary",
-                              badgeClass:
-                                "bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/20",
-                            },
-                            {
-                              level: "High",
-                              text: "System design answers could use more explicit technical depth",
-                              badgeClass:
-                                "bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/20",
-                            },
-                            {
-                              level: "Medium",
-                              text: "Missed validating understanding before diving into problem solutions",
-                              badgeClass:
-                                "bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/20",
-                            },
-                            {
-                              level: "Low",
-                              text: "Closing statements could be noticeably stronger",
-                              badgeClass:
-                                "bg-slate-500/10 text-slate-700 dark:text-slate-400 border-slate-500/20",
-                            },
-                          ].map((item, i) => (
-                            <li key={i} className="flex items-start gap-3">
-                              <div
-                                className={`text-[11px] uppercase tracking-wider font-bold px-2 py-0.5 rounded-md border ${item.badgeClass} shrink-0 mt-0.5 min-w-16 text-center shadow-sm`}
-                              >
-                                {item.level}
-                              </div>
-                              <span className="text-[15px] font-medium text-muted-foreground leading-relaxed">
-                                {item.text}
-                              </span>
-                            </li>
-                          ))}
+                          {feedback?.improvements && feedback.improvements.length > 0 ? (
+                            feedback.improvements.map((item: string, i: number) => {
+                              const priorityMatch = item.match(/^\[(HIGH|MEDIUM|LOW)\]/i);
+                              const priority = priorityMatch ? priorityMatch[1].toUpperCase() : "MEDIUM";
+                              const text = item.replace(/^\[.*?\]\s*/, "");
+                              
+                              let badgeClass = "bg-slate-500/10 text-slate-700 dark:text-slate-400 border-slate-500/20";
+                              if (priority === "HIGH") badgeClass = "bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/20";
+                              if (priority === "MEDIUM") badgeClass = "bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/20";
+
+                              return (
+                                <li key={i} className="flex items-start gap-3">
+                                  <div
+                                    className={`text-[11px] uppercase tracking-wider font-bold px-2 py-0.5 rounded-md border ${badgeClass} shrink-0 mt-0.5 min-w-16 text-center shadow-sm`}
+                                  >
+                                    {priority}
+                                  </div>
+                                  <span className="text-[15px] font-medium text-muted-foreground leading-relaxed">
+                                    {text}
+                                  </span>
+                                </li>
+                              );
+                            })
+                          ) : (
+                            <li className="text-muted-foreground italic">No improvements suggested</li>
+                          )}
                         </ul>
                       </div>
                     </div>

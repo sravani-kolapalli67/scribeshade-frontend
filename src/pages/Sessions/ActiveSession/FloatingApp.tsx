@@ -31,6 +31,7 @@ import {
   Power,
   LogOut,
   User,
+  Loader2,
 } from "lucide-react";
 import { ChatActionButtons } from "./components/ChatActionButtons";
 import { SessionTimer } from "./components/SessionTimer";
@@ -50,6 +51,7 @@ interface OverlayData {
   interimTranscript?: string;
   status: string;
   isMicActive: boolean;
+  isMicConnecting: boolean;
   timerText: string | null;
   sessionId: string | null;
 }
@@ -244,6 +246,7 @@ const FloatingApp: React.FC = () => {
     transcript: "",
     status: "Initializing",
     isMicActive: false,
+    isMicConnecting: false,
     timerText: null,
     sessionId: null,
   });
@@ -675,7 +678,9 @@ const FloatingApp: React.FC = () => {
             <div
               className={cn(
                 "shrink-0 w-1.5 h-1.5 rounded-full transition-all duration-300",
-                data.isMicActive
+                data.isMicConnecting
+                  ? "bg-amber-500 animate-pulse shadow-[0_0_8px_rgba(245,158,11,0.5)]"
+                  : data.isMicActive
                   ? "bg-emerald-500 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)]"
                   : "bg-white/20",
               )}
@@ -716,7 +721,13 @@ const FloatingApp: React.FC = () => {
                       : "bg-white/10 text-zinc-300 border-white/10 hover:bg-white/20 hover:text-white",
                   )}
                 >
-                  {data.isMicActive ? <Mic size={14} /> : <MicOff size={14} />}
+                  {data.isMicConnecting ? (
+                    <Loader2 size={14} className="animate-spin" />
+                  ) : data.isMicActive ? (
+                    <Mic size={14} />
+                  ) : (
+                    <MicOff size={14} />
+                  )}
                 </button>
               </TooltipTrigger>
               <TooltipContent

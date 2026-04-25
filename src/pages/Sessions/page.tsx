@@ -215,7 +215,11 @@ export default function Sessions() {
               className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50 disabled:pointer-events-none"
               disabled={!row.original.endedAt}
             >
-              <BarChart3 className="h-4 w-4" />
+              {row.original.endedAt && !(row.original as any).feedback ? (
+                <div className="h-4 w-4 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
+              ) : (
+                <BarChart3 className="h-4 w-4" />
+              )}
             </Button>
             <Button
               variant="ghost"
