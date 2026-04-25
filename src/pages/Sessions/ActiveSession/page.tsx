@@ -34,7 +34,7 @@ export default function ActiveSession() {
   const [messages, setMessages] = useState<Message[]>([]);
 
   const [isConnectDialogOpen, setIsConnectDialogOpen] = useState(
-    !!location.state?.showConnect
+    !!location.state?.showConnect,
   );
   const connectData = location.state?.connectData || {};
 
@@ -103,10 +103,10 @@ export default function ActiveSession() {
     onTimeUp,
   });
 
-  const { showDialog: showInactivityDialog, remainingTime, onStayActive } = useInactivityObserver(
-    undefined, // Use default from env
-    endSessionNow
-  );
+  //   const { showDialog: showInactivityDialog, remainingTime, onStayActive } = useInactivityObserver(
+  //     undefined, // Use default from env
+  //     endSessionNow
+  //   );
 
   const { stream, videoRef, startShare, captureScreenshot } = useScreenShare({
     autoStart: !isConnectDialogOpen,
@@ -155,16 +155,21 @@ export default function ActiveSession() {
           };
 
           // Save to backend
-          fetch(`${import.meta.env.VITE_BACKEND_URL}/api/session/${id}/save-message`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              role: sender === "User" ? "USER" : "INTERVIEWER",
-              question: text,
-              answer: "",
-              time: newMsg.time,
-            }),
-          }).catch((err) => console.error("Failed to save transcript segment:", err));
+          fetch(
+            `${import.meta.env.VITE_BACKEND_URL}/api/session/${id}/save-message`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                role: sender === "User" ? "USER" : "INTERVIEWER",
+                question: text,
+                answer: "",
+                time: newMsg.time,
+              }),
+            },
+          ).catch((err) =>
+            console.error("Failed to save transcript segment:", err),
+          );
 
           return [...prev, newMsg];
         });
@@ -235,49 +240,55 @@ export default function ActiveSession() {
 
   const isExecutingRef = useRef(false);
 
-  const onAnalyzeScreen = useCallback(async (payload?: any) => {
-    if (isExecutingRef.current || !id) return;
-    isExecutingRef.current = true;
-    try {
-      console.log("[Trigger] Analyze Screen initiated");
-      let screenshot: Blob | null = null;
-      
-      if (payload?.screenshotData) {
-        // Convert base64 to Blob
-        const base64Data = payload.screenshotData.split(",")[1];
-        const contentType = payload.screenshotData.split(",")[0].split(":")[1].split(";")[0];
-        const byteCharacters = atob(base64Data);
-        const byteArrays = [];
+  const onAnalyzeScreen = useCallback(
+    async (payload?: any) => {
+      if (isExecutingRef.current || !id) return;
+      isExecutingRef.current = true;
+      try {
+        console.log("[Trigger] Analyze Screen initiated");
+        let screenshot: Blob | null = null;
 
-        for (let offset = 0; offset < byteCharacters.length; offset += 512) {
-          const slice = byteCharacters.slice(offset, offset + 512);
-          const byteNumbers = new Array(slice.length);
-          for (let i = 0; i < slice.length; i++) {
-            byteNumbers[i] = slice.charCodeAt(i);
+        if (payload?.screenshotData) {
+          // Convert base64 to Blob
+          const base64Data = payload.screenshotData.split(",")[1];
+          const contentType = payload.screenshotData
+            .split(",")[0]
+            .split(":")[1]
+            .split(";")[0];
+          const byteCharacters = atob(base64Data);
+          const byteArrays = [];
+
+          for (let offset = 0; offset < byteCharacters.length; offset += 512) {
+            const slice = byteCharacters.slice(offset, offset + 512);
+            const byteNumbers = new Array(slice.length);
+            for (let i = 0; i < slice.length; i++) {
+              byteNumbers[i] = slice.charCodeAt(i);
+            }
+            const byteArray = new Uint8Array(byteNumbers);
+            byteArrays.push(byteArray);
           }
-          const byteArray = new Uint8Array(byteNumbers);
-          byteArrays.push(byteArray);
+
+          screenshot = new Blob(byteArrays, { type: contentType });
+        } else if (stream) {
+          screenshot = await captureScreenshot();
         }
 
-        screenshot = new Blob(byteArrays, { type: contentType });
-      } else if (stream) {
-        screenshot = await captureScreenshot();
+        if (screenshot) {
+          await handleAnalyzeScreen(id, screenshot);
+        } else {
+          console.warn("No screenshot could be captured.");
+        }
+      } catch (err) {
+        console.error("Error analyzing screen:", err);
+      } finally {
+        // Small delay to ensure any duplicate events from the same interaction are ignored
+        setTimeout(() => {
+          isExecutingRef.current = false;
+        }, 1000);
       }
-
-      if (screenshot) {
-        await handleAnalyzeScreen(id, screenshot);
-      } else {
-        console.warn("No screenshot could be captured.");
-      }
-    } catch (err) {
-      console.error("Error analyzing screen:", err);
-    } finally {
-      // Small delay to ensure any duplicate events from the same interaction are ignored
-      setTimeout(() => {
-        isExecutingRef.current = false;
-      }, 1000);
-    }
-  }, [stream, id, captureScreenshot, handleAnalyzeScreen]);
+    },
+    [stream, id, captureScreenshot, handleAnalyzeScreen],
+  );
 
   const onAiAnswer = useCallback(() => {
     if (isExecutingRef.current || !id) return;
@@ -305,7 +316,7 @@ export default function ActiveSession() {
     isOpeningOverlayRef.current = true;
 
     try {
-      await invoke('show_mini_top_center');
+      await invoke("show_mini_top_center");
       await getCurrentWindow().hide();
     } catch (error) {
       console.error("Failed to open overlay:", error);
@@ -334,7 +345,7 @@ export default function ActiveSession() {
           handleOpenOverlay();
         }
       });
-      
+
       if (!isMounted) {
         fn();
       } else {
@@ -352,9 +363,7 @@ export default function ActiveSession() {
   // Sync data with overlay
   useEffect(() => {
     const syncOverlay = async () => {
-      const combinedTranscript = messages
-        .map((m) => m.text)
-        .join("\n");
+      const combinedTranscript = messages.map((m) => m.text).join("\n");
       await emit("overlay-update", {
         transcript: combinedTranscript,
         interimTranscript:
@@ -364,8 +373,8 @@ export default function ActiveSession() {
           micTranscription.isConnecting || tabTranscription.isConnecting
             ? "Connecting"
             : micTranscription.isTranscribing || tabTranscription.isTranscribing
-            ? "Recording"
-            : "Connected",
+              ? "Recording"
+              : "Connected",
         isMicActive: micTranscription.isTranscribing,
         isMicConnecting: micTranscription.isConnecting,
         timerText: formattedTime,
@@ -418,7 +427,7 @@ export default function ActiveSession() {
   });
 
   const endSessionNowRef = useRef(endSessionNow);
-  
+
   onAiAnswerRef.current = onAiAnswer;
   onAnalyzeScreenRef.current = onAnalyzeScreen;
   handleCustomQueryRef.current = handleCustomQuery;
@@ -450,7 +459,8 @@ export default function ActiveSession() {
       });
       const u3 = await listen("overlay-exit", async () => {
         if (active) {
-          const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+          const { WebviewWindow } =
+            await import("@tauri-apps/api/webviewWindow");
           const mainWindow = await WebviewWindow.getByLabel("main");
           if (mainWindow) {
             await mainWindow.show();
@@ -473,7 +483,8 @@ export default function ActiveSession() {
       const u7 = await listen("overlay-restore", async () => {
         if (active) {
           console.log("Received overlay-restore event");
-          const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+          const { WebviewWindow } =
+            await import("@tauri-apps/api/webviewWindow");
           const mainWindow = await WebviewWindow.getByLabel("main");
           if (mainWindow) {
             await mainWindow.show();
@@ -662,11 +673,11 @@ export default function ActiveSession() {
         aiModel={connectData?.aiModel || "Gemini 2.0 Flash"}
       />
 
-      <InactivityDialog
+      {/* <InactivityDialog
         isOpen={showInactivityDialog}
         remainingTime={remainingTime}
         onStayActive={onStayActive}
-      />
+      /> */}
     </div>
   );
 }

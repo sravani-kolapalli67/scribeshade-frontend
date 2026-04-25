@@ -55,7 +55,9 @@ export const TranscriptMessage = ({ message, isFullscreen = false }: TranscriptM
           className={cn(
             "px-5 py-3 rounded-2xl text-[14px] font-medium leading-relaxed shadow-sm transition-all group-hover:shadow-md",
             isUser
-              ? "bg-brand text-white rounded-tr-none shadow-md shadow-brand/10 hover:shadow-lg hover:shadow-brand/20"
+              ? isFullscreen
+                ? "bg-white/10 text-white rounded-tr-none border border-white/10 backdrop-blur-md"
+                : "bg-white text-slate-700 rounded-tr-none border border-slate-100"
               : isFullscreen 
                 ? "bg-white/10 text-white rounded-tl-none border border-white/10 backdrop-blur-md"
                 : "bg-white text-slate-700 rounded-tl-none border border-slate-100",

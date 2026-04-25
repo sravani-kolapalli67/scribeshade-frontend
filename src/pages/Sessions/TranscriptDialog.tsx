@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
@@ -9,10 +9,10 @@ import {
   Download,
   Copy,
   Check,
-  MessageCircle,
   Star,
   FileText,
   Sparkles,
+  Lightbulb,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -78,77 +78,7 @@ export function TranscriptDialog({
     }
   }, [isOpen, sessionId]);
 
-  // Group messages into interactions (Question + AI Answer)
-  const interactions = useMemo(() => {
-    const result: Interaction[] = [];
-    let currentQuestion = "";
-    let lastTimestamp = "";
-
-    messages.forEach((msg, idx) => {
-      const isAI = msg.role === "AI" || msg.role === "AI_ASSISTANT";
-
-      if (isAI) {
-        // Priority 1: Structured fields from backend
-        if (msg.question || msg.answer) {
-          result.push({
-            id: msg.id || `int-${idx}`,
-            question: msg.question || "Screen Analysis / Manual Trigger",
-            answer: msg.answer || "",
-            timestamp: msg.timestamp || lastTimestamp,
-          });
-        } else {
-          // Priority 2: Backwards compatibility/Legacy regex parsing of content
-          const text = msg.content || "";
-          const qRegex = /(?:\*\*|###)?\s*Extracted Question\s*:\s*/i;
-          const aRegex = /(?:\*\*|###)?\s*Suggested Answer\s*:\s*/i;
-
-          const qMatch = qRegex.exec(text);
-          const aMatch = aRegex.exec(text);
-
-          let extractedQ = null;
-          let suggestedA = text;
-
-          if (qMatch) {
-            const qStart = qMatch.index + qMatch[0].length;
-            const qEnd = aMatch ? aMatch.index : text.indexOf("\n", qStart);
-            extractedQ = text
-              .slice(qStart, qEnd === -1 ? text.length : qEnd)
-              .replace(/[*#_]+$|^[*#_]+/g, "")
-              .trim();
-          }
-
-          if (aMatch) {
-            suggestedA = text.slice(aMatch.index + aMatch[0].length).trim();
-          }
-
-          result.push({
-            id: msg.id || `int-${idx}`,
-            question: extractedQ || currentQuestion || "Screen Analysis / Manual Trigger",
-            answer: suggestedA,
-            timestamp: msg.timestamp || lastTimestamp,
-          });
-        }
-        currentQuestion = ""; // Reset after pairing
-      } else {
-        // Append context from transcribing audio
-        if (currentQuestion) currentQuestion += "\n\n";
-        currentQuestion += msg.content || "";
-        lastTimestamp = msg.timestamp || "";
-      }
-    });
-
-    // If there's a leftover question without an AI answer, show it
-    if (currentQuestion) {
-      result.push({
-        id: `unanswered-${Date.now()}`,
-        question: currentQuestion,
-        answer: "", // No AI response yet
-        timestamp: lastTimestamp,
-      });
-    }
-
-    return result;
-  }, [messages]);
+  // Removed unused interactions memo
 
   const handleCopy = (id: string, text: string) => {
     navigator.clipboard.writeText(text);
@@ -170,21 +100,81 @@ export function TranscriptDialog({
               minute: "2-digit",
             })
           : "00:00";
-        return `[${time}] ${m.role === "AI_ASSISTANT" ? "AI Assistant" : "Interviewer"}: ${m.content || ""}`;
+
+        const isAI = m.role === "AI" || m.role === "AI_ASSISTANT";
+
+        if (isAI) {
+          const { question, answer } = extractQA(m);
+          return `### 💡 Question: ${question}\n\n**⭐ AI Answer:**\n${answer}\n\n*Time: ${time}*`;
+        } else {
+          const roleName = m.role === "USER" ? "You" : "Interviewer";
+          return `> **${roleName}** [${time}]: ${m.content || m.question || ""}`;
+        }
       })
       .join("\n\n---\n\n");
 
-    const blob = new Blob([content], { type: "text/plain" });
+    const header = `# Session Transcript\nSession ID: ${sessionId}\nDate: ${new Date().toLocaleDateString()}\n\n`;
+    const fullContent = header + content;
+
+    const blob = new Blob([fullContent], { type: "text/markdown" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `session-transcript-${sessionId}.txt`;
+    a.download = `session-transcript-${sessionId}.md`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
 
+  // Helper to format timestamp
+  const formatTime = (ts?: string) => {
+    if (!ts) return "";
+    return new Date(ts).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  };
+
+  // Extract Q&A from a single AI message
+  const extractQA = (msg: Message) => {
+    // Priority 1: Structured fields
+    if (msg.question || msg.answer) {
+      return {
+        question: msg.question || "Screen Analysis / Manual Trigger",
+        answer: msg.answer || "",
+      };
+    }
+
+    // Priority 2: Regex parsing of content
+    const text = msg.content || "";
+    const qRegex = /(?:\*\*|###)?\s*Extracted Question\s*:\s*/i;
+    const aRegex = /(?:\*\*|###)?\s*Suggested Answer\s*:\s*/i;
+
+    const qMatch = qRegex.exec(text);
+    const aMatch = aRegex.exec(text);
+
+    let extractedQ = null;
+    let suggestedA = text;
+
+    if (qMatch) {
+      const qStart = qMatch.index + qMatch[0].length;
+      const qEnd = aMatch ? aMatch.index : text.indexOf("\n", qStart);
+      extractedQ = text
+        .slice(qStart, qEnd === -1 ? text.length : qEnd)
+        .replace(/[*#_]+$|^[*#_]+/g, "")
+        .trim();
+    }
+
+    if (aMatch) {
+      suggestedA = text.slice(aMatch.index + aMatch[0].length).trim();
+    }
+
+    return {
+      question: extractedQ || "Screen Analysis / Manual Trigger",
+      answer: suggestedA,
+    };
+  };
 
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
@@ -268,10 +258,6 @@ export function TranscriptDialog({
               <Download className="size-4 text-brand" />
               Download Transcript
             </Button>
-            {/* <span className="text-[14px] font-black text-slate-800 uppercase tracking-widest opacity-80">
-              {messages.length} Recorded Interaction
-              {messages.length !== 1 ? "s" : ""}
-            </span> */}
           </div>
 
           {/* SCROLLABLE BODY */}
@@ -286,201 +272,198 @@ export function TranscriptDialog({
                 </div>
               ) : (
                 <TabsContent value="transcript" className="mt-0 outline-none">
-                  <div className="space-y-6">
-                    {interactions.map((interaction) => {
-                      const hasAnswer =
-                        (interaction.answer || "").trim().length > 0;
+                  <div className="space-y-8 max-w-4xl mx-auto px-4">
+                    {messages.map((msg, idx) => {
+                      const isAI =
+                        msg.role === "AI" || msg.role === "AI_ASSISTANT";
+                      const isUser = msg.role === "USER";
+                      const isInterviewer = msg.role === "INTERVIEWER";
 
-                      return (
-                        <div
-                          key={interaction.id}
-                          className="bg-white border border-slate-100 rounded-3xl p-8 md:p-10 shadow-sm transition-all relative overflow-hidden group"
-                        >
-                          {/* Card Copy Button */}
-                          <div className="absolute top-6 right-6 z-10 opacity-0 group-hover:opacity-100 transition-all">
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => handleCopyInteraction(interaction)}
-                              className="h-9 px-3 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-500 hover:text-slate-900 border border-slate-200/50 shadow-sm transition-all gap-2"
-                            >
-                              {copiedId === interaction.id + "-card" ? (
-                                <>
-                                  <Check className="size-4 text-emerald-500" />
-                                  <span className="text-xs font-bold text-emerald-600">
-                                    Copied Card
-                                  </span>
-                                </>
-                              ) : (
-                                <>
-                                  <Copy className="size-4" />
-                                  <span className="text-xs font-bold">
-                                    Copy Q&A
-                                  </span>
-                                </>
-                              )}
-                            </Button>
-                          </div>
+                      if (isAI) {
+                        const { question, answer } = extractQA(msg);
+                        const hasAnswer = (answer || "").trim().length > 0;
+                        const interactionId = msg.id || `ai-${idx}`;
 
-                          {/* Segment: Question */}
-                          <div className="flex items-start gap-6 mb-10 relative">
-                            <div className="size-8 flex items-center justify-center shrink-0 mt-0.5 rounded-xl bg-indigo-50 border border-indigo-100 shadow-sm">
-                              <MessageCircle className="size-4 text-indigo-500" />
-                            </div>
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-3 mb-4">
-                                <span className="text-[10px] font-black uppercase tracking-[0.2em] text-indigo-500/80">
-                                  Interviewer Question
-                                </span>
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  onClick={() => handleCopy(interaction.id + "-q", interaction.question)}
-                                  className="h-6 w-6 rounded-lg hover:bg-indigo-50 text-indigo-400 hover:text-indigo-600 transition-all"
-                                >
-                                  {copiedId === interaction.id + "-q" ? (
-                                    <Check className="size-3 text-emerald-500" />
-                                  ) : (
-                                    <Copy className="size-3" />
-                                  )}
-                                </Button>
-                              </div>
-                              <div
-                                className="text-[15px] leading-relaxed text-slate-700 font-medium prose prose-indigo max-w-none 
-                                    prose-p:mb-4 last:prose-p:mb-0 prose-strong:text-indigo-600 prose-strong:font-bold 
-                                    prose-ul:list-disc prose-ul:pl-6 prose-li:mb-1
-                                    prose-code:text-indigo-600 prose-code:bg-indigo-50 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-md prose-code:before:content-none prose-code:after:content-none
-                                    prose-pre:bg-indigo-50/50 prose-pre:border prose-pre:border-indigo-100/50 prose-pre:rounded-2xl"
+                        return (
+                          <div
+                            key={interactionId}
+                            className="bg-white border border-slate-100 rounded-[2rem] p-8 md:p-10 shadow-xl shadow-slate-200/40 transition-all relative overflow-hidden group"
+                          >
+                            {/* Card Copy Button */}
+                            <div className="absolute top-6 right-6 z-10 opacity-0 group-hover:opacity-100 transition-all">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() =>
+                                  handleCopyInteraction({
+                                    id: interactionId,
+                                    question,
+                                    answer,
+                                    timestamp: msg.timestamp || "",
+                                  })
+                                }
+                                className="h-9 px-3 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-500 hover:text-slate-900 border border-slate-200/50 shadow-sm transition-all gap-2"
                               >
-                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                  {interaction.question}
-                                </ReactMarkdown>
-                              </div>
+                                {copiedId === interactionId + "-card" ? (
+                                  <>
+                                    <Check className="size-4 text-emerald-500" />
+                                    <span className="text-xs font-bold text-emerald-600">
+                                      Copied Card
+                                    </span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Copy className="size-4" />
+                                    <span className="text-xs font-bold">
+                                      Copy Q&A
+                                    </span>
+                                  </>
+                                )}
+                              </Button>
                             </div>
-                          </div>
 
-                          {/* Segment: Answer */}
-                          {hasAnswer && (
-                            <div className="flex items-start gap-6">
-                              <div className="size-8 flex items-center justify-center shrink-0 mt-0.5">
-                                <Star className="size-5 text-amber-500 fill-amber-500" />
+                            {/* Segment: Question */}
+                            <div className="flex items-start gap-5 mb-8 relative">
+                              <div className="size-6 flex items-center justify-center shrink-0 mt-1">
+                                <Lightbulb className="size-5 text-indigo-500" />
                               </div>
                               <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-3 mb-4">
-                                  <span className="text-[10px] font-black uppercase tracking-[0.2em] text-brand/80">
-                                    Suggested Answer
+                                <div className="flex items-center gap-2 mb-3">
+                                  <span className="text-sm font-bold text-slate-800">
+                                    Question:
                                   </span>
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    onClick={() => handleCopy(interaction.id + "-a", interaction.answer)}
-                                    className="h-6 w-6 rounded-lg hover:bg-brand/5 text-brand/40 hover:text-brand transition-all"
-                                  >
-                                    {copiedId === interaction.id + "-a" ? (
-                                      <Check className="size-3 text-emerald-500" />
-                                    ) : (
-                                      <Copy className="size-3" />
-                                    )}
-                                  </Button>
-                                </div>
-                                <div
-                                  className="text-[15px] leading-relaxed text-slate-700 font-medium prose prose-slate max-w-none 
-                                      prose-p:mb-5 last:prose-p:mb-0 prose-strong:text-brand prose-strong:font-bold 
-                                      prose-ul:list-disc prose-ul:pl-6 prose-li:mb-2 
-                                      prose-code:text-brand prose-code:font-bold
-                                      prose-pre:bg-transparent prose-pre:p-0 prose-pre:rounded-none prose-pre:border-none overflow-x-hidden"
-                                >
-                                  <ReactMarkdown
-                                    remarkPlugins={[remarkGfm]}
-                                    components={{
-                                      code({
-                                        node,
-                                        inline,
-                                        className,
-                                        children,
-                                        ...props
-                                      }: any) {
-                                        const match = /language-(\w+)/.exec(
-                                          className || "",
-                                        );
-                                        const codeContent = String(
-                                          children,
-                                        ).replace(/\n$/, "");
-
-                                        if (!inline && match) {
-                                          return (
-                                            <div className="relative group/code my-6">
-                                              <div className="absolute right-4 top-4 z-20 opacity-0 group-hover/code:opacity-100 transition-all">
-                                                <Button
-                                                  variant="secondary"
-                                                  size="icon"
-                                                  onClick={() =>
-                                                    handleCopy(
-                                                      codeContent,
-                                                      codeContent,
-                                                    )
-                                                  }
-                                                  className="size-8 rounded-lg bg-white/80 hover:bg-white text-slate-600 hover:text-slate-900 border border-slate-200 shadow-sm backdrop-blur-sm transition-all"
-                                                >
-                                                  {copiedId === codeContent ? (
-                                                    <Check className="size-4 text-emerald-400" />
-                                                  ) : (
-                                                    <Copy className="size-4" />
-                                                  )}
-                                                </Button>
-                                              </div>
-                                              <SyntaxHighlighter
-                                                style={oneLight}
-                                                language={match[1]}
-                                                PreTag="div"
-                                                customStyle={{
-                                                  margin: 0,
-                                                  padding: "2rem",
-                                                  borderRadius: "1.5rem",
-                                                  fontSize: "14px",
-                                                  lineHeight: "1.6",
-                                                  backgroundColor: "#F8FAFC",
-                                                  border: "1px solid #E2E8F0",
-                                                }}
-                                                {...props}
-                                              >
-                                                {codeContent}
-                                              </SyntaxHighlighter>
-                                            </div>
-                                          );
-                                        }
-
-                                        // Inline code with syntax highlighting
-                                        return (
-                                          <SyntaxHighlighter
-                                            style={oneLight}
-                                            language="javascript" // Default to JS for inline highlighting
-                                            PreTag="span"
-                                            customStyle={{
-                                              display: "inline",
-                                              padding: "0.2em 0.4em",
-                                              margin: 0,
-                                              fontSize: "0.9em",
-                                              borderRadius: "0.4rem",
-                                              backgroundColor: "#F1F5F9",
-                                              border: "1px solid #E2E8F0",
-                                              fontWeight: "600",
-                                              fontFamily: "inherit",
-                                            }}
-                                            {...props}
-                                          >
-                                            {codeContent}
-                                          </SyntaxHighlighter>
-                                        );
-                                      },
-                                    }}
-                                  >
-                                    {interaction.answer}
-                                  </ReactMarkdown>
+                                  <span className="text-[15px] text-slate-600 font-medium">
+                                    {question}
+                                  </span>
                                 </div>
                               </div>
                             </div>
-                          )}
+
+                            {/* Segment: Answer */}
+                            {hasAnswer && (
+                              <div className="flex items-start gap-5">
+                                <div className="size-6 flex items-center justify-center shrink-0 mt-1">
+                                  <Star className="size-5 text-amber-500 fill-amber-500" />
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center gap-2 mb-4">
+                                    <span className="text-sm font-bold text-slate-800">
+                                      Answer:
+                                    </span>
+                                  </div>
+                                  <div
+                                    className="text-[15px] leading-relaxed text-slate-700 font-medium prose prose-slate max-w-none 
+                                        prose-p:mb-5 last:prose-p:mb-0 prose-strong:text-brand prose-strong:font-bold 
+                                        prose-ul:list-disc prose-ul:pl-6 prose-li:mb-2 
+                                        prose-code:text-brand prose-code:font-bold
+                                        prose-pre:bg-transparent prose-pre:p-0 prose-pre:rounded-none prose-pre:border-none overflow-x-hidden"
+                                  >
+                                    <ReactMarkdown
+                                      remarkPlugins={[remarkGfm]}
+                                      components={{
+                                        code({
+                                          node,
+                                          inline,
+                                          className,
+                                          children,
+                                          ...props
+                                        }: any) {
+                                          const match = /language-(\w+)/.exec(
+                                            className || "",
+                                          );
+                                          const codeContent = String(
+                                            children,
+                                          ).replace(/\n$/, "");
+
+                                          if (!inline && match) {
+                                            return (
+                                              <div className="relative group/code my-6">
+                                                <div className="absolute right-4 top-4 z-20 opacity-0 group-hover/code:opacity-100 transition-all">
+                                                  <Button
+                                                    variant="secondary"
+                                                    size="icon"
+                                                    onClick={() =>
+                                                      handleCopy(
+                                                        codeContent,
+                                                        codeContent,
+                                                      )
+                                                    }
+                                                    className="size-8 rounded-lg bg-white/80 hover:bg-white text-slate-600 hover:text-slate-900 border border-slate-200 shadow-sm backdrop-blur-sm transition-all"
+                                                  >
+                                                    {copiedId ===
+                                                    codeContent ? (
+                                                      <Check className="size-4 text-emerald-400" />
+                                                    ) : (
+                                                      <Copy className="size-4" />
+                                                    )}
+                                                  </Button>
+                                                </div>
+                                                <SyntaxHighlighter
+                                                  style={oneLight}
+                                                  language={match[1]}
+                                                  PreTag="div"
+                                                  customStyle={{
+                                                    margin: 0,
+                                                    padding: "2rem",
+                                                    borderRadius: "1.5rem",
+                                                    fontSize: "14px",
+                                                    lineHeight: "1.6",
+                                                    backgroundColor: "#F8FAFC",
+                                                    border: "1px solid #E2E8F0",
+                                                  }}
+                                                  {...props}
+                                                >
+                                                  {codeContent}
+                                                </SyntaxHighlighter>
+                                              </div>
+                                            );
+                                          }
+
+                                          return (
+                                            <code
+                                              className="bg-slate-100 text-slate-900 px-1.5 py-0.5 rounded-md font-mono text-[13px]"
+                                              {...props}
+                                            >
+                                              {children}
+                                            </code>
+                                          );
+                                        },
+                                      }}
+                                    >
+                                      {answer}
+                                    </ReactMarkdown>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      }
+
+                      // Render Transcript Message (User or Interviewer)
+                      return (
+                        <div
+                          key={msg.id || `msg-${idx}`}
+                          className={`flex flex-col ${isUser ? "items-end" : "items-start"} gap-2`}
+                        >
+                          <div
+                            className={`max-w-[85%] px-6 py-4 rounded-3xl text-[15px] font-medium leading-relaxed shadow-sm
+                              ${
+                                isUser
+                                  ? "bg-brand text-white rounded-tr-none"
+                                  : "bg-slate-50 text-slate-700 border border-slate-100 rounded-tl-none"
+                              }`}
+                          >
+                            {msg.content || msg.question}
+                          </div>
+                          <div
+                            className={`flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider text-slate-400
+                              ${isUser ? "flex-row-reverse" : "flex-row"}`}
+                          >
+                            <span>{isUser ? "You" : "Interviewer"}</span>
+                            <span className="opacity-40">•</span>
+                            <span>{formatTime(msg.timestamp)}</span>
+                          </div>
                         </div>
                       );
                     })}

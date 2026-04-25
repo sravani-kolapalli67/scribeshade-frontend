@@ -53,7 +53,9 @@ export const useDeepgram = ({
           audio: {
             echoCancellation: true,
             noiseSuppression: true,
-            sampleRate: 16000,
+            autoGainControl: true,
+            channelCount: 1,
+            sampleRate: 48000,
           },
         });
         ownsStreamRef.current = true;
@@ -63,10 +65,11 @@ export const useDeepgram = ({
 
       const mediaRecorder = new MediaRecorder(stream, {
         mimeType: "audio/webm;codecs=opus",
+        audioBitsPerSecond: 128000, // High quality audio encoding for better accuracy
       });
       mediaRecorderRef.current = mediaRecorder;
 
-      const url = `wss://api.deepgram.com/v1/listen?model=${model}&punctuate=true&interim_results=true&language=en&smart_format=true&endpointing=300`;
+      const url = `wss://api.deepgram.com/v1/listen?model=${model}&punctuate=true&interim_results=true&language=en&smart_format=true&endpointing=5000&utterance_end_ms=5000`;
 
       const socket = new WebSocket(url, ["token", apiKey]);
       socketRef.current = socket;
@@ -81,7 +84,8 @@ export const useDeepgram = ({
             socket.send(event.data);
           }
         };
-        mediaRecorder.start(250);
+        // Send audio chunks every 100ms for near real-time streaming
+        mediaRecorder.start(100);
         setIsTranscribing(true);
         setIsConnecting(false);
         isStartingRef.current = false;
@@ -169,12 +173,21 @@ export const useDeepgram = ({
     setInterimTranscript("");
   }, []);
 
-  // Handle inputStream changes - stop old transcription and start new one
+  // Handle inputStream changes:
+  // When the screen-share stream is replaced (user picks a new tab / audio toggled),
+  // tear down the existing session so the caller's auto-start effect can restart
+  // cleanly with the new inputStream.
+  const prevInputStreamRef = useRef<MediaStream | null | undefined>(undefined);
   useEffect(() => {
-    if (inputStream && isTranscribing) {
+    const prev = prevInputStreamRef.current;
+    prevInputStreamRef.current = inputStream;
+
+    // Only react to actual stream changes (not the initial mount)
+    if (prev === undefined) return;
+
+    if (prev !== inputStream) {
+      // Stream swapped — stop so the auto-start effect can restart with new audio
       stopTranscription();
-      // startTranscription will be called by the outer useEffect in page.tsx
-      // but we need to ensure it's not blocked by stale state
     }
   }, [inputStream, stopTranscription]);
 

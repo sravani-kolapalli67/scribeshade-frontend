@@ -9,7 +9,6 @@ import {
 const ClerkAuth = () => {
   const { user } = useUser();
   return (
-    // <Navbar>
     <div className="flex items-center gap-4">
       <SignedOut>
         <div className="transition-all hover:scale-105 active:scale-95">

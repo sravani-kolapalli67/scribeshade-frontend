@@ -21,7 +21,7 @@
         "fullscreen": false,
         "maximized": true,
         "devtools": true,
-        "contentProtected": true,
+        "contentProtected": false,
         "skipTaskbar": true
       },
       {
@@ -35,7 +35,7 @@
         "center": true,
         "resizable": false,
         "devtools": true,
-        "contentProtected": true,
+        "contentProtected": false,
         "skipTaskbar": true,
         "alwaysOnTop": true,
         "visibleOnAllWorkspaces": true

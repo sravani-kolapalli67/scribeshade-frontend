@@ -4,6 +4,9 @@ import remarkGfm from "remark-gfm";
 import { Message } from "../Transcript";
 import { cn } from "@/lib/utils";
 import { Copy, Check, User } from "lucide-react";
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { vscDarkPlus, prism } from "react-syntax-highlighter/dist/esm/styles/prism";
+
 
 interface ChatMessageProps {
   message: Message;
@@ -62,10 +65,10 @@ const CodeBlock = ({
   return (
     <div
       className={cn(
-        "rounded-xl overflow-hidden mb-6 border",
+        "rounded-xl overflow-hidden mb-6 border shadow-md",
         isFullscreen
-          ? "bg-black/40 border-white/10"
-          : "bg-slate-50 border-slate-200",
+          ? "bg-black/60 border-white/10"
+          : "bg-[#FAFAFA] border-slate-200",
       )}
     >
       {/* Code Header */}
@@ -80,7 +83,7 @@ const CodeBlock = ({
         <span
           className={cn(
             "text-[10px] font-bold uppercase tracking-widest",
-            isFullscreen ? "text-slate-400" : "text-slate-500",
+            isFullscreen ? "text-slate-400" : "text-slate-500"
           )}
         >
           {language || "Code"}
@@ -90,7 +93,7 @@ const CodeBlock = ({
           className={cn(
             "flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] font-bold transition-all active:scale-95",
             isFullscreen
-              ? "bg-white/10 hover:bg-white/20 text-white"
+              ? "bg-white/10 hover:bg-white/20 text-white shadow-sm border border-white/5"
               : "bg-white hover:bg-slate-50 text-slate-600 shadow-sm border border-slate-200",
           )}
         >
@@ -109,14 +112,14 @@ const CodeBlock = ({
       </div>
 
       {/* Code Content */}
-      <pre
+      <div
         className={cn(
-          "p-4 m-0 overflow-x-auto text-[13px] font-mono leading-relaxed",
-          isFullscreen ? "text-white" : "text-slate-800",
+          "m-0 overflow-x-auto text-[13px] font-mono leading-relaxed",
+          isFullscreen ? "text-slate-200" : "text-slate-800"
         )}
       >
         {children}
-      </pre>
+      </div>
     </div>
   );
 };
@@ -150,47 +153,58 @@ export const ChatMessage = ({
       </div>
       <div
         className={cn(
-          "pl-8 text-sm leading-relaxed font-bold",
+          "pl-8 text-[14.5px] leading-relaxed font-medium tracking-wide",
           isFullscreen
-            ? "text-white drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]"
+            ? "text-slate-100 drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]"
             : "text-slate-700",
-          "[&_p]:mb-4 [&_p:last-child]:mb-0 [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:mb-4 [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:mb-4 [&_li]:mb-1 [&_strong]:font-bold",
+          "[&_p]:mb-4 [&_p:last-child]:mb-0 [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:mb-4 [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:mb-4 [&_li]:mb-1.5 [&_strong]:font-bold [&_strong]:text-blue-500 dark:[&_strong]:text-blue-400",
           isFullscreen
-            ? "[&_pre]:bg-transparent [&_pre]:p-4 [&_pre]:m-0 [&_pre]:overflow-x-auto [&_code]:text-white [&_code]:bg-transparent"
-            : "[&_pre]:bg-transparent [&_pre]:p-4 [&_pre]:m-0 [&_pre]:overflow-x-auto [&_code]:text-slate-800 [&_code]:bg-transparent",
-          "[&_a]:text-brand [&_a]:underline [&_h1]:text-white [&_h2]:text-white [&_h3]:text-white",
+            ? "[&_pre]:bg-transparent [&_pre]:p-0 [&_pre]:m-0 [&_code]:text-white [&_code]:bg-transparent"
+            : "[&_pre]:bg-transparent [&_pre]:p-0 [&_pre]:m-0 [&_code]:text-slate-800 [&_code]:bg-transparent",
+          "[&_a]:text-blue-500 [&_a]:underline [&_h1]:text-blue-500 dark:[&_h1]:text-blue-400 [&_h1]:font-bold [&_h1]:mb-3 [&_h1]:text-xl [&_h2]:text-blue-500 dark:[&_h2]:text-blue-400 [&_h2]:font-bold [&_h2]:mb-3 [&_h2]:text-lg [&_h3]:text-blue-500 dark:[&_h3]:text-blue-400 [&_h3]:font-semibold [&_h3]:mb-2",
         )}
       >
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
           components={{
-            pre: ({ children }) => {
-              const codeElement = children as any;
-              const language =
-                codeElement?.props?.className?.replace("language-", "") || "";
-              return (
-                <CodeBlock isFullscreen={isFullscreen} language={language}>
-                  {children}
-                </CodeBlock>
-              );
-            },
-            code: ({ node, inline, children, ...props }: any) => {
-              if (inline) {
+            code(props) {
+              const { children, className, node, ...rest } = props as any;
+              const match = /language-(\w+)/.exec(className || "");
+              
+              if (!match) {
                 return (
                   <code
                     className={cn(
-                      "px-1.5 py-0.5 rounded-md text-[13px] font-mono",
+                      "px-1.5 py-0.5 rounded text-[13px] font-mono font-medium",
                       isFullscreen
-                        ? "bg-white/10 text-brand"
-                        : "bg-slate-100 text-brand",
+                        ? "bg-white/10 text-slate-200"
+                        : "bg-slate-100/80 text-slate-800 border border-slate-200/60 shadow-sm",
                     )}
-                    {...props}
+                    {...rest}
                   >
                     {children}
                   </code>
                 );
               }
-              return <code {...props}>{children}</code>;
+
+              return (
+                <CodeBlock isFullscreen={isFullscreen} language={match[1]}>
+                  <SyntaxHighlighter
+                    {...rest}
+                    PreTag="div"
+                    children={String(children).replace(/\n$/, "")}
+                    language={match[1]}
+                    style={isFullscreen ? vscDarkPlus : prism}
+                    customStyle={{
+                      margin: 0,
+                      background: "transparent",
+                      padding: "1rem",
+                      fontSize: "13px",
+                      borderRadius: "0",
+                    }}
+                  />
+                </CodeBlock>
+              );
             },
           }}
         >
