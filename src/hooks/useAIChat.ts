@@ -8,7 +8,7 @@ export const useAIChat = () => {
   const [isAnswering, setIsAnswering] = useState(false);
 
   const handleAnalyzeScreen = useCallback(
-    async (sessionId: string, screenshotBlob: Blob | null) => {
+    async (sessionId: string, screenshotBlob: Blob | null, aiModel: string) => {
       if (isAnalyzing || !screenshotBlob) return;
 
       setIsAnalyzing(true);
@@ -32,6 +32,9 @@ export const useAIChat = () => {
       try {
         const formData = new FormData();
         formData.append("screenshot", screenshotBlob, "screenshot.jpg");
+        if (aiModel) {
+          formData.append("aiModel", aiModel);
+        }
 
         const response = await fetch(
           `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionId}/analyze-screen`,
@@ -79,7 +82,7 @@ export const useAIChat = () => {
   );
 
   const handleAiAnswer = useCallback(
-    async (sessionId: string, transcript: string) => {
+    async (sessionId: string, transcript: string, aiModel: string) => {
       if (isAnswering || !transcript) return;
 
       setIsAnswering(true);
@@ -108,7 +111,7 @@ export const useAIChat = () => {
             headers: {
               "Content-Type": "application/json",
             },
-            body: JSON.stringify({ transcript }),
+            body: JSON.stringify({ transcript, aiModel }),
           },
         );
 
@@ -153,7 +156,7 @@ export const useAIChat = () => {
   );
 
   const handleCustomQuery = useCallback(
-    async (sessionId: string, query: string) => {
+    async (sessionId: string, query: string, aiModel: string) => {
       if (isAnswering || !query.trim()) return;
 
       setIsAnswering(true);
@@ -214,7 +217,7 @@ export const useAIChat = () => {
             headers: {
               "Content-Type": "application/json",
             },
-            body: JSON.stringify({ transcript: query, isCustomQuery: true }),
+            body: JSON.stringify({ transcript: query, isCustomQuery: true, aiModel }),
           },
         );
 

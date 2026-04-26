@@ -20,6 +20,8 @@ interface AIChatPanelProps {
   isFullscreen?: boolean;
   isFreeSession?: boolean;
   timerText?: string | null;
+  selectedModel: string;
+  onModelChange: (model: string) => void;
 }
 
 export const AIChatPanel = ({
@@ -37,6 +39,8 @@ export const AIChatPanel = ({
   isFullscreen = false,
   isFreeSession = false,
   timerText = null,
+  selectedModel,
+  onModelChange,
 }: AIChatPanelProps) => {
   return (
     <div className={cn(
@@ -48,6 +52,8 @@ export const AIChatPanel = ({
         isFullscreen={isFullscreen} 
         isFreeSession={isFreeSession} 
         timerText={timerText} 
+        selectedModel={selectedModel}
+        onModelChange={onModelChange}
       />
 
       <div className="flex-1 flex flex-col overflow-hidden relative">

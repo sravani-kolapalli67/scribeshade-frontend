@@ -16,6 +16,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { Globe, Cpu, MoreHorizontal, Info, Sparkles } from "lucide-react";
+import { ModelSelector } from "@/pages/Sessions/ActiveSession/components/ModelSelector";
 
 interface Step4Props {
   data: {
@@ -31,12 +32,6 @@ const LANGUAGES = [
   { value: "English", label: "English" },
   { value: "Spanish", label: "Spanish" },
   { value: "French", label: "French" },
-  { value: "German", label: "German" },
-  { value: "Hindi", label: "Hindi" },
-  { value: "Arabic", label: "Arabic" },
-  { value: "Chinese", label: "Chinese" },
-  { value: "Portuguese", label: "Portuguese" },
-  { value: "Japanese", label: "Japanese" },
 ];
 
 const AI_MODELS = [
@@ -152,7 +147,13 @@ export function Step4_LanguageAISettings({ data, onChange }: Step4Props) {
           </Label>
           <Info className="h-3.5 w-3.5 text-muted-foreground cursor-help" />
         </div>
-        <Select
+        <ModelSelector
+          value={data.aiModel}
+          onChange={(v) => onChange("aiModel", v)}
+          isFullscreen={false}
+          className="w-full h-10 bg-background border-border/80 text-foreground"
+        />
+        {/* <Select
           value={data.aiModel}
           onValueChange={(v: string) => onChange("aiModel", v)}
         >
@@ -191,7 +192,7 @@ export function Step4_LanguageAISettings({ data, onChange }: Step4Props) {
               </SelectItem>
             ))}
           </SelectContent>
-        </Select>
+        </Select> */}
       </div>
     </div>
   );

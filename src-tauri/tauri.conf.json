@@ -20,10 +20,8 @@
         "resizable": false,
         "fullscreen": false,
         "maximized": true,
-        "devtools": true,
-        
-        "contentProtected": false,
-        "skipTaskbar": false
+        "contentProtected": true,
+        "skipTaskbar": true
       },
       {
         "label": "mini",
@@ -34,9 +32,10 @@
         "visible": false,
         "center": true,
         "resizable": false,
-        "devtools": true,
-        "contentProtected": false,
-        "skipTaskbar": false,
+        "minimizable": false,
+        "maximizable": false,
+        "contentProtected": true,
+        "skipTaskbar": true,
         "alwaysOnTop": true,
         "visibleOnAllWorkspaces": true
       }

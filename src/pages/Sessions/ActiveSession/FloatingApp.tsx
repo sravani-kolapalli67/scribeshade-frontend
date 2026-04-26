@@ -39,6 +39,7 @@ import {
 } from "lucide-react";
 import { ChatActionButtons } from "./components/ChatActionButtons";
 import { SessionTimer } from "./components/SessionTimer";
+import { ModelSelector } from "./components/ModelSelector";
 import { cn } from "@/lib/utils";
 import {
   Tooltip,
@@ -58,6 +59,7 @@ interface OverlayData {
   isMicConnecting: boolean;
   timerText: string | null;
   sessionId: string | null;
+  selectedModel?: string;
 }
 
 interface AIResponse {
@@ -176,7 +178,9 @@ const parseAIResponse = (raw: string): ParsedSection => {
   }
 
   // Answer-only marker
-  const ansOnly = text.match(/^\s*(?:\*\*)?answer(?:\*\*)?\s*[:\-]\s*([\s\S]*)$/i);
+  const ansOnly = text.match(
+    /^\s*(?:\*\*)?answer(?:\*\*)?\s*[:\-]\s*([\s\S]*)$/i,
+  );
   if (ansOnly) return { answer: ansOnly[1].trim() };
 
   return { answer: text };
@@ -203,79 +207,83 @@ const AnswerArea: React.FC<{
       {responses.map((resp) => {
         const parsed = parseAIResponse(resp.text);
         return (
-        <div
-          key={resp.messageId}
-          className="animate-in fade-in slide-in-from-bottom-1 duration-300"
-        >
-          {/* Summarized Question Header */}
-          {parsed.question && (
-            <div className="flex items-start gap-2 mb-3 text-[13px] leading-relaxed text-white">
-              <MessageSquare className="h-4 w-4 mt-0.5 shrink-0 text-white/80" />
-              <div className="flex-1 break-words">
-                <span className="font-bold">Summarized question:</span>{" "}
-                <span className="font-medium text-white/90">{parsed.question}</span>
-              </div>
-            </div>
-          )}
-
-          {/* Answer Header */}
-          <div className="flex items-center gap-2 mb-2">
-            <Star className="h-4 w-4 fill-amber-400 text-amber-400" />
-            <span className="text-[13px] font-bold text-white">Answer:</span>
-          </div>
-
-          {/* Markdown Content */}
           <div
-            className={[
-              "text-[13px] leading-relaxed font-medium text-white break-words",
-              "[&_p]:mb-3 [&_p:last-child]:mb-0",
-              "[&_ul]:list-disc [&_ul]:pl-5 [&_ul]:mb-3 [&_ul]:space-y-1",
-              "[&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:mb-3 [&_ol]:space-y-1",
-              "[&_li]:mb-0 [&_li]:marker:text-white/60",
-              "[&_strong]:font-bold [&_strong]:text-white",
-              "[&_em]:text-amber-200 [&_em]:not-italic [&_em]:font-semibold",
-              "[&_a]:text-blue-300 [&_a]:underline",
-              "[&_h1]:text-white [&_h1]:text-base [&_h1]:font-bold [&_h1]:mb-2 [&_h1]:mt-2",
-              "[&_h2]:text-white [&_h2]:text-sm [&_h2]:font-bold [&_h2]:mb-2 [&_h2]:mt-2",
-              "[&_h3]:text-white [&_h3]:text-sm [&_h3]:font-semibold [&_h3]:mb-1 [&_h3]:mt-1",
-              "[&_blockquote]:border-l-2 [&_blockquote]:border-blue-400/50 [&_blockquote]:pl-3 [&_blockquote]:text-white/80 [&_blockquote]:italic",
-              "[&_table]:w-full [&_table]:my-3 [&_table]:text-[12px] [&_table]:border-collapse",
-              "[&_th]:border [&_th]:border-white/10 [&_th]:bg-white/5 [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:font-bold",
-              "[&_td]:border [&_td]:border-white/10 [&_td]:px-2 [&_td]:py-1",
-            ].join(" ")}
+            key={resp.messageId}
+            className="animate-in fade-in slide-in-from-bottom-1 duration-300"
           >
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              components={{
-                pre: ({ children }) => {
-                  const codeElement = children as any;
-                  const language =
-                    codeElement?.props?.className?.replace("language-", "") ||
-                    "";
-                  return <CodeBlock language={language}>{children}</CodeBlock>;
-                },
-                code: ({ node, inline, children, ...props }: any) => {
-                  if (inline) {
-                    return (
-                      <code
-                        className="px-1.5 py-0.5 rounded text-[12px] font-mono font-semibold bg-blue-500/15 text-blue-200 border border-blue-400/20"
-                        {...props}
-                      >
-                        {children}
-                      </code>
-                    );
-                  }
-                  return <code {...props}>{children}</code>;
-                },
-              }}
-            >
-              {parsed.answer}
-            </ReactMarkdown>
-            {resp.isStreaming && (
-              <span className="ml-1 inline-block h-3.5 w-0.5 bg-blue-400 animate-pulse" />
+            {/* Summarized Question Header */}
+            {parsed.question && (
+              <div className="flex items-start gap-2 mb-3 text-[13px] leading-relaxed text-white">
+                <MessageSquare className="h-4 w-4 mt-0.5 shrink-0 text-white/80" />
+                <div className="flex-1 break-words">
+                  <span className="font-bold">Summarized question:</span>{" "}
+                  <span className="font-medium text-white/90">
+                    {parsed.question}
+                  </span>
+                </div>
+              </div>
             )}
+
+            {/* Answer Header */}
+            <div className="flex items-center gap-2 mb-2">
+              <Star className="h-4 w-4 fill-amber-400 text-amber-400" />
+              <span className="text-[13px] font-bold text-white">Answer:</span>
+            </div>
+
+            {/* Markdown Content */}
+            <div
+              className={[
+                "text-[13px] leading-relaxed font-medium text-white break-words",
+                "[&_p]:mb-3 [&_p:last-child]:mb-0",
+                "[&_ul]:list-disc [&_ul]:pl-5 [&_ul]:mb-3 [&_ul]:space-y-1",
+                "[&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:mb-3 [&_ol]:space-y-1",
+                "[&_li]:mb-0 [&_li]:marker:text-white/60",
+                "[&_strong]:font-bold [&_strong]:text-white",
+                "[&_em]:text-amber-200 [&_em]:not-italic [&_em]:font-semibold",
+                "[&_a]:text-blue-300 [&_a]:underline",
+                "[&_h1]:text-white [&_h1]:text-base [&_h1]:font-bold [&_h1]:mb-2 [&_h1]:mt-2",
+                "[&_h2]:text-white [&_h2]:text-sm [&_h2]:font-bold [&_h2]:mb-2 [&_h2]:mt-2",
+                "[&_h3]:text-white [&_h3]:text-sm [&_h3]:font-semibold [&_h3]:mb-1 [&_h3]:mt-1",
+                "[&_blockquote]:border-l-2 [&_blockquote]:border-blue-400/50 [&_blockquote]:pl-3 [&_blockquote]:text-white/80 [&_blockquote]:italic",
+                "[&_table]:w-full [&_table]:my-3 [&_table]:text-[12px] [&_table]:border-collapse",
+                "[&_th]:border [&_th]:border-white/10 [&_th]:bg-white/5 [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:font-bold",
+                "[&_td]:border [&_td]:border-white/10 [&_td]:px-2 [&_td]:py-1",
+              ].join(" ")}
+            >
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  pre: ({ children }) => {
+                    const codeElement = children as any;
+                    const language =
+                      codeElement?.props?.className?.replace("language-", "") ||
+                      "";
+                    return (
+                      <CodeBlock language={language}>{children}</CodeBlock>
+                    );
+                  },
+                  code: ({ node, inline, children, ...props }: any) => {
+                    if (inline) {
+                      return (
+                        <code
+                          className="px-1.5 py-0.5 rounded text-[12px] font-mono font-semibold bg-blue-500/15 text-blue-200 border border-blue-400/20"
+                          {...props}
+                        >
+                          {children}
+                        </code>
+                      );
+                    }
+                    return <code {...props}>{children}</code>;
+                  },
+                }}
+              >
+                {parsed.answer}
+              </ReactMarkdown>
+              {resp.isStreaming && (
+                <span className="ml-1 inline-block h-3.5 w-0.5 bg-blue-400 animate-pulse" />
+              )}
+            </div>
           </div>
-        </div>
         );
       })}
     </div>
@@ -291,6 +299,7 @@ const FloatingApp: React.FC = () => {
     isMicConnecting: false,
     timerText: null,
     sessionId: null,
+    selectedModel: "google/gemma-4-26b-a4b-it",
   });
 
   const [responses, setResponses] = useState<AIResponse[]>([]);
@@ -321,29 +330,32 @@ const FloatingApp: React.FC = () => {
   const heightDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ─── Derived state machine — single source of truth for the OS window
-  type MiniState = 'badge' | 'bar' | 'expanded';
-  const miniState: MiniState =
-    isWindowCollapsed
-      ? 'badge'
-      : (isAnswering || isAnalyzing || (responses.length > 0 && isResponsesExpanded))
-        ? 'expanded'
-        : 'bar';
+  type MiniState = "badge" | "bar" | "expanded";
+  const miniState: MiniState = isWindowCollapsed
+    ? "badge"
+    : isAnswering ||
+        isAnalyzing ||
+        (responses.length > 0 && isResponsesExpanded)
+      ? "expanded"
+      : "bar";
 
   // Push discrete state transitions to Rust. Rust owns the eased animation.
   useEffect(() => {
-    if (miniState === 'expanded') return; // expanded height is sent by the observer below
-    invoke('set_mini_state', { state: miniState }).catch(() => {});
+    if (miniState === "expanded") return; // expanded height is sent by the observer below
+    invoke("set_mini_state", { state: miniState }).catch(() => {});
   }, [miniState]);
 
   // While expanded, watch real DOM height and forward changes to Rust
   // (debounced — one IPC call per ~60 ms of stable size).
   useEffect(() => {
-    if (!rootRef.current || miniState !== 'expanded') return;
+    if (!rootRef.current || miniState !== "expanded") return;
 
     const send = (h: number) => {
       if (Math.abs(h - lastSentHeightRef.current) < 2) return;
       lastSentHeightRef.current = h;
-      invoke('set_mini_state', { state: 'expanded', height: h }).catch(() => {});
+      invoke("set_mini_state", { state: "expanded", height: h }).catch(
+        () => {},
+      );
     };
 
     const observer = new ResizeObserver((entries) => {
@@ -401,7 +413,12 @@ const FloatingApp: React.FC = () => {
           if (existing) {
             return prev.map((r) =>
               r.messageId === payload.messageId
-                ? { ...r, text: payload.text, isStreaming: payload.isStreaming, sender: payload.sender }
+                ? {
+                    ...r,
+                    text: payload.text,
+                    isStreaming: payload.isStreaming,
+                    sender: payload.sender,
+                  }
                 : r,
             );
           }
@@ -545,7 +562,9 @@ const FloatingApp: React.FC = () => {
           </span>
           {responses.length > 0 && (
             <span className="ml-1 flex items-center justify-center w-3.5 h-3.5 rounded-full bg-blue-500/30 border border-blue-500/50">
-              <span className="text-[8px] font-bold text-blue-300">{responses.length}</span>
+              <span className="text-[8px] font-bold text-blue-300">
+                {responses.length}
+              </span>
             </span>
           )}
         </button>
@@ -605,6 +624,17 @@ const FloatingApp: React.FC = () => {
 
           {/* Right: Actions Area */}
           <div className="flex items-center gap-2">
+            <div className="scale-90 origin-right">
+              <ModelSelector
+                value={data.selectedModel || "google/gemma-4-26b-a4b-it"}
+                onChange={(val) => {
+                  setData((prev) => ({ ...prev, selectedModel: val }));
+                  emit("overlay-model-change", { model: val });
+                }}
+                isFullscreen={true}
+              />
+            </div>
+
             {/* Custom Timer Pill */}
             <div className="flex items-center gap-2 bg-white/5 px-3 h-9 rounded-xl border border-white/10 shadow-inner transition-all hover:bg-white/10 group">
               <Clock className="h-3.5 w-3.5 text-blue-400 group-hover:animate-pulse" />
@@ -631,7 +661,7 @@ const FloatingApp: React.FC = () => {
                 </TooltipContent>
               </Tooltip>
 
-              <div className="w-[1px] h-4 bg-white/10 mx-0.5" />
+              {/* <div className="w-[1px] h-4 bg-white/10 mx-0.5" />
               <Tooltip delayDuration={300}>
                 <TooltipTrigger asChild>
                   <button
@@ -647,7 +677,7 @@ const FloatingApp: React.FC = () => {
                 >
                   Hide Main App from Taskbar
                 </TooltipContent>
-              </Tooltip>
+              </Tooltip> */}
 
               <div className="w-[1px] h-4 bg-white/10 mx-0.5" />
               <Tooltip delayDuration={300}>
@@ -688,8 +718,8 @@ const FloatingApp: React.FC = () => {
                 data.isMicConnecting
                   ? "bg-amber-500 animate-pulse shadow-[0_0_8px_rgba(245,158,11,0.5)]"
                   : data.isMicActive
-                  ? "bg-emerald-500 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)]"
-                  : "bg-white/20",
+                    ? "bg-emerald-500 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)]"
+                    : "bg-white/20",
               )}
             />
             <div className="flex-1 truncate text-[12px] font-medium text-white italic">
@@ -806,7 +836,6 @@ const FloatingApp: React.FC = () => {
             </Tooltip>
           </div>
         </div>
-
       </div>
 
       {/* ─── Bottom Card: AI Responses ─── */}
@@ -819,14 +848,20 @@ const FloatingApp: React.FC = () => {
           <div className="px-3 py-2 flex items-center justify-between shrink-0">
             <div className="flex items-center gap-1">
               <button
-                onClick={() => setCurrentResponseIndex(i => Math.max(0, i - 1))}
+                onClick={() =>
+                  setCurrentResponseIndex((i) => Math.max(0, i - 1))
+                }
                 disabled={currentResponseIndex === 0 || responses.length === 0}
                 className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-25 disabled:cursor-not-allowed text-white transition-all active:scale-95"
               >
                 <ChevronLeft size={14} />
               </button>
               <button
-                onClick={() => setCurrentResponseIndex(i => Math.min(responses.length - 1, i + 1))}
+                onClick={() =>
+                  setCurrentResponseIndex((i) =>
+                    Math.min(responses.length - 1, i + 1),
+                  )
+                }
                 disabled={currentResponseIndex >= responses.length - 1}
                 className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-25 disabled:cursor-not-allowed text-white transition-all active:scale-95"
               >
@@ -847,17 +882,21 @@ const FloatingApp: React.FC = () => {
             <Tooltip delayDuration={300}>
               <TooltipTrigger asChild>
                 <button
-                  onClick={() => setIsResponsesExpanded(v => !v)}
+                  onClick={() => setIsResponsesExpanded((v) => !v)}
                   className="w-7 h-7 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 hover:text-blue-400 text-white/50 transition-all active:scale-95"
                 >
-                  {isResponsesExpanded ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
+                  {isResponsesExpanded ? (
+                    <ChevronDown size={13} />
+                  ) : (
+                    <ChevronUp size={13} />
+                  )}
                 </button>
               </TooltipTrigger>
               <TooltipContent
                 side="left"
                 className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
               >
-                {isResponsesExpanded ? 'Collapse panel' : 'Expand panel'}
+                {isResponsesExpanded ? "Collapse panel" : "Expand panel"}
               </TooltipContent>
             </Tooltip>
           </div>
@@ -865,17 +904,22 @@ const FloatingApp: React.FC = () => {
           {/* Animated content — slides open/closed while nav row stays pinned */}
           <div
             style={{
-              display: 'grid',
-              gridTemplateRows: isResponsesExpanded ? '1fr' : '0fr',
-              transition: 'grid-template-rows 220ms cubic-bezier(0.4,0,0.2,1)',
+              display: "grid",
+              gridTemplateRows: isResponsesExpanded ? "1fr" : "0fr",
+              transition: "grid-template-rows 220ms cubic-bezier(0.4,0,0.2,1)",
             }}
           >
-            <div style={{ overflow: 'hidden', minHeight: 0 }}>
+            <div style={{ overflow: "hidden", minHeight: 0 }}>
               {responses.length > 0 && (
                 <div className="border-t border-white/10 max-h-[480px] overflow-y-auto overflow-x-hidden no-scrollbar">
                   <AnswerArea
-                    responses={[responses[currentResponseIndex]].filter(Boolean)}
-                    isStreaming={(isAnswering || isAnalyzing) && currentResponseIndex === responses.length - 1}
+                    responses={[responses[currentResponseIndex]].filter(
+                      Boolean,
+                    )}
+                    isStreaming={
+                      (isAnswering || isAnalyzing) &&
+                      currentResponseIndex === responses.length - 1
+                    }
                   />
                 </div>
               )}

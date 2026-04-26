@@ -34,10 +34,11 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import { ModelSelector } from "@/pages/Sessions/ActiveSession/components/ModelSelector";
 
 interface ConnectDialogProps {
   open: boolean;
-  onSuccess: () => void;
+  onSuccess: (finalModel: string) => void;
   onCancel: () => void;
   sessionId: string;
   companyName: string;
@@ -58,21 +59,6 @@ const LANGUAGES = [
   { value: "Chinese", label: "Chinese" },
   { value: "Portuguese", label: "Portuguese" },
   { value: "Japanese", label: "Japanese" },
-];
-
-const AI_MODELS = [
-  {
-    value: "Gemini 2.0 Flash",
-    label: "Gemini 2.0 Flash",
-    recommended: true,
-    speed: "Fast",
-  },
-  {
-    value: "Gemini 1.5 Flash",
-    label: "Gemini 1.5 Flash",
-    recommended: false,
-    speed: "Fast",
-  },
 ];
 
 const HOW_TO_CONNECT = [
@@ -137,7 +123,7 @@ export function ConnectDialog({
       }
 
       // 3. Trigger success callback
-      onSuccess();
+      onSuccess(aiModel);
     } catch (err: any) {
       if (
         err?.name === "NotAllowedError" ||
@@ -153,8 +139,6 @@ export function ConnectDialog({
       setActivating(false);
     }
   };
-
-  const selectedModel = AI_MODELS.find((m) => m.value === aiModel);
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onCancel()}>
@@ -240,47 +224,12 @@ export function ConnectDialog({
               <Label className="text-xs font-bold">AI Model</Label>
               <Info className="h-3 w-3 text-muted-foreground cursor-help" />
             </div>
-            <Select value={aiModel} onValueChange={setAIModel}>
-              <SelectTrigger className="h-10 rounded-xl bg-background border-border/80 text-sm">
-                <SelectValue>
-                  {selectedModel && (
-                    <div className="flex items-center gap-2">
-                      <Sparkles className="h-3.5 w-3.5 text-amber-500 fill-amber-500 shrink-0" />
-                      <span className="font-medium">{selectedModel.label}</span>
-                      {selectedModel.recommended && (
-                        <Badge className="bg-black dark:bg-white text-white dark:text-black hover:bg-black px-1.5 py-0 h-4 text-[9px] uppercase font-bold">
-                          Recommended
-                        </Badge>
-                      )}
-                      <span className="text-xs text-muted-foreground">
-                        {selectedModel.speed}
-                      </span>
-                    </div>
-                  )}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent className="rounded-xl">
-                {AI_MODELS.map((model) => (
-                  <SelectItem
-                    key={model.value}
-                    value={model.value}
-                    className="py-2.5"
-                  >
-                    <div className="flex items-center gap-2">
-                      <span>{model.label}</span>
-                      {model.recommended && (
-                        <Badge
-                          variant="outline"
-                          className="text-[9px] h-4 px-1 uppercase border-black"
-                        >
-                          Recommended
-                        </Badge>
-                      )}
-                    </div>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <ModelSelector
+              value={aiModel}
+              onChange={setAIModel}
+              isFullscreen={false}
+              className="w-full h-10 bg-background border-border/80 text-foreground"
+            />
           </div>
 
           {/* Screen Share Notice */}

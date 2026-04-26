@@ -134,6 +134,8 @@ fn toggle_floating(app: AppHandle) -> Result<(), String> {
             // .inner_size(300f64, 200f64)
             .position(20f64, 20f64)
             .always_on_top(true)
+            .minimizable(false)
+            .maximizable(false)
             .decorations(false)
             .skip_taskbar(true)
             .build()
@@ -179,6 +181,8 @@ fn show_mini_top_center(app: AppHandle) {
 
     window.set_position(PhysicalPosition { x, y }).unwrap();
     window.set_always_on_top(true).unwrap();
+    window.set_minimizable(false).unwrap();
+    window.set_maximizable(false).unwrap();
 
     // Strip all DWM chrome BEFORE showing the window so it never flashes
     // with the default Windows frame/border/shadow.
@@ -217,8 +221,8 @@ async fn set_mini_state(
 
     let (target_w, target_h): (u32, u32) = match state.as_str() {
         "badge"    => (180, 36),
-        "bar"      => (520, 222),
-        "expanded" => (520, height.unwrap_or(185).clamp(120, 720)),
+        "bar"      => (700, 222),
+        "expanded" => (700, height.unwrap_or(185).clamp(120, 720)),
         other      => return Err(format!("unknown mini state: {other}")),
     };
 

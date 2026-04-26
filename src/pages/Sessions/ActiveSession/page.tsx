@@ -32,14 +32,25 @@ export default function ActiveSession() {
   const [isEndSessionDialogOpen, setIsEndSessionDialogOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [selectedModel, setSelectedModel] = useState(
+    location.state?.connectData?.aiModel || "google/gemma-4-26b-a4b-it"
+  );
+  const selectedModelRef = useRef(selectedModel);
+
+  useEffect(() => {
+    selectedModelRef.current = selectedModel;
+  }, [selectedModel]);
 
   const [isConnectDialogOpen, setIsConnectDialogOpen] = useState(
     !!location.state?.showConnect,
   );
   const connectData = location.state?.connectData || {};
 
-  const handleConnectSuccess = useCallback(() => {
+  const handleConnectSuccess = useCallback((finalModel: string) => {
     setIsConnectDialogOpen(false);
+    if (finalModel) {
+      setSelectedModel(finalModel);
+    }
   }, []);
 
   const handleConnectCancel = useCallback(() => {
@@ -274,7 +285,7 @@ export default function ActiveSession() {
         }
 
         if (screenshot) {
-          await handleAnalyzeScreen(id, screenshot);
+          await handleAnalyzeScreen(id, screenshot, selectedModel);
         } else {
           console.warn("No screenshot could be captured.");
         }
@@ -298,7 +309,7 @@ export default function ActiveSession() {
       const combinedTranscript = messages
         .map((m) => `[${m.sender}]: ${m.text}`)
         .join("\n");
-      handleAiAnswer(id, combinedTranscript);
+      handleAiAnswer(id, combinedTranscript, selectedModel);
     } finally {
       setTimeout(() => {
         isExecutingRef.current = false;
@@ -379,6 +390,7 @@ export default function ActiveSession() {
         isMicConnecting: micTranscription.isConnecting,
         timerText: formattedTime,
         sessionId: id || null,
+        selectedModel: selectedModel,
       });
     };
     syncOverlay();
@@ -390,6 +402,7 @@ export default function ActiveSession() {
     tabTranscription.interimTranscript,
     formattedTime,
     id,
+    selectedModel,
   ]);
 
   // Forward AI chat responses to overlay
@@ -472,7 +485,11 @@ export default function ActiveSession() {
       });
       const u4 = await listen("overlay-ai-query", (event) => {
         const { query } = event.payload as { query: string };
-        if (active && id) handleCustomQueryRef.current(id, query);
+        if (active && id) handleCustomQueryRef.current(id, query, selectedModelRef.current);
+      });
+      const uModel = await listen("overlay-model-change", (event) => {
+        const { model } = event.payload as { model: string };
+        if (active) setSelectedModel(model);
       });
       const u5 = await listen("overlay-toggle-mic", () => {
         if (active) onToggleMicRef.current();
@@ -520,10 +537,11 @@ export default function ActiveSession() {
         u7();
         u8();
         u9();
+        uModel();
         return;
       }
 
-      unlisteners.push(u1, u2, u3, u4, u5, u6, u7, u8, u9);
+      unlisteners.push(u1, u2, u3, u4, u5, u6, u7, u8, u9, uModel);
     };
 
     setup();
@@ -578,10 +596,12 @@ export default function ActiveSession() {
     canAnalyze: !!stream,
     onAiAnswer,
     onAnalyzeScreen,
-    onSend: () => id && handleCustomQuery(id, inputMessage),
+    onSend: () => id && handleCustomQuery(id, inputMessage, selectedModel),
     onExit: () => setIsEndSessionDialogOpen(true),
     isFreeSession,
     timerText: formattedTime,
+    selectedModel,
+    onModelChange: setSelectedModel,
   };
 
   return (

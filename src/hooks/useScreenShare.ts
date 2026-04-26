@@ -33,12 +33,39 @@ export const useScreenShare = (options: { autoStart?: boolean } = { autoStart: t
 
   const startShare = useCallback(async () => {
     try {
-      const mediaStream = await navigator.mediaDevices.getDisplayMedia({
+      const displayMediaOptions: any = {
         video: {
+          displaySurface: "monitor",
           cursor: "always",
-        } as any,
-        audio: true,
-      });
+        },
+        audio: {
+          systemAudio: "include",
+        },
+      };
+
+      // Create a CaptureController if supported to prevent focus switching
+      const controller =
+        typeof (window as any).CaptureController !== "undefined"
+          ? new (window as any).CaptureController()
+          : null;
+
+      if (controller) {
+        displayMediaOptions.controller = controller;
+      }
+
+      const mediaStream = await navigator.mediaDevices.getDisplayMedia(
+        displayMediaOptions,
+      );
+
+      // Prevent the browser from automatically focusing the shared tab/window
+      if (controller && controller.setFocusBehavior) {
+        try {
+          controller.setFocusBehavior("no-focus-change");
+        } catch (err) {
+          console.warn("CaptureController.setFocusBehavior error:", err);
+        }
+      }
+
       setStream((prevStream) => {
         if (prevStream) {
           prevStream.getTracks().forEach((track) => track.stop());

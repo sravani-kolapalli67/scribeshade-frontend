@@ -41,7 +41,7 @@ const INITIAL_SESSION_DATA = {
   simpleLanguage: false,
   extraContext: "",
   instructions: "",
-  aiModel: "Gemini 2.0 Flash",
+  aiModel: "google/gemma-4-26b-a4b-it",
   autoGenerateAI: true,
   saveTranscript: true,
 };
