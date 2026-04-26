@@ -47,6 +47,12 @@ const AI_MODELS = [
     recommended: false,
     speed: "Fast",
   },
+  {
+    value: "anthropic/claude-sonnet-4.6",
+    label: "Claude 4.6 Sonnet",
+    recommended: false,
+    speed: "Fast",
+  },
 ];
 
 export function Step4_LanguageAISettings({ data, onChange }: Step4Props) {

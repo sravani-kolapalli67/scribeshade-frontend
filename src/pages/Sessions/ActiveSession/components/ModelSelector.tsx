@@ -11,6 +11,7 @@ const AI_MODELS = [
   { id: "google/gemma-4-26b-a4b-it", name: "Gemma 4 (26B)" },
   { id: "google/gemini-3.1-flash-lite-preview", name: "Gemini 3.1 Flash Lite" },
   { id: "google/gemini-3.1-pro-preview", name: "Gemini 3.1 Pro" },
+  { id: "anthropic/claude-sonnet-4.6", name: "Claude 4.6 Sonnet" },
 ];
 
 interface ModelSelectorProps {
