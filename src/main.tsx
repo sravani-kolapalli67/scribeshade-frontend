@@ -22,7 +22,8 @@ function ClerkProviderWithNavigate({
     <ClerkProvider
       publishableKey={PUBLISHABLE_KEY}
       afterSignOutUrl="/"
-      navigate={(to) => navigate(to)}
+      routerPush={(to: string) => navigate(to)}
+      routerReplace={(to: string) => navigate(to, { replace: true })}
     >
       {children}
     </ClerkProvider>
