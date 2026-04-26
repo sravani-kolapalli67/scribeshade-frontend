@@ -1,4 +1,4 @@
-import { BrowserRouter } from "react-router-dom";
+import { BrowserRouter, useNavigate } from "react-router-dom";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -11,14 +11,33 @@ if (!PUBLISHABLE_KEY) {
   throw new Error("Missing Publishable Key");
 }
 
+function ClerkProviderWithNavigate({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  const navigate = useNavigate();
+
+  return (
+    <ClerkProvider
+      publishableKey={PUBLISHABLE_KEY}
+      afterSignOutUrl="/"
+      routerPush={(to: string) => navigate(to)}
+      routerReplace={(to: string) => navigate(to, { replace: true })}
+    >
+      {children}
+    </ClerkProvider>
+  );
+}
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <BrowserRouter>
-      <ClerkProvider publishableKey={PUBLISHABLE_KEY} afterSignOutUrl="/">
+      <ClerkProviderWithNavigate>
         <TooltipProvider>
           <App />
         </TooltipProvider>
-      </ClerkProvider>
+      </ClerkProviderWithNavigate>
     </BrowserRouter>
   </StrictMode>,
 );

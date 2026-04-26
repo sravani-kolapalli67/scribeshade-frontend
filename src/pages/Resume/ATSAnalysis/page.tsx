@@ -1,10 +1,12 @@
-export default function ATSAnalysis() {
+import ListOfATSAnalysis from "@/components/Resume/ListOfATSAnalysis";
+
+export default function ATSAnalysisPage() {
   return (
-    <div className="space-y-4">
-      <h1 className="text-3xl font-bold">ATS Analysis</h1>
-      <p className="text-muted-foreground">
-        Analyze your resume against ATS systems.
-      </p>
+    // <div className="space-y-6 max-w-7xl mx-auto py-8 px-4">
+
+    // </div>
+    <div className="pt-4">
+      <ListOfATSAnalysis />
     </div>
   );
 }

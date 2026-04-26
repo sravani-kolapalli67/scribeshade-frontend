@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "scribeshade-frontend",
+  "productName": "ScribeShade",
   "version": "0.1.0",
   "identifier": "com.hiddenmindsolutions.scribeshade-frontend",
   "build": {
@@ -12,9 +12,32 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "scribeshade-frontend",
-        "width": 800,
-        "height": 600
+        "width": 1200,
+        "height": 800,
+        "center": true,
+        "resizable": false,
+        "fullscreen": false,
+        "maximized": true,
+        "contentProtected": true,
+        "skipTaskbar": true
+      },
+      {
+        "label": "mini",
+        "title": "ScribeShade Floating Screen",
+        "url": "floating.html",
+        "transparent": true,
+        "decorations": false,
+        "visible": false,
+        "center": true,
+        "resizable": false,
+        "minimizable": false,
+        "maximizable": false,
+        "contentProtected": true,
+        "skipTaskbar": true,
+        "alwaysOnTop": true,
+        "visibleOnAllWorkspaces": true
       }
     ],
     "security": {
@@ -25,18 +48,16 @@
     "active": true,
     "targets": "all",
     "icon": [
+      "icons/icon.ico",
+      "icons/icon.icns",
       "icons/32x32.png",
       "icons/128x128.png",
-      "icons/128x128@2x.png",
-      "icons/icon.icns",
-      "icons/icon.ico"
+      "icons/128x128@2x.png"
     ]
   },
   "plugins": {
     "fs": {
-      "scope": {
-        "allow": ["$APPLOCALDATA/resumes/**"]
-      }
+      "requireLiteralLeadingDot": true
     }
   }
 }

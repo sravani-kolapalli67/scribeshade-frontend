@@ -1,0 +1,302 @@
+import * as React from "react";
+import { useNavigate } from "react-router-dom";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Play, Zap, ChevronLeft, ChevronRight } from "lucide-react";
+import { cn } from "@/lib/utils";
+
+// Sub-components
+import {
+  Step1_JobDetails,
+  JOB_DESCRIPTION_REGEX,
+} from "./steps/Step1_JobDetails";
+import { Step2_ResumeSelector } from "./steps/Step2_ResumeSelector";
+import { Step3_DocumentSelector } from "./steps/Step3_DocumentSelector";
+import { Step4_LanguageAISettings } from "./steps/Step4_LanguageAISettings";
+import { Step5_AutoGenerateAI } from "./steps/Step5_AutoGenerateAI";
+import { Step6_SaveTranscript } from "./steps/Step6_SaveTranscript";
+import { Step7_Review } from "./steps/Step7_Review";
+import { type Resume } from "@/components/Resume/ResumeSelector";
+import { type Document } from "@/components/Document/DocumentSelector";
+import { toast } from "sonner";
+
+type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7;
+
+interface CreateSessionDialogProps {
+  isFree?: boolean;
+}
+
+const INITIAL_SESSION_DATA = {
+  companyName: "",
+  jobDescription: "",
+  selectedResume: null as Resume | null,
+  selectedDocument: null as Document | null,
+  language: "English",
+  simpleLanguage: false,
+  extraContext: "",
+  instructions: "",
+  aiModel: "google/gemma-4-26b-a4b-it",
+  autoGenerateAI: true,
+  saveTranscript: true,
+};
+
+export default function CreateSessionDialog({
+  isFree = false,
+}: CreateSessionDialogProps) {
+  const navigate = useNavigate();
+  const [open, setOpen] = React.useState(false);
+  const [step, setStep] = React.useState<Step>(1);
+  const [loading, setLoading] = React.useState(false);
+  const [createdSessionId, setCreatedSessionId] = React.useState<string | null>(
+    null,
+  );
+
+  // State for all steps
+  const [sessionData, setSessionData] = React.useState(INITIAL_SESSION_DATA);
+
+  const updateData = (field: string, value: any) => {
+    setSessionData((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const handleNext = () => {
+    if (step < 7) {
+      setStep((curr) => (curr + 1) as Step);
+    }
+  };
+
+  const handleBack = () => {
+    if (step > 1) {
+      setStep((curr) => (curr - 1) as Step);
+    }
+  };
+
+  const resetDialog = () => {
+    setStep(1);
+    setLoading(false);
+    setSessionData(INITIAL_SESSION_DATA);
+    setCreatedSessionId(null);
+  };
+
+  const createSession = async () => {
+    setLoading(true);
+    const userId = localStorage.getItem("userId");
+
+    if (!userId) {
+      toast.error("Don't ableto create");
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append("userId", userId);
+    formData.append("free", isFree.toString());
+    formData.append("companyName", sessionData.companyName);
+    formData.append("jobDescription", sessionData.jobDescription);
+    formData.append("resumeId", sessionData.selectedResume?.id || "");
+    formData.append("documentId", sessionData.selectedDocument?.id || "");
+    formData.append("language", sessionData.language);
+    formData.append("simpleLanguage", sessionData.simpleLanguage.toString());
+    formData.append("extraContext", sessionData.extraContext);
+    formData.append("instructions", sessionData.instructions);
+    formData.append("aiModel", sessionData.aiModel);
+    formData.append("autoGenerateAI", sessionData.autoGenerateAI.toString());
+    formData.append("saveTranscript", sessionData.saveTranscript.toString());
+
+    try {
+      const response = await fetch(
+        `${import.meta.env.VITE_BACKEND_URL}/api/session/create-session`,
+        {
+          method: "POST",
+          body: formData,
+        },
+      );
+
+      const result = await response.json();
+
+      if (response.ok) {
+        const newSessionId = result.id || result.sessionId || "";
+        setCreatedSessionId(newSessionId);
+        setOpen(false);
+        resetDialog();
+        // Redirect to ActiveSession page and show ConnectDialog there
+        navigate(`/sessions/${newSessionId}`, {
+          state: {
+            showConnect: true,
+            connectData: {
+              sessionId: newSessionId,
+              companyName: sessionData.companyName,
+              jobTitle: sessionData.jobDescription.slice(0, 60),
+              extraContext: sessionData.instructions,
+              language: sessionData.language,
+              simpleLanguage: sessionData.simpleLanguage,
+              aiModel: sessionData.aiModel,
+            },
+          },
+        });
+      } else {
+        console.error("Failed to create session:", result.error);
+        toast.error(result.error || "Failed to create session");
+      }
+    } catch (error) {
+      console.error("Error creating session:", error);
+      alert("Network error. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <>
+      <Dialog
+        open={open}
+        onOpenChange={(v) => {
+          setOpen(v);
+          if (!v) resetDialog();
+        }}
+      >
+        <DialogTrigger asChild>
+          <Button
+            className={cn(
+              "gap-2 px-6 py-6 rounded-xl font-semibold shadow-lg transition-all active:scale-95",
+              isFree
+                ? "bg-white text-black border border-black/10 hover:bg-gray-50"
+                : "bg-black text-white hover:bg-black/90",
+            )}
+          >
+            {isFree ? (
+              <Zap className="h-4 w-4 text-amber-500 fill-amber-500" />
+            ) : (
+              <Play className="h-4 w-4" />
+            )}
+            {isFree ? "Start Free Session" : "Start Session"}
+          </Button>
+        </DialogTrigger>
+
+        <DialogContent className="sm:max-w-2xl border-none shadow-2xl rounded-3xl p-0 overflow-hidden bg-background">
+          <DialogHeader className="pt-6 px-8 pb-0 relative">
+            <div className="flex items-center justify-between mb-2">
+              <div className="space-y-1">
+                <DialogTitle className="text-2xl font-bold tracking-tight">
+                  {step === 1 && "Job Details"}
+                  {step === 2 && "Select Resume"}
+                  {step === 3 && "Extra Documents"}
+                  {step === 4 && "AI Customization"}
+                  {step === 5 && "AI Response"}
+                  {step === 6 && "Save Session"}
+                  {step === 7 && "Final Review"}
+                </DialogTitle>
+                <p className="text-sm text-muted-foreground">
+                  Step {step} of 7
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-1 mb-0">
+              {[1, 2, 3, 4, 5, 6, 7].map((i) => (
+                <div
+                  key={i}
+                  className={cn(
+                    "h-1 rounded-full transition-all duration-500 ease-out",
+                    step === i
+                      ? "w-8 bg-primary shadow-[0_0_8px_rgba(var(--primary),0.4)]"
+                      : step > i
+                        ? "w-3 bg-primary/40"
+                        : "w-3 bg-muted",
+                  )}
+                />
+              ))}
+            </div>
+          </DialogHeader>
+
+          <div className="px-8 pb-8 pt-4">
+            {step === 1 && (
+              <Step1_JobDetails data={sessionData} onChange={updateData} />
+            )}
+
+            {step === 2 && (
+              <Step2_ResumeSelector
+                selectedResumeId={sessionData.selectedResume?.id || null}
+                onSelect={(resume) => updateData("selectedResume", resume)}
+              />
+            )}
+
+            {step === 3 && (
+              <Step3_DocumentSelector
+                selectedDocumentId={sessionData.selectedDocument?.id || null}
+                onSelect={(doc) => updateData("selectedDocument", doc)}
+              />
+            )}
+
+            {step === 4 && (
+              <Step4_LanguageAISettings
+                data={sessionData}
+                onChange={updateData}
+              />
+            )}
+
+            {step === 5 && (
+              <Step5_AutoGenerateAI
+                autoGenerate={sessionData.autoGenerateAI}
+                onChange={(v) => updateData("autoGenerateAI", v)}
+              />
+            )}
+
+            {step === 6 && (
+              <Step6_SaveTranscript
+                saveTranscript={sessionData.saveTranscript}
+                onChange={(v) => updateData("saveTranscript", v)}
+              />
+            )}
+
+            {step === 7 && (
+              <Step7_Review
+                data={{
+                  companyName: sessionData.companyName,
+                  isFree,
+                }}
+                onCreate={createSession}
+                onBack={handleBack}
+                loading={loading}
+              />
+            )}
+
+            {step < 7 && (
+              <div className="flex items-center justify-between pt-6 border-t mt-6">
+                <Button
+                  variant="outline"
+                  onClick={handleBack}
+                  disabled={step === 1 || loading}
+                  className="rounded-xl gap-2 h-11 px-8 font-semibold border-border hover:bg-muted/50 transition-all shadow-sm"
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                  Back
+                </Button>
+                <Button
+                  onClick={handleNext}
+                  disabled={
+                    (step === 1 &&
+                      (!sessionData.companyName ||
+                        (sessionData.jobDescription &&
+                          !JOB_DESCRIPTION_REGEX.test(
+                            sessionData.jobDescription,
+                          )))) ||
+                    (step === 2 && !sessionData.selectedResume)
+                  }
+                  className="rounded-xl gap-2 h-11 px-10 bg-black dark:bg-white text-white dark:text-black font-bold shadow-lg hover:shadow-xl active:scale-95 transition-all"
+                >
+                  Next
+                  <ChevronRight className="h-4 w-4" />
+                </Button>
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}

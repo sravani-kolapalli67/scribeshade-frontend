@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useLocation } from "react-router-dom";
 import { NavMain } from "@/components/nav-main";
 import { NavUser } from "@/components/nav-user";
 import {
@@ -21,6 +22,7 @@ import {
   HelpCircleIcon,
   EyeIcon,
   PanelLeftIcon,
+  FileIcon,
 } from "lucide-react";
 import { Separator } from "./ui/separator";
 import { useUser } from "@clerk/clerk-react";
@@ -41,20 +43,19 @@ const data = {
       title: "Resume",
       url: "/resume",
       icon: FileTextIcon,
-      isActive: true, // Matches image
+      isActive: false,
       items: [
         {
           title: "All Resumes",
           url: "/resume/all",
-          isActive: true, // Matches image (highlighted)
         },
         {
           title: "ATS Analysis",
           url: "/resume/ats-analysis",
         },
         {
-          title: "Edit Resume",
-          url: "/resume/edit",
+          title: "Build Resume",
+          url: "/resume/build",
         },
         {
           title: "Cover Letter",
@@ -63,14 +64,35 @@ const data = {
       ],
     },
     {
+      title: "AI Projects",
+      url: "/ai-projects",
+      icon: FileTextIcon,
+    },
+    {
       title: "Analytics",
       url: "/analytics",
       icon: BarChartIcon,
     },
     {
+      title: "Document",
+      url: "/document",
+      icon: FileIcon,
+    },
+    {
       title: "Question Bank",
       url: "/questions",
       icon: HelpCircleIcon,
+      isActive: false,
+      items: [
+        {
+          title: "All Questions",
+          url: "/questions/all",
+        },
+        {
+          title: "User Questions",
+          url: "/questions/user",
+        },
+      ],
     },
   ],
 };
@@ -86,7 +108,24 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     }
   };
 
+  const location = useLocation();
 
+  // Dynamically calculate isActive for each item and its sub-items
+  const navMainWithActive = data.navMain.map((item) => {
+    const isParentActive =
+      location.pathname === item.url ||
+      (item.items?.some((subItem) => location.pathname === subItem.url) ??
+        false);
+
+    return {
+      ...item,
+      isActive: isParentActive,
+      items: item.items?.map((subItem) => ({
+        ...subItem,
+        isActive: location.pathname === subItem.url,
+      })),
+    };
+  });
 
   return (
     <Sidebar collapsible="icon" {...props}>
@@ -106,7 +145,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                 </span>
                 <button
                   onClick={toggleSidebar}
-                  className="rounded-md p-1 hover:bg-gray-100 transition-colors"
+                  className="rounded-md p-1 hover:bg-gray-100 transition-colors cursor-pointer"
                 >
                   <PanelLeftIcon className="size-5 text-gray-500" />
                 </button>
@@ -118,7 +157,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
 
       <Separator className="my-2" />
       <SidebarContent>
-        <NavMain items={data.navMain} />
+        <NavMain items={navMainWithActive} />
       </SidebarContent>
       <SidebarFooter>
         <NavUser />
