@@ -17,26 +17,26 @@
         "width": 1200,
         "height": 800,
         "center": true,
-        "resizable": true,
+        "resizable": false,
         "fullscreen": false,
         "maximized": true,
         "devtools": true,
+        
         "contentProtected": false,
-        "skipTaskbar": true
+        "skipTaskbar": false
       },
       {
         "label": "mini",
         "title": "ScribeShade Floating Screen",
         "url": "floating.html",
-        "width": 800,
-        "height": 600,
+        "transparent": true,
         "decorations": false,
         "visible": false,
         "center": true,
         "resizable": false,
         "devtools": true,
         "contentProtected": false,
-        "skipTaskbar": true,
+        "skipTaskbar": false,
         "alwaysOnTop": true,
         "visibleOnAllWorkspaces": true
       }

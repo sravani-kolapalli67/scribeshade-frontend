@@ -28,6 +28,10 @@ import {
   GripHorizontal,
   ChevronDown,
   ChevronUp,
+  ChevronLeft,
+  ChevronRight,
+  MessageSquare,
+  Star,
   Power,
   LogOut,
   User,
@@ -148,6 +152,36 @@ const CodeBlock = ({
   );
 };
 
+// ─── Response Parser ────────────────────────────────────────────────
+// Splits an AI response into optional question + answer sections so we can
+// render them with ParakeetAI-style iconic headers.
+interface ParsedSection {
+  question?: string;
+  answer: string;
+}
+
+const parseAIResponse = (raw: string): ParsedSection => {
+  if (!raw) return { answer: "" };
+  const text = raw.trim();
+
+  // Match patterns like:
+  //   Summarized question: ...\nAnswer: ...
+  //   Question: ...\nAnswer: ...
+  //   QUESTION: ...\nANSWER: ...
+  const re =
+    /^\s*(?:\*\*)?(?:summarized\s+question|question)(?:\*\*)?\s*[:\-]\s*([\s\S]*?)\n+\s*(?:\*\*)?answer(?:\*\*)?\s*[:\-]\s*([\s\S]*)$/i;
+  const m = text.match(re);
+  if (m) {
+    return { question: m[1].trim(), answer: m[2].trim() };
+  }
+
+  // Answer-only marker
+  const ansOnly = text.match(/^\s*(?:\*\*)?answer(?:\*\*)?\s*[:\-]\s*([\s\S]*)$/i);
+  if (ansOnly) return { answer: ansOnly[1].trim() };
+
+  return { answer: text };
+};
+
 // ─── Answer Area ─────────────────────────────────────────────────────
 const AnswerArea: React.FC<{
   responses: AIResponse[];
@@ -166,41 +200,48 @@ const AnswerArea: React.FC<{
       ref={scrollRef}
       className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-4 scroll-smooth no-scrollbar"
     >
-      {responses.map((resp) => (
+      {responses.map((resp) => {
+        const parsed = parseAIResponse(resp.text);
+        return (
         <div
           key={resp.messageId}
           className="animate-in fade-in slide-in-from-bottom-1 duration-300"
         >
-          {/* Message Label */}
-          <div className="flex items-center gap-1.5 mb-2">
-            <div className={cn(
-              "h-5 w-5 rounded-md flex items-center justify-center",
-              resp.sender === "User" ? "bg-slate-500/20" : "bg-blue-500/20"
-            )}>
-              {resp.sender === "User" ? (
-                <User className="h-3 w-3 text-slate-400" />
-              ) : (
-                <Sparkles className="h-3 w-3 text-blue-400" />
-              )}
+          {/* Summarized Question Header */}
+          {parsed.question && (
+            <div className="flex items-start gap-2 mb-3 text-[13px] leading-relaxed text-white">
+              <MessageSquare className="h-4 w-4 mt-0.5 shrink-0 text-white/80" />
+              <div className="flex-1 break-words">
+                <span className="font-bold">Summarized question:</span>{" "}
+                <span className="font-medium text-white/90">{parsed.question}</span>
+              </div>
             </div>
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-              {resp.sender === "User" ? "You" : "AI Assistant"}
-            </span>
+          )}
+
+          {/* Answer Header */}
+          <div className="flex items-center gap-2 mb-2">
+            <Star className="h-4 w-4 fill-amber-400 text-amber-400" />
+            <span className="text-[13px] font-bold text-white">Answer:</span>
           </div>
 
           {/* Markdown Content */}
           <div
             className={[
-              "pl-6 text-[13px] leading-relaxed font-medium text-white/90 break-words",
+              "text-[13px] leading-relaxed font-medium text-white break-words",
               "[&_p]:mb-3 [&_p:last-child]:mb-0",
-              "[&_ul]:list-disc [&_ul]:pl-5 [&_ul]:mb-3",
-              "[&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:mb-3",
-              "[&_li]:mb-1 [&_strong]:font-bold [&_strong]:text-white",
-              "[&_a]:text-blue-400 [&_a]:underline",
-              "[&_h1]:text-white [&_h1]:text-base [&_h1]:font-bold [&_h1]:mb-2",
-              "[&_h2]:text-white [&_h2]:text-sm [&_h2]:font-bold [&_h2]:mb-2",
-              "[&_h3]:text-white/90 [&_h3]:text-sm [&_h3]:font-semibold [&_h3]:mb-1",
-              "[&_code]:text-blue-300 [&_code]:bg-white/5 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:text-[12px] [&_code]:font-mono",
+              "[&_ul]:list-disc [&_ul]:pl-5 [&_ul]:mb-3 [&_ul]:space-y-1",
+              "[&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:mb-3 [&_ol]:space-y-1",
+              "[&_li]:mb-0 [&_li]:marker:text-white/60",
+              "[&_strong]:font-bold [&_strong]:text-white",
+              "[&_em]:text-amber-200 [&_em]:not-italic [&_em]:font-semibold",
+              "[&_a]:text-blue-300 [&_a]:underline",
+              "[&_h1]:text-white [&_h1]:text-base [&_h1]:font-bold [&_h1]:mb-2 [&_h1]:mt-2",
+              "[&_h2]:text-white [&_h2]:text-sm [&_h2]:font-bold [&_h2]:mb-2 [&_h2]:mt-2",
+              "[&_h3]:text-white [&_h3]:text-sm [&_h3]:font-semibold [&_h3]:mb-1 [&_h3]:mt-1",
+              "[&_blockquote]:border-l-2 [&_blockquote]:border-blue-400/50 [&_blockquote]:pl-3 [&_blockquote]:text-white/80 [&_blockquote]:italic",
+              "[&_table]:w-full [&_table]:my-3 [&_table]:text-[12px] [&_table]:border-collapse",
+              "[&_th]:border [&_th]:border-white/10 [&_th]:bg-white/5 [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:font-bold",
+              "[&_td]:border [&_td]:border-white/10 [&_td]:px-2 [&_td]:py-1",
             ].join(" ")}
           >
             <ReactMarkdown
@@ -217,7 +258,7 @@ const AnswerArea: React.FC<{
                   if (inline) {
                     return (
                       <code
-                        className="px-1 py-0.5 rounded text-[16px] font-medium bg-white/10 text-white"
+                        className="px-1.5 py-0.5 rounded text-[12px] font-mono font-semibold bg-blue-500/15 text-blue-200 border border-blue-400/20"
                         {...props}
                       >
                         {children}
@@ -228,14 +269,15 @@ const AnswerArea: React.FC<{
                 },
               }}
             >
-              {resp.text}
+              {parsed.answer}
             </ReactMarkdown>
             {resp.isStreaming && (
               <span className="ml-1 inline-block h-3.5 w-0.5 bg-blue-400 animate-pulse" />
             )}
           </div>
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 };
@@ -255,81 +297,71 @@ const FloatingApp: React.FC = () => {
   const [isAnswering, setIsAnswering] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [inputValue, setInputValue] = useState("");
-  const [isCollapsed, setIsCollapsed] = useState(false);
-  const [isResponsesExpanded, setIsResponsesExpanded] = useState(true);
-  const [expandedHeight, setExpandedHeight] = useState(540);
+  const [isResponsesExpanded, setIsResponsesExpanded] = useState(false);
+  const [currentResponseIndex, setCurrentResponseIndex] = useState(0);
   const [isEnding, setIsEnding] = useState(false);
-  const prevResponsesCount = useRef(0);
-  const isResizingInternallyRef = useRef(false);
-  const resizeTimeoutRef = useRef<any>(null);
-
-  // Dynamically update window size based on content state
+  const [isWindowCollapsed, setIsWindowCollapsed] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  // Auto-advance to latest response and show panel when new responses arrive
   useEffect(() => {
-    if (isCollapsed) return;
-
-    const updateSize = async () => {
-      if (isResizingInternallyRef.current) return;
-      isResizingInternallyRef.current = true;
-
-      try {
-        const win = getCurrentWindow();
-        if (responses.length === 0) {
-          await win.setSize(new LogicalSize(520, 185));
-        } else if (!isResponsesExpanded) {
-          await win.setSize(new LogicalSize(520, 245));
-        } else {
-          await win.setSize(new LogicalSize(520, expandedHeight));
-        }
-      } catch (err) {
-        console.error("Failed to resize window:", err);
-      } finally {
-        // Delay unlocking slightly to allow the OS to process the resize event
-        setTimeout(() => {
-          isResizingInternallyRef.current = false;
-        }, 150);
-      }
-    };
-
-    updateSize();
-  }, [responses.length, isResponsesExpanded, isCollapsed, expandedHeight]);
-
-  // Track manual window resizes when expanded to save user preference
-  useEffect(() => {
-    let unlisten: () => void;
-    const setup = async () => {
-      unlisten = await getCurrentWindow().onResized(({ payload }) => {
-        // Ignore resizes that we triggered programmatically
-        if (isResizingInternallyRef.current) return;
-
-        if (!isCollapsed && isResponsesExpanded && responses.length > 0) {
-          // Debounce the height update
-          if (resizeTimeoutRef.current) clearTimeout(resizeTimeoutRef.current);
-          resizeTimeoutRef.current = setTimeout(() => {
-            currentMonitor().then((monitor) => {
-              const scaleFactor = monitor?.scaleFactor || 1;
-              const logicalHeight = payload.height / scaleFactor;
-              if (logicalHeight > 300) {
-                setExpandedHeight(logicalHeight);
-              }
-            });
-          }, 200);
-        }
-      });
-    };
-    setup();
-    return () => {
-      if (unlisten) unlisten();
-      if (resizeTimeoutRef.current) clearTimeout(resizeTimeoutRef.current);
-    };
-  }, [isCollapsed, isResponsesExpanded, responses.length]);
-
-  // Auto-expand responses when a new response arrives for the first time
-  useEffect(() => {
-    if (responses.length > 0 && prevResponsesCount.current === 0) {
+    if (responses.length > 0) {
+      setCurrentResponseIndex(responses.length - 1);
       setIsResponsesExpanded(true);
     }
-    prevResponsesCount.current = responses.length;
   }, [responses.length]);
+
+  // Show panel immediately when generation starts
+  useEffect(() => {
+    if (isAnswering || isAnalyzing) {
+      setIsResponsesExpanded(true);
+    }
+  }, [isAnswering, isAnalyzing]);
+
+  const lastSentHeightRef = useRef<number>(185);
+  const heightDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // ─── Derived state machine — single source of truth for the OS window
+  type MiniState = 'badge' | 'bar' | 'expanded';
+  const miniState: MiniState =
+    isWindowCollapsed
+      ? 'badge'
+      : (isAnswering || isAnalyzing || (responses.length > 0 && isResponsesExpanded))
+        ? 'expanded'
+        : 'bar';
+
+  // Push discrete state transitions to Rust. Rust owns the eased animation.
+  useEffect(() => {
+    if (miniState === 'expanded') return; // expanded height is sent by the observer below
+    invoke('set_mini_state', { state: miniState }).catch(() => {});
+  }, [miniState]);
+
+  // While expanded, watch real DOM height and forward changes to Rust
+  // (debounced — one IPC call per ~60 ms of stable size).
+  useEffect(() => {
+    if (!rootRef.current || miniState !== 'expanded') return;
+
+    const send = (h: number) => {
+      if (Math.abs(h - lastSentHeightRef.current) < 2) return;
+      lastSentHeightRef.current = h;
+      invoke('set_mini_state', { state: 'expanded', height: h }).catch(() => {});
+    };
+
+    const observer = new ResizeObserver((entries) => {
+      const h = Math.ceil(entries[0]?.contentRect.height ?? 0);
+      if (h < 10) return;
+      if (heightDebounceRef.current) clearTimeout(heightDebounceRef.current);
+      heightDebounceRef.current = setTimeout(() => send(h), 60);
+    });
+
+    observer.observe(rootRef.current);
+    // Send initial height immediately so Rust animates to it without waiting
+    send(Math.ceil(rootRef.current.getBoundingClientRect().height));
+
+    return () => {
+      observer.disconnect();
+      if (heightDebounceRef.current) clearTimeout(heightDebounceRef.current);
+    };
+  }, [miniState]);
 
   // Listen for overlay-update from main window
   useEffect(() => {
@@ -403,6 +435,8 @@ const FloatingApp: React.FC = () => {
     if (isEmittingRef.current || isAnswering || !data.sessionId) return;
     isEmittingRef.current = true;
     try {
+      setResponses([]);
+      setCurrentResponseIndex(0);
       setIsAnswering(true);
       await emit("overlay-ai-answer", { sessionId: data.sessionId });
     } finally {
@@ -417,6 +451,8 @@ const FloatingApp: React.FC = () => {
     if (isEmittingRef.current || isAnalyzing || !data.sessionId) return;
     isEmittingRef.current = true;
     try {
+      setResponses([]);
+      setCurrentResponseIndex(0);
       setIsAnalyzing(true);
       // Capture the screen the floating app is currently on via Rust command
       const screenshotData = await invoke<string>("capture_screen");
@@ -494,83 +530,36 @@ const FloatingApp: React.FC = () => {
     }
   };
 
-  const toggleCollapse = async () => {
-    try {
-      const window = getCurrentWindow();
-      const monitor = await currentMonitor();
-
-      if (!isCollapsed) {
-        // Collapse to Eye icon
-        const width = 80;
-        const height = 80;
-
-        await window.setResizable(true);
-        await window.setSize(new LogicalSize(width, height));
-
-        if (monitor) {
-          const scaleFactor = monitor.scaleFactor || 1;
-          const screenWidth = monitor.size.width / scaleFactor;
-          const x = (screenWidth - width) / 2;
-          const y = 20; // Top offset
-          await window.setPosition(new LogicalPosition(x, y));
-        }
-
-        await window.setResizable(false);
-        setIsCollapsed(true);
-      } else {
-        // Expand back to App
-        const width = 520;
-        let height = 185;
-        if (responses.length > 0) {
-          height = isResponsesExpanded ? expandedHeight : 245;
-        }
-
-        await window.setResizable(true);
-        await window.setSize(new LogicalSize(width, height));
-
-        if (monitor) {
-          const scaleFactor = monitor.scaleFactor || 1;
-          const screenWidth = monitor.size.width / scaleFactor;
-          const x = (screenWidth - width) / 2;
-          const y = 20; // Keep same top offset
-          await window.setPosition(new LogicalPosition(x, y));
-        }
-
-        setIsCollapsed(false);
-      }
-    } catch (err) {
-      console.error("Toggle error:", err);
-      setIsCollapsed(!isCollapsed);
-    }
-  };
-
-  if (isCollapsed) {
+  // ── Badge state: entire window collapsed to a tiny pill ──────────────────
+  if (isWindowCollapsed) {
     return (
-      <div className="h-screen w-screen flex items-center justify-center bg-transparent group drag">
-        <Tooltip delayDuration={300}>
-          <TooltipTrigger asChild>
-            <button
-              onClick={toggleCollapse}
-              className="w-12 h-12 rounded-full bg-zinc-900/90 backdrop-blur-2xl flex items-center justify-center shadow-[0_0_20px_rgba(255,255,255,0.1)] hover:scale-110 transition-all active:scale-95 no-drag"
-            >
-              <Eye size={24} className="text-blue-400 animate-pulse" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent
-            side="bottom"
-            className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
-          >
-            Expand ScribeShade
-          </TooltipContent>
-        </Tooltip>
+      <div ref={rootRef} className="w-full h-full flex items-center">
+        <button
+          onClick={() => setIsWindowCollapsed(false)}
+          className="w-full h-full flex items-center justify-center gap-2 px-3 bg-zinc-900/95 backdrop-blur-2xl rounded-xl border border-white/10 hover:border-blue-500/40 hover:bg-zinc-800/90 transition-all active:scale-95 group"
+          title="Expand ScribeShade"
+        >
+          <div className="w-2 h-2 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)] animate-pulse shrink-0" />
+          <span className="text-[11px] font-bold text-white/60 group-hover:text-white uppercase tracking-widest transition-colors leading-none">
+            ScribeShade
+          </span>
+          {responses.length > 0 && (
+            <span className="ml-1 flex items-center justify-center w-3.5 h-3.5 rounded-full bg-blue-500/30 border border-blue-500/50">
+              <span className="text-[8px] font-bold text-blue-300">{responses.length}</span>
+            </span>
+          )}
+        </button>
       </div>
     );
   }
 
   return (
-    <div className="h-screen w-full flex flex-col gap-3 outline-none">
+    <div
+      ref={rootRef}
+      className="w-full flex flex-col outline-none bg-zinc-900/95 backdrop-blur-2xl rounded-xl overflow-hidden"
+    >
       {/* ─── Top Card: Controls ─── */}
-      <div className="bg-zinc-900/90 backdrop-blur-2xl rounded-xl overflow-hidden shadow-2xl shrink-0">
+      <div className="shrink-0">
         {/* Header Area */}
         <div className="px-4 py-2 flex items-center justify-between border-b border-white/5 relative group/header cursor-default no-drag">
           {/* Left: Title & Drag Handle */}
@@ -625,6 +614,24 @@ const FloatingApp: React.FC = () => {
             </div>
 
             <div className="flex items-center gap-1 bg-white/5 p-1 rounded-xl border border-white/10 h-9">
+              <Tooltip delayDuration={300}>
+                <TooltipTrigger asChild>
+                  <button
+                    onClick={() => setIsWindowCollapsed(true)}
+                    className="p-2 hover:bg-white/10 rounded-lg transition-all text-zinc-300 hover:text-blue-400 active:scale-95 flex items-center justify-center"
+                  >
+                    <ChevronDown size={16} />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent
+                  side="bottom"
+                  className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
+                >
+                  Collapse to Icon
+                </TooltipContent>
+              </Tooltip>
+
+              <div className="w-[1px] h-4 bg-white/10 mx-0.5" />
               <Tooltip delayDuration={300}>
                 <TooltipTrigger asChild>
                   <button
@@ -799,61 +806,79 @@ const FloatingApp: React.FC = () => {
             </Tooltip>
           </div>
         </div>
+
       </div>
 
       {/* ─── Bottom Card: AI Responses ─── */}
-      {responses.length > 0 && (
-        <div
-          className={cn(
-            "flex flex-col bg-zinc-900/90 backdrop-blur-2xl rounded-xl overflow-hidden shadow-2xl shrink-0",
-            isResponsesExpanded ? "flex-1" : "h-12",
-          )}
-        >
-          {/* Response Header/Toggle */}
-          <Tooltip delayDuration={500}>
-            <TooltipTrigger asChild>
+      {/* Kept in DOM while there is content; CSS grid-template-rows transition
+          drives the open/close animation so ResizeObserver + window follows
+          every CSS frame — no JS animation loop needed. */}
+      {(isAnswering || isAnalyzing || responses.length > 0) && (
+        <div className="flex flex-col border-t border-white/10">
+          {/* Nav Row — always visible so user can see/re-expand after collapsing */}
+          <div className="px-3 py-2 flex items-center justify-between shrink-0">
+            <div className="flex items-center gap-1">
               <button
-                onClick={() => setIsResponsesExpanded(!isResponsesExpanded)}
-                className="w-full px-4 h-12 flex items-center justify-between hover:bg-white/5 transition-colors group/resp no-drag shrink-0"
+                onClick={() => setCurrentResponseIndex(i => Math.max(0, i - 1))}
+                disabled={currentResponseIndex === 0 || responses.length === 0}
+                className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-25 disabled:cursor-not-allowed text-white transition-all active:scale-95"
               >
-                <div className="flex items-center gap-2">
-                  <Sparkles size={14} className="text-blue-400" />
-                  <span className="text-[11px] font-bold text-white/70 uppercase tracking-widest">
-                    AI Analysis{" "}
-                    {responses.length > 0 && `(${responses.length})`}
-                  </span>
-                </div>
-                <div className="p-1 rounded bg-white/5 text-white/40 group-hover/resp:text-white transition-all">
-                  {isResponsesExpanded ? (
-                    <ChevronDown size={16} />
-                  ) : (
-                    <ChevronUp size={16} />
-                  )}
-                </div>
+                <ChevronLeft size={14} />
               </button>
-            </TooltipTrigger>
-            <TooltipContent
-              side="top"
-              className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
-            >
-              {isResponsesExpanded ? "Collapse Responses" : "Expand Responses"}
-            </TooltipContent>
-          </Tooltip>
+              <button
+                onClick={() => setCurrentResponseIndex(i => Math.min(responses.length - 1, i + 1))}
+                disabled={currentResponseIndex >= responses.length - 1}
+                className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-25 disabled:cursor-not-allowed text-white transition-all active:scale-95"
+              >
+                <ChevronRight size={14} />
+              </button>
+              {responses.length > 1 && (
+                <span className="text-[11px] text-white/40 ml-1 font-mono">
+                  {currentResponseIndex + 1}/{responses.length}
+                </span>
+              )}
+              {(isAnswering || isAnalyzing) && responses.length === 0 && (
+                <span className="flex items-center gap-1.5 ml-1 text-[11px] text-blue-400/80">
+                  <Loader2 size={11} className="animate-spin" />
+                  Generating...
+                </span>
+              )}
+            </div>
+            <Tooltip delayDuration={300}>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={() => setIsResponsesExpanded(v => !v)}
+                  className="w-7 h-7 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 hover:text-blue-400 text-white/50 transition-all active:scale-95"
+                >
+                  {isResponsesExpanded ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
+                </button>
+              </TooltipTrigger>
+              <TooltipContent
+                side="left"
+                className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
+              >
+                {isResponsesExpanded ? 'Collapse panel' : 'Expand panel'}
+              </TooltipContent>
+            </Tooltip>
+          </div>
 
-          {/* Response Content */}
+          {/* Animated content — slides open/closed while nav row stays pinned */}
           <div
-            className={cn(
-              "flex-1 flex flex-col min-h-0 overflow-hidden",
-              isResponsesExpanded
-                ? "opacity-100"
-                : "opacity-0 pointer-events-none",
-            )}
+            style={{
+              display: 'grid',
+              gridTemplateRows: isResponsesExpanded ? '1fr' : '0fr',
+              transition: 'grid-template-rows 220ms cubic-bezier(0.4,0,0.2,1)',
+            }}
           >
-            <div className="flex-1 overflow-hidden border-t border-white/5 flex flex-col">
-              <AnswerArea
-                responses={responses}
-                isStreaming={isAnswering || isAnalyzing}
-              />
+            <div style={{ overflow: 'hidden', minHeight: 0 }}>
+              {responses.length > 0 && (
+                <div className="border-t border-white/10 max-h-[480px] overflow-y-auto overflow-x-hidden no-scrollbar">
+                  <AnswerArea
+                    responses={[responses[currentResponseIndex]].filter(Boolean)}
+                    isStreaming={(isAnswering || isAnalyzing) && currentResponseIndex === responses.length - 1}
+                  />
+                </div>
+              )}
             </div>
           </div>
         </div>
