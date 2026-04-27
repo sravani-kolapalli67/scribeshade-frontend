@@ -1,30 +1,20 @@
 import React, { useEffect, useState, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { listen, emit } from "@tauri-apps/api/event";
-import {
-  currentMonitor,
-  LogicalPosition,
-  LogicalSize,
-  getCurrentWindow,
-} from "@tauri-apps/api/window";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import {
-  Sparkles,
   Send,
   Copy,
   Check,
-  X,
   Mic,
   MicOff,
   Trash2,
-  Maximize2,
-  EyeOff,
   Clock,
-  Eye,
   GripHorizontal,
   ChevronDown,
   ChevronUp,
@@ -32,13 +22,10 @@ import {
   ChevronRight,
   MessageSquare,
   Star,
-  Power,
   LogOut,
-  User,
   Loader2,
 } from "lucide-react";
 import { ChatActionButtons } from "./components/ChatActionButtons";
-import { SessionTimer } from "./components/SessionTimer";
 import { ModelSelector } from "./components/ModelSelector";
 import { cn } from "@/lib/utils";
 import {
@@ -608,20 +595,6 @@ const FloatingApp: React.FC = () => {
             </Tooltip>
           </div>
 
-          {/* Center Area: Eye Logo (Collapse Button) */}
-          {/* <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center justify-center">
-            <button
-              onClick={toggleCollapse}
-              className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center shadow-[inset_0_0_10px_rgba(255,255,255,0.02)] backdrop-blur-sm hover:bg-blue-500/10 transition-all active:scale-95 group"
-              title="Collapse to Icon"
-            >
-              <Eye
-                size={14}
-                className="text-blue-400/60 group-hover:text-blue-400 transition-colors"
-              />
-            </button>
-          </div> */}
-
           {/* Right: Actions Area */}
           <div className="flex items-center gap-2">
             <div className="scale-90 origin-right">
@@ -660,24 +633,6 @@ const FloatingApp: React.FC = () => {
                   Collapse to Icon
                 </TooltipContent>
               </Tooltip>
-
-              {/* <div className="w-[1px] h-4 bg-white/10 mx-0.5" />
-              <Tooltip delayDuration={300}>
-                <TooltipTrigger asChild>
-                  <button
-                    onClick={handleHideMain}
-                    className="p-2 hover:bg-white/10 rounded-lg transition-all text-zinc-300 hover:text-amber-400 active:scale-95 flex items-center justify-center"
-                  >
-                    <EyeOff size={16} />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent
-                  side="bottom"
-                  className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
-                >
-                  Hide Main App from Taskbar
-                </TooltipContent>
-              </Tooltip> */}
 
               <div className="w-[1px] h-4 bg-white/10 mx-0.5" />
               <Tooltip delayDuration={300}>
