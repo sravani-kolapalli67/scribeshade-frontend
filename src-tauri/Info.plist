@@ -2,6 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <!-- Screen recording permission required for the native macOS screen-capture path.
+       Without this key macOS silently denies the screenshots crate's capture calls. -->
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>CraftVita needs screen recording access to capture your screen during interview sessions.</string>
+
   <!-- Register craftvita:// as a handled URL scheme so macOS routes
        deep links back to the installed .app bundle. Without this entry
        the OS has no record of the scheme and the browser shows

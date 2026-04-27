@@ -60,6 +60,10 @@ export default function ActiveSession() {
   );
   const connectData = location.state?.connectData || {};
 
+  const { stream, videoRef, startShare, captureScreenshot, nativeScreens, selectNativeScreen, isMacOSNative } = useScreenShare({
+    autoStart: false,
+  });
+
   const handleConnectSuccess = useCallback((finalModel: string, finalLanguage: string) => {
     setIsConnectDialogOpen(false);
     if (finalModel) {
@@ -68,7 +72,10 @@ export default function ActiveSession() {
     if (finalLanguage) {
       setSelectedLanguage(finalLanguage);
     }
-  }, []);
+    // Call startShare directly here — this runs inside a button-click handler
+    // which satisfies macOS WKWebView's user-gesture requirement for getDisplayMedia.
+    startShare();
+  }, [startShare]);
 
   const handleConnectCancel = useCallback(() => {
     setIsConnectDialogOpen(false);
@@ -135,10 +142,6 @@ export default function ActiveSession() {
   //     undefined, // Use default from env
   //     endSessionNow
   //   );
-
-  const { stream, videoRef, startShare, captureScreenshot } = useScreenShare({
-    autoStart: !isConnectDialogOpen,
-  });
 
   const handleTranscript = useCallback(
     (sender: "User" | "Interviewer", text: string, isFinal: boolean) => {
@@ -234,6 +237,16 @@ export default function ActiveSession() {
     inputStream: stream,
     onTranscript: onInterviewerTranscript,
   });
+
+  // When the stream is replaced (e.g. user clicks "Change Screen"), stop the
+  // running tab transcription so the auto-start effect below can restart it
+  // fresh with the updated stream and its new audio tracks.
+  const stopTabTranscription = tabTranscription.stopTranscription;
+  useEffect(() => {
+    if (!stream) return;
+    stopTabTranscription();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stream]); // intentionally only re-run when stream identity changes
 
   // Auto-start tab transcription when a stream is available
   useEffect(() => {
@@ -663,6 +676,9 @@ export default function ActiveSession() {
             onChangeTab={startShare}
             isFullscreen={true}
             onToggleFullscreen={toggleFullscreen}
+            nativeScreens={nativeScreens}
+            selectNativeScreen={selectNativeScreen}
+            isMacOSNative={isMacOSNative}
           />
           <OverlayContainer
             isFullscreen={isFullscreen}
@@ -687,6 +703,9 @@ export default function ActiveSession() {
                     onChangeTab={startShare}
                     isFullscreen={false}
                     onToggleFullscreen={toggleFullscreen}
+                    nativeScreens={nativeScreens}
+                    selectNativeScreen={selectNativeScreen}
+                    isMacOSNative={isMacOSNative}
                   />
                 </ResizablePanel>
 

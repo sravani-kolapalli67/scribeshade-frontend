@@ -16,7 +16,7 @@ const SUCCESS_HTML = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ScribeShade – Signed In</title>
+  <title>CraftVita – Signed In</title>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
     body{display:flex;align-items:center;justify-content:center;min-height:100vh;
@@ -39,7 +39,7 @@ const SUCCESS_HTML = `<!DOCTYPE html>
       </svg>
     </div>
     <h1>You're signed in!</h1>
-    <p>Authentication successful. Switch back to the ScribeShade app to continue.</p>
+    <p>Authentication successful. Switch back to the CraftVita app to continue.</p>
     <p class="note">You may close this tab.</p>
   </div>
 </body>

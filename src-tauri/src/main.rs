@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    scribeshade_frontend_lib::run()
+    CraftVita_frontend_lib::run()
 }

@@ -37,7 +37,7 @@ function App() {
   const navigate = useNavigate();
   useSyncUser();
 
-  // Listen for craftvita:// deep-links from the OS (e.g. "Return to ScribeShade"
+  // Listen for craftvita:// deep-links from the OS (e.g. "Return to CraftVita"
   // button after OAuth, or a craftvita://oauth-callback from Clerk).
   // Rust already focuses the window; this handler covers URL routing.
   useEffect(() => {

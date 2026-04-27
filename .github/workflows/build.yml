@@ -129,7 +129,7 @@ jobs:
         with:
           # Tag format: v<version>-<short_sha>
           tag_name: v${{ env.APP_VERSION }}-${{ env.short_sha }}
-          name: "Scribeshade ${{ env.APP_VERSION }}"
+          name: "CraftVita ${{ env.APP_VERSION }}"
           prerelease: false
           token: ${{ secrets.GITHUB_TOKEN }}
           files: ${{ matrix.release_assets }} # Uploads platform-specific assets defined in matrix
