@@ -35,21 +35,38 @@ export default function ActiveSession() {
   const [selectedModel, setSelectedModel] = useState(
     location.state?.connectData?.aiModel || "google/gemma-4-26b-a4b-it"
   );
+  const [selectedLanguage, setSelectedLanguage] = useState(
+    location.state?.connectData?.language || "English"
+  );
   const selectedModelRef = useRef(selectedModel);
 
-  useEffect(() => {
-    selectedModelRef.current = selectedModel;
-  }, [selectedModel]);
+  const getLanguageCode = (lang: string) => {
+    const mapping: Record<string, string> = {
+      English: "en",
+      Spanish: "es",
+      French: "fr",
+      German: "de",
+      Hindi: "hi",
+      Arabic: "ar",
+      Chinese: "zh",
+      Portuguese: "pt",
+      Japanese: "ja",
+    };
+    return mapping[lang] || "en";
+  };
 
   const [isConnectDialogOpen, setIsConnectDialogOpen] = useState(
     !!location.state?.showConnect,
   );
   const connectData = location.state?.connectData || {};
 
-  const handleConnectSuccess = useCallback((finalModel: string) => {
+  const handleConnectSuccess = useCallback((finalModel: string, finalLanguage: string) => {
     setIsConnectDialogOpen(false);
     if (finalModel) {
       setSelectedModel(finalModel);
+    }
+    if (finalLanguage) {
+      setSelectedLanguage(finalLanguage);
     }
   }, []);
 
@@ -206,12 +223,14 @@ export default function ActiveSession() {
   const micTranscription = useDeepgram({
     apiKey: import.meta.env.VITE_DEEPGRAM_API_KEY || "",
     model: "nova-3",
+    language: getLanguageCode(selectedLanguage),
     onTranscript: onUserTranscript,
   });
 
   const tabTranscription = useDeepgram({
     apiKey: import.meta.env.VITE_DEEPGRAM_API_KEY || "",
     model: "nova-3",
+    language: getLanguageCode(selectedLanguage),
     inputStream: stream,
     onTranscript: onInterviewerTranscript,
   });
@@ -303,19 +322,41 @@ export default function ActiveSession() {
 
   const onAiAnswer = useCallback(() => {
     if (isExecutingRef.current || !id) return;
+
+    // Check if we have anything to answer (history or live interim text)
+    const hasHistory = messages.length > 0;
+    const interimText =
+      micTranscription.interimTranscript || tabTranscription.interimTranscript;
+
+    if (!hasHistory && !interimText) return;
+
     isExecutingRef.current = true;
     try {
       console.log("[Trigger] AI Answer initiated");
-      const combinedTranscript = messages
-        .map((m) => `[${m.sender}]: ${m.text}`)
+      let combinedTranscript = messages
+        .map((m) => `[${m.sender === "User" ? "YOU" : "Interviewer"}]: ${m.text}`)
         .join("\n");
+
+      if (interimText) {
+        const sender = micTranscription.interimTranscript ? "YOU" : "Interviewer";
+        combinedTranscript +=
+          (combinedTranscript ? "\n" : "") + `[${sender}]: ${interimText}`;
+      }
+
       handleAiAnswer(id, combinedTranscript, selectedModel);
     } finally {
       setTimeout(() => {
         isExecutingRef.current = false;
       }, 1000);
     }
-  }, [id, messages, handleAiAnswer]);
+  }, [
+    id,
+    messages,
+    handleAiAnswer,
+    micTranscription.interimTranscript,
+    tabTranscription.interimTranscript,
+    selectedModel,
+  ]);
 
   const toggleFullscreen = () => setIsFullscreen((prev) => !prev);
 
@@ -553,7 +594,11 @@ export default function ActiveSession() {
 
   // Keyboard Shortcuts
   useKeyboardShortcut("g", onAiAnswer, {
-    disabled: messages.length === 0 || isAnswering,
+    disabled:
+      (messages.length === 0 &&
+        !micTranscription.interimTranscript &&
+        !tabTranscription.interimTranscript) ||
+      isAnswering,
   });
 
   useKeyboardShortcut("k", onAnalyzeScreen, {
@@ -592,7 +637,10 @@ export default function ActiveSession() {
     onInputChange: setInputMessage,
     isAnalyzing,
     isAnswering,
-    canAnswer: messages.length > 0,
+    canAnswer:
+      messages.length > 0 ||
+      !!micTranscription.interimTranscript ||
+      !!tabTranscription.interimTranscript,
     canAnalyze: !!stream,
     onAiAnswer,
     onAnalyzeScreen,
@@ -688,9 +736,9 @@ export default function ActiveSession() {
         companyName={connectData?.companyName || ""}
         jobTitle={connectData?.jobTitle || ""}
         extraContext={connectData?.extraContext || ""}
-        language={connectData?.language || "English"}
+        language={selectedLanguage}
         simpleLanguage={connectData?.simpleLanguage || false}
-        aiModel={connectData?.aiModel || "Gemini 2.0 Flash"}
+        aiModel={selectedModel}
       />
 
       {/* <InactivityDialog

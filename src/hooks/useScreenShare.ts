@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
-export const useScreenShare = (options: { autoStart?: boolean } = { autoStart: true }) => {
+export const useScreenShare = (
+  options: { autoStart?: boolean } = { autoStart: true },
+) => {
   const [stream, setStream] = useState<MediaStream | null>(null);
 
   // Keep a ref to the latest stream so the callback ref can access it
@@ -36,8 +38,8 @@ export const useScreenShare = (options: { autoStart?: boolean } = { autoStart: t
       const displayMediaOptions: any = {
         video: {
           displaySurface: "monitor",
-          cursor: "always",
         },
+        cursor: "never",
         audio: {
           systemAudio: "include",
         },
@@ -53,9 +55,8 @@ export const useScreenShare = (options: { autoStart?: boolean } = { autoStart: t
         displayMediaOptions.controller = controller;
       }
 
-      const mediaStream = await navigator.mediaDevices.getDisplayMedia(
-        displayMediaOptions,
-      );
+      const mediaStream =
+        await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
 
       // Prevent the browser from automatically focusing the shared tab/window
       if (controller && controller.setFocusBehavior) {

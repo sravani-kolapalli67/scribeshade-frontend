@@ -3,6 +3,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 interface UseDeepgramProps {
   apiKey: string;
   model?: string;
+  language?: string;
   onTranscript?: (text: string, isFinal: boolean) => void;
   inputStream?: MediaStream | null;
 }
@@ -10,6 +11,7 @@ interface UseDeepgramProps {
 export const useDeepgram = ({
   apiKey,
   model = "nova-3",
+  language = "en",
   onTranscript,
   inputStream,
 }: UseDeepgramProps) => {
@@ -63,13 +65,17 @@ export const useDeepgram = ({
 
       streamRef.current = stream;
 
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : "audio/webm";
+
       const mediaRecorder = new MediaRecorder(stream, {
-        mimeType: "audio/webm;codecs=opus",
+        mimeType,
         audioBitsPerSecond: 128000, // High quality audio encoding for better accuracy
       });
       mediaRecorderRef.current = mediaRecorder;
 
-      const url = `wss://api.deepgram.com/v1/listen?model=${model}&punctuate=true&interim_results=true&language=en&smart_format=true&endpointing=5000&utterance_end_ms=5000`;
+      const url = `wss://api.deepgram.com/v1/listen?model=${model}&punctuate=true&interim_results=true&language=${language}&smart_format=true&endpointing=1000&utterance_end_ms=1000&vad_events=true&diarize=false&tag=craftvita`;
 
       const socket = new WebSocket(url, ["token", apiKey]);
       socketRef.current = socket;
@@ -143,7 +149,7 @@ export const useDeepgram = ({
         setIsTranscribing(false);
       }
     }
-  }, [apiKey, model, isTranscribing, onTranscript, inputStream]);
+  }, [apiKey, model, language, isTranscribing, onTranscript, inputStream]);
 
   const stopTranscription = useCallback(() => {
     isStartingRef.current = false;

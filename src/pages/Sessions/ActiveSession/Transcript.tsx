@@ -9,6 +9,7 @@ export interface Message {
   text: string;
   time: string;
   timestamp?: number;
+  question?: string;
 }
 
 interface TranscriptProps {

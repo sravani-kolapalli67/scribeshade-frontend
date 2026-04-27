@@ -81,10 +81,10 @@ export const TranscriptMessageList = ({
                 </span>
               </div>
               <div className={cn(
-                "px-5 py-3 rounded-2xl rounded-tl-none text-[14px] font-medium border italic transition-all",
+                "px-5 py-3 rounded-2xl rounded-tl-none text-[14px] font-medium border transition-all",
                 isFullscreen 
-                  ? "bg-white/5 text-white/80 border-white/10 backdrop-blur-md"
-                  : "bg-white text-slate-500 border-slate-100 shadow-sm"
+                  ? "bg-white/10 text-white border-white/10 backdrop-blur-md"
+                  : "bg-white text-slate-700 border-slate-100 shadow-sm"
               )}>
                 {tabInterim}
               </div>
@@ -110,10 +110,10 @@ export const TranscriptMessageList = ({
                 </span>
               </div>
               <div className={cn(
-                "px-5 py-3 rounded-2xl rounded-tr-none text-[14px] font-medium border italic transition-all",
+                "px-5 py-3 rounded-2xl rounded-tr-none text-[14px] font-medium border transition-all",
                 isFullscreen 
-                  ? "bg-white/5 text-white/80 border-white/10 backdrop-blur-md"
-                  : "bg-white text-slate-500 border-slate-100 shadow-sm"
+                  ? "bg-white/10 text-white border-white/10 backdrop-blur-md"
+                  : "bg-white text-slate-700 border-slate-100 shadow-sm"
               )}>
                 {micInterim}
               </div>

@@ -38,7 +38,7 @@ import { ModelSelector } from "@/pages/Sessions/ActiveSession/components/ModelSe
 
 interface ConnectDialogProps {
   open: boolean;
-  onSuccess: (finalModel: string) => void;
+  onSuccess: (finalModel: string, finalLanguage: string) => void;
   onCancel: () => void;
   sessionId: string;
   companyName: string;
@@ -123,7 +123,7 @@ export function ConnectDialog({
       }
 
       // 3. Trigger success callback
-      onSuccess(aiModel);
+      onSuccess(aiModel, language);
     } catch (err: any) {
       if (
         err?.name === "NotAllowedError" ||
@@ -284,7 +284,7 @@ export function ConnectDialog({
                   <span className="font-bold text-foreground">
                     mock interview
                   </span>{" "}
-                  on YouTube and test ScribeShade that way.
+                  on YouTube and test Craft Vita that way.
                 </p>
                 <button className="text-[12px] text-primary font-semibold hover:underline flex items-center gap-1">
                   Example video: Mock Interview

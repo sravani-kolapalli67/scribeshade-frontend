@@ -786,14 +786,14 @@ export function ProjectReportView({ projects, position, createdAt }: ProjectRepo
                   <Sparkles className="h-6 w-6 text-primary" />
                 </div>
                 <span className="font-black text-3xl tracking-tighter text-slate-900 uppercase">
-                  ScribeShade AI
+                  Craft Vita AI
                 </span>
               </div>
               <div className="text-center space-y-2">
                 <p className="text-[10px] font-black text-slate-300 tracking-[0.4em] uppercase">
                   CONFIDENTIAL ENGINEERING SPECIFICATION • AUTH: {(project.projectHeader?.title || "SYST").substring(0, 4).toUpperCase()}
                 </p>
-                <p className="text-[9px] font-bold text-slate-400">© 2024 ScribeShade AI Systems. All rights reserved.</p>
+                <p className="text-[9px] font-bold text-slate-400">© 2024 Craft Vita AI Systems. All rights reserved.</p>
               </div>
             </footer>
           </div>

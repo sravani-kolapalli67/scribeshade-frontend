@@ -37,6 +37,23 @@ import {
 import "@/App.css";
 import { toast } from "sonner";
 
+const KEYWORD_CONFIGS = [
+  { color: "text-blue-400" },
+  { color: "text-purple-400" },
+  { color: "text-emerald-400" },
+  { color: "text-orange-400" },
+  { color: "text-rose-400" },
+  { color: "text-indigo-400" },
+];
+
+const getKeywordConfig = (text: string) => {
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) {
+    hash = text.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  return KEYWORD_CONFIGS[Math.abs(hash) % KEYWORD_CONFIGS.length];
+};
+
 // ─── Types
 interface OverlayData {
   transcript: string;
@@ -200,10 +217,10 @@ const AnswerArea: React.FC<{
           >
             {/* Summarized Question Header */}
             {parsed.question && (
-              <div className="flex items-start gap-2 mb-3 text-[13px] leading-relaxed text-white">
-                <MessageSquare className="h-4 w-4 mt-0.5 shrink-0 text-white/80" />
+              <div className="flex items-start gap-2 mb-3 text-[13.5px] leading-relaxed text-white">
+                <MessageSquare className="h-4 w-4 mt-0.5 shrink-0 text-white/60" />
                 <div className="flex-1 break-words">
-                  <span className="font-bold">Summarized question:</span>{" "}
+                  <span className="font-bold">Question:</span>{" "}
                   <span className="font-medium text-white/90">
                     {parsed.question}
                   </span>
@@ -211,10 +228,11 @@ const AnswerArea: React.FC<{
               </div>
             )}
 
-            {/* Answer Header */}
             <div className="flex items-center gap-2 mb-2">
-              <Star className="h-4 w-4 fill-amber-400 text-amber-400" />
-              <span className="text-[13px] font-bold text-white">Answer:</span>
+              <Star className="h-4 w-4 fill-amber-400/20 text-amber-400 shrink-0" />
+              <span className="text-[13.5px] font-bold text-white">
+                Answer:
+              </span>
             </div>
 
             {/* Markdown Content */}
@@ -225,12 +243,8 @@ const AnswerArea: React.FC<{
                 "[&_ul]:list-disc [&_ul]:pl-5 [&_ul]:mb-3 [&_ul]:space-y-1",
                 "[&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:mb-3 [&_ol]:space-y-1",
                 "[&_li]:mb-0 [&_li]:marker:text-white/60",
-                "[&_strong]:font-bold [&_strong]:text-white",
                 "[&_em]:text-amber-200 [&_em]:not-italic [&_em]:font-semibold",
                 "[&_a]:text-blue-300 [&_a]:underline",
-                "[&_h1]:text-white [&_h1]:text-base [&_h1]:font-bold [&_h1]:mb-2 [&_h1]:mt-2",
-                "[&_h2]:text-white [&_h2]:text-sm [&_h2]:font-bold [&_h2]:mb-2 [&_h2]:mt-2",
-                "[&_h3]:text-white [&_h3]:text-sm [&_h3]:font-semibold [&_h3]:mb-1 [&_h3]:mt-1",
                 "[&_blockquote]:border-l-2 [&_blockquote]:border-blue-400/50 [&_blockquote]:pl-3 [&_blockquote]:text-white/80 [&_blockquote]:italic",
                 "[&_table]:w-full [&_table]:my-3 [&_table]:text-[12px] [&_table]:border-collapse",
                 "[&_th]:border [&_th]:border-white/10 [&_th]:bg-white/5 [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:font-bold",
@@ -240,6 +254,35 @@ const AnswerArea: React.FC<{
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 components={{
+                  h1: ({ children }) => (
+                    <h1 className="text-base font-bold mb-2 mt-2 text-white">
+                      {children}
+                    </h1>
+                  ),
+                  h2: ({ children }) => (
+                    <h2 className="text-sm font-bold mb-2 mt-2 text-white/90">
+                      {children}
+                    </h2>
+                  ),
+                  h3: ({ children }) => (
+                    <h3 className="text-sm font-semibold mb-1 mt-1 text-white/80">
+                      {children}
+                    </h3>
+                  ),
+                  strong: ({ children }) => {
+                    const text = String(children);
+                    const config = getKeywordConfig(text);
+                    return (
+                      <strong
+                        className={cn(
+                          "font-bold transition-colors",
+                          config.color,
+                        )}
+                      >
+                        {children}
+                      </strong>
+                    );
+                  },
                   pre: ({ children }) => {
                     const codeElement = children as any;
                     const language =
@@ -252,10 +295,7 @@ const AnswerArea: React.FC<{
                   code: ({ node, inline, children, ...props }: any) => {
                     if (inline) {
                       return (
-                        <code
-                          className="px-1.5 py-0.5 rounded text-[12px] font-mono font-semibold bg-blue-500/15 text-blue-200 border border-blue-400/20"
-                          {...props}
-                        >
+                        <code className="px-1.5 py-0.5 rounded text-[12px] font-mono font-medium bg-white/10 text-blue-200 mx-0.5">
                           {children}
                         </code>
                       );
@@ -541,11 +581,11 @@ const FloatingApp: React.FC = () => {
         <button
           onClick={() => setIsWindowCollapsed(false)}
           className="w-full h-full flex items-center justify-center gap-2 px-3 bg-zinc-900/95 backdrop-blur-2xl rounded-xl border border-white/10 hover:border-blue-500/40 hover:bg-zinc-800/90 transition-all active:scale-95 group"
-          title="Expand ScribeShade"
+          title="Expand Craft Vita"
         >
           <div className="w-2 h-2 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)] animate-pulse shrink-0" />
           <span className="text-[11px] font-bold text-white/60 group-hover:text-white uppercase tracking-widest transition-colors leading-none">
-            ScribeShade
+            Craft Vita
           </span>
           {responses.length > 0 && (
             <span className="ml-1 flex items-center justify-center w-3.5 h-3.5 rounded-full bg-blue-500/30 border border-blue-500/50">
@@ -573,7 +613,7 @@ const FloatingApp: React.FC = () => {
             <div className="flex items-center gap-2 drag">
               <div className="w-2 h-2 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)] animate-pulse" />
               <h1 className="text-xs font-bold text-white uppercase tracking-widest leading-none pointer-events-none">
-                ScribeShade
+                Craft Vita
               </h1>
             </div>
             {/* Dedicated Drag Handle */}

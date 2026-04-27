@@ -141,7 +141,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
               </button>
               <div className="flex flex-1 items-center justify-between group-data-[collapsible=icon]:hidden">
                 <span className="text-xl font-bold tracking-tight text-gray-900">
-                  ScribeShade
+                  Craft Vita
                 </span>
                 <button
                   onClick={toggleSidebar}

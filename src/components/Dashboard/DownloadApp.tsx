@@ -10,10 +10,10 @@ export function DownloadApp() {
       <div className="relative z-10 flex flex-col lg:flex-row items-center justify-between gap-10">
         <div className="flex-1 text-center lg:text-left space-y-4">
           <h2 className="text-3xl md:text-4xl font-bold text-white tracking-tight">
-            Take ScribeShade Anywhere
+            Take Craft Vita Anywhere
           </h2>
           <p className="text-blue-50 text-lg max-w-2xl mx-auto lg:mx-0 leading-relaxed font-medium">
-            Get the full power of ScribeShade with native performance, global
+            Get the full power of Craft Vita with native performance, global
             shortcuts, and seamless interview assistance directly from your
             desktop.
           </p>

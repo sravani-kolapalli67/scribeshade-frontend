@@ -28,7 +28,7 @@ const Navbar = () => {
     Object.entries(routeConfig)
       .sort((a, b) => b[0].length - a[0].length)
       .find(([route]) => location.pathname.startsWith(route))?.[1] ||
-    "ScribeShade";
+    "Craft Vita";
 
   const isResumePage = location.pathname.startsWith("/resume/all");
   const isATSAnalysisPage = location.pathname.startsWith(

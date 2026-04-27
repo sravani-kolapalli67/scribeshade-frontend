@@ -24,7 +24,7 @@ export function OnboardingStepper() {
           <div className="relative flex flex-col grow">
             <Card className="flex flex-col grow bg-card shadow-sm shadow-black/5 hover:shadow-md transition-shadow">
               <div className="p-5 grow text-[14px] leading-relaxed text-foreground w-full">
-                Upload your resume so ScribeShade can generate custom answers to
+                Upload your resume so Craft Vita can generate custom answers to
                 the interview questions.
               </div>
             </Card>
@@ -50,7 +50,7 @@ export function OnboardingStepper() {
           <div className="relative flex flex-col grow">
             <Card className="flex flex-col grow bg-card shadow-sm shadow-black/5 hover:shadow-md transition-shadow">
               <div className="p-5 grow text-[14px] leading-relaxed text-foreground w-full">
-                See how easy ScribeShade is to use. Free Sessions are free and
+                See how easy Craft Vita is to use. Free Sessions are free and
                 limited to 5 minutes.
               </div>
             </Card>
@@ -89,7 +89,7 @@ export function OnboardingStepper() {
             {/* Glow Effect */}
             <div className="absolute inset-x-4 bottom-0 h-10 bg-linear-to-r from-emerald-300 via-cyan-400 to-blue-400 opacity-60 blur-xl translate-y-1 rounded-full pointer-events-none"></div>
             {/* Button */}
-            <Button 
+            <Button
               className="w-full relative z-20 bg-[#0F172A] hover:bg-[#1E293B] text-white border-0 shadow-lg shadow-black/20 rounded-md transition-all active:scale-[0.98]"
               onClick={() => navigate("/billing")}
             >
@@ -106,7 +106,7 @@ export function OnboardingStepper() {
           <div className="relative flex flex-col grow">
             <Card className="flex flex-col grow bg-card shadow-sm shadow-black/5 hover:shadow-md transition-shadow relative overflow-visible">
               <div className="p-5 grow text-[14px] leading-relaxed text-foreground w-full">
-                Use ScribeShade for a real interview to get the job you have
+                Use Craft Vita for a real interview to get the job you have
                 always dreamed of.
               </div>
             </Card>

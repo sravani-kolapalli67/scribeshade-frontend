@@ -3,40 +3,50 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Message } from "../Transcript";
 import { cn } from "@/lib/utils";
-import { Copy, Check, User } from "lucide-react";
+import { Copy, Check, MessageSquare, Sparkles, Terminal } from "lucide-react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { vscDarkPlus, prism } from "react-syntax-highlighter/dist/esm/styles/prism";
+import {
+  vscDarkPlus,
+  prism,
+} from "react-syntax-highlighter/dist/esm/styles/prism";
 
+const CopyButton = ({
+  text,
+  label,
+  className,
+}: {
+  text: string;
+  label?: string;
+  className?: string;
+}) => {
+  const [copied, setCopied] = useState(false);
 
-interface ChatMessageProps {
-  message: Message;
-  isStreaming: boolean;
-  isFullscreen?: boolean;
-}
+  const handleCopy = () => {
+    if (typeof text === "string") {
+      navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
 
-function Bot(props: any) {
   return (
-    <svg
-      {...props}
-      xmlns="http://www.w3.org/2000/svg"
-      width="24"
-      height="24"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
+    <button
+      onClick={handleCopy}
+      className={cn(
+        "flex items-center justify-center p-1.5 rounded-md transition-all active:scale-95",
+        "bg-white hover:bg-slate-50 text-slate-400 border border-slate-200 shadow-sm",
+        className,
+      )}
+      title={label ? `Copy ${label}` : "Copy"}
     >
-      <path d="M12 8V4H8" />
-      <rect width="16" height="12" x="4" y="8" rx="2" />
-      <path d="M2 14h2" />
-      <path d="M20 14h2" />
-      <path d="M15 13v2" />
-      <path d="M9 13v2" />
-    </svg>
+      {copied ? (
+        <Check className="h-3.5 w-3.5 text-emerald-500" />
+      ) : (
+        <Copy className="h-3.5 w-3.5" />
+      )}
+    </button>
   );
-}
+};
 
 const CodeBlock = ({
   children,
@@ -50,7 +60,6 @@ const CodeBlock = ({
   const [copied, setCopied] = useState(false);
 
   const handleCopy = () => {
-    // Extract text from children
     const text =
       children?.[0]?.props?.children || children?.props?.children || children;
     const finalContent = Array.isArray(text) ? text.join("") : text;
@@ -65,61 +74,38 @@ const CodeBlock = ({
   return (
     <div
       className={cn(
-        "rounded-xl overflow-hidden mb-6 border shadow-md",
+        "rounded-lg overflow-hidden my-4 border",
         isFullscreen
-          ? "bg-black/60 border-white/10"
-          : "bg-[#FAFAFA] border-slate-200",
+          ? "bg-black/40 border-white/10"
+          : "bg-slate-50/50 border-slate-200",
       )}
     >
-      {/* Code Header */}
       <div
         className={cn(
-          "px-4 py-2 flex items-center justify-between border-b",
+          "px-3 py-1.5 flex items-center justify-between border-b",
           isFullscreen
             ? "bg-white/5 border-white/10"
-            : "bg-slate-100 border-slate-200",
+            : "bg-slate-100/50 border-slate-200",
         )}
       >
-        <span
-          className={cn(
-            "text-[10px] font-bold uppercase tracking-widest",
-            isFullscreen ? "text-slate-400" : "text-slate-500"
-          )}
-        >
-          {language || "Code"}
-        </span>
+        <div className="flex items-center gap-2">
+          <Terminal className="h-3.5 w-3.5 text-slate-400" />
+          <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
+            {language || "code"}
+          </span>
+        </div>
         <button
           onClick={handleCopy}
-          className={cn(
-            "flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] font-bold transition-all active:scale-95",
-            isFullscreen
-              ? "bg-white/10 hover:bg-white/20 text-white shadow-sm border border-white/5"
-              : "bg-white hover:bg-slate-50 text-slate-600 shadow-sm border border-slate-200",
-          )}
+          className="p-1 hover:bg-slate-200 rounded transition-colors"
         >
           {copied ? (
-            <>
-              <Check className="h-3 w-3 text-emerald-400" />
-              <span>COPIED!</span>
-            </>
+            <Check className="h-3.5 w-3.5 text-emerald-500" />
           ) : (
-            <>
-              <Copy className="h-3 w-3" />
-              <span>COPY CODE</span>
-            </>
+            <Copy className="h-3.5 w-3.5 text-slate-400" />
           )}
         </button>
       </div>
-
-      {/* Code Content */}
-      <div
-        className={cn(
-          "m-0 overflow-x-auto text-[13px] font-mono leading-relaxed",
-          isFullscreen ? "text-slate-200" : "text-slate-800"
-        )}
-      >
-        {children}
-      </div>
+      <div className="text-[13px] leading-relaxed">{children}</div>
     </div>
   );
 };
@@ -129,91 +115,195 @@ export const ChatMessage = ({
   isStreaming,
   isFullscreen = false,
 }: ChatMessageProps) => {
-  return (
-    <div className="mb-6 animate-in fade-in slide-in-from-bottom-2">
-      <div className="flex items-center gap-2 mb-2">
-        <div className={cn(
-          "h-6 w-6 rounded-md flex items-center justify-center",
-          message.sender === "User" ? "bg-slate-500/10" : "bg-brand/10"
-        )}>
-          {message.sender === "User" ? (
-            <User className="h-3.5 w-3.5 text-slate-500" />
-          ) : (
-            <Bot className="h-3.5 w-3.5 text-brand" />
-          )}
-        </div>
-        <span
-          className={cn(
-            "text-xs font-bold",
-            isFullscreen ? "text-slate-300" : "text-slate-400",
-          )}
-        >
-          {message.sender === "User" ? "You" : "AI Assistant"}
-        </span>
-      </div>
-      <div
-        className={cn(
-          "pl-8 text-[14.5px] leading-relaxed font-medium tracking-wide",
-          isFullscreen
-            ? "text-slate-100 drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]"
-            : "text-slate-700",
-          "[&_p]:mb-4 [&_p:last-child]:mb-0 [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:mb-4 [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:mb-4 [&_li]:mb-1.5 [&_strong]:font-bold [&_strong]:text-blue-500 dark:[&_strong]:text-blue-400",
-          isFullscreen
-            ? "[&_pre]:bg-transparent [&_pre]:p-0 [&_pre]:m-0 [&_code]:text-white [&_code]:bg-transparent"
-            : "[&_pre]:bg-transparent [&_pre]:p-0 [&_pre]:m-0 [&_code]:text-slate-800 [&_code]:bg-transparent",
-          "[&_a]:text-blue-500 [&_a]:underline [&_h1]:text-blue-500 dark:[&_h1]:text-blue-400 [&_h1]:font-bold [&_h1]:mb-3 [&_h1]:text-xl [&_h2]:text-blue-500 dark:[&_h2]:text-blue-400 [&_h2]:font-bold [&_h2]:mb-3 [&_h2]:text-lg [&_h3]:text-blue-500 dark:[&_h3]:text-blue-400 [&_h3]:font-semibold [&_h3]:mb-2",
-        )}
-      >
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          components={{
-            code(props) {
-              const { children, className, node, ...rest } = props as any;
-              const match = /language-(\w+)/.exec(className || "");
-              
-              if (!match) {
-                return (
-                  <code
-                    className={cn(
-                      "px-1.5 py-0.5 rounded text-[13px] font-mono font-medium",
-                      isFullscreen
-                        ? "bg-white/10 text-slate-200"
-                        : "bg-slate-100/80 text-slate-800 border border-slate-200/60 shadow-sm",
-                    )}
-                    {...rest}
-                  >
-                    {children}
-                  </code>
-                );
-              }
+  const isAI = message.sender !== "User";
 
-              return (
-                <CodeBlock isFullscreen={isFullscreen} language={match[1]}>
-                  <SyntaxHighlighter
-                    {...rest}
-                    PreTag="div"
-                    children={String(children).replace(/\n$/, "")}
-                    language={match[1]}
-                    style={isFullscreen ? vscDarkPlus : prism}
-                    customStyle={{
-                      margin: 0,
-                      background: "transparent",
-                      padding: "1rem",
-                      fontSize: "13px",
-                      borderRadius: "0",
-                    }}
-                  />
-                </CodeBlock>
-              );
-            },
-          }}
-        >
+  // Parse Question and Answer if markers exist
+  const questionMatch = message.text.match(
+    /\*\*QUESTION:\*\*\s*([\s\S]*?)\s*(?=\*\*ANSWER:\*\*|$)/i,
+  );
+  const answerMatch = message.text.match(/\*\*ANSWER:\*\*\s*([\s\S]*)/i);
+
+  const displayQuestion = questionMatch ? questionMatch[1].trim() : "";
+  const displayAnswer = answerMatch
+    ? answerMatch[1].trim()
+    : questionMatch
+      ? ""
+      : message.text;
+
+  if (!isAI) {
+    return (
+      <div className="mb-6 flex justify-end">
+        <div className="bg-slate-100 rounded-2xl px-4 py-2 max-w-[80%] text-[14px] text-slate-700 shadow-sm border border-slate-200/50">
           {message.text}
-        </ReactMarkdown>
-        {isStreaming && (
-          <span className="ml-1 inline-block h-4 w-1 bg-brand animate-pulse" />
-        )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mb-8 animate-in fade-in slide-in-from-bottom-2">
+      {/* Question Section */}
+      {displayQuestion && (
+        <div className="group/ques relative mb-5 flex items-start gap-2.5">
+          <div className="mt-0.5 shrink-0 text-slate-400">
+            <MessageSquare className="h-4.5 w-4.5" />
+          </div>
+          <div className="flex-1 text-[14.5px] leading-relaxed pr-10">
+            <span className="font-bold text-slate-900 mr-1.5">Question:</span>
+            <span className="text-slate-700">{displayQuestion}</span>
+          </div>
+          <CopyButton
+            text={displayQuestion}
+            label="Question"
+            className="absolute top-0 right-0 opacity-0 group-hover/ques:opacity-100"
+          />
+        </div>
+      )}
+
+      {/* Answer Section */}
+      <div className="flex items-start gap-2">
+        <div className="mt-0.5 shrink-0 text-brand">
+          <Sparkles className="h-4.5 w-4.5" />
+        </div>
+        <div className="flex-1">
+          <div className="group/ansheader relative flex items-center justify-between mb-3">
+            <div className="text-[14.5px] font-bold text-slate-900">
+              Answer:
+            </div>
+            <CopyButton
+              text={displayAnswer}
+              label="Full Answer"
+              className="absolute top-0 right-0 opacity-0 group-hover/ansheader:opacity-100"
+            />
+          </div>
+
+          <div
+            className={cn(
+              "text-[14.5px] leading-relaxed font-normal tracking-tight",
+              isFullscreen ? "text-slate-100" : "text-slate-700",
+              "selection:bg-brand/10",
+            )}
+          >
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                p: ({ children }) => {
+                  const textContent = String(children);
+                  return (
+                    <div className="group/p relative flex items-start gap-3 mb-4 last:mb-0 -ml-8 px-2 rounded-md hover:bg-slate-50/50 transition-colors">
+                      <div className="w-8 shrink-0 flex items-center justify-center h-6 relative">
+                        <CopyButton
+                          text={textContent}
+                          className="absolute inset-0 m-auto h-6 w-6 opacity-0 group-hover/p:opacity-100"
+                        />
+                      </div>
+                      <p className="flex-1">{children}</p>
+                    </div>
+                  );
+                },
+                ul: ({ children }) => (
+                  <ul className="mb-4 space-y-4 list-none">{children}</ul>
+                ),
+                li: ({ children }) => {
+                  const [copied, setCopied] = useState(false);
+                  const textContent = Array.isArray(children)
+                    ? children
+                        .map((c) =>
+                          typeof c === "string"
+                            ? c
+                            : (c as any)?.props?.children || "",
+                        )
+                        .join("")
+                    : typeof children === "string"
+                      ? children
+                      : "";
+
+                  const handleCopy = (e: React.MouseEvent) => {
+                    e.stopPropagation();
+                    navigator.clipboard.writeText(textContent);
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 2000);
+                  };
+
+                  return (
+                    <li className="group/li flex items-start gap-2 py-1 relative -ml-8 px-2 rounded-md hover:bg-slate-50/50 transition-colors">
+                      <div className="w-8 shrink-0 flex items-center justify-center h-6 relative">
+                        <div className="h-1.5 w-1.5 rounded-full bg-slate-300 group-hover/li:opacity-0 transition-opacity" />
+                        <button
+                          onClick={handleCopy}
+                          className="absolute inset-0 m-auto flex items-center justify-center h-6 w-6 bg-white border border-slate-200 rounded-md shadow-sm opacity-0 group-hover/li:opacity-100 hover:bg-slate-50 transition-all"
+                        >
+                          {copied ? (
+                            <Check className="h-3 w-3 text-emerald-500" />
+                          ) : (
+                            <Copy className="h-3 w-3 text-slate-400" />
+                          )}
+                        </button>
+                      </div>
+                      <div className="flex-1 text-slate-700 leading-relaxed pt-0.5">
+                        {children}
+                      </div>
+                    </li>
+                  );
+                },
+                strong: ({ children }) => (
+                  <strong className="font-bold text-slate-900 dark:text-white">
+                    {children}
+                  </strong>
+                ),
+                code(props) {
+                  const { children, className, node, ...rest } = props as any;
+                  const match = /language-(\w+)/.exec(className || "");
+
+                  if (!match) {
+                    return (
+                      <code
+                        className={cn(
+                          "px-1.5 py-0.5 rounded text-[13px] font-mono font-medium bg-slate-100 text-slate-800",
+                          isFullscreen && "bg-white/10 text-slate-200",
+                        )}
+                      >
+                        {children}
+                      </code>
+                    );
+                  }
+
+                  return (
+                    <CodeBlock isFullscreen={isFullscreen} language={match[1]}>
+                      <SyntaxHighlighter
+                        {...rest}
+                        PreTag="div"
+                        children={String(children).replace(/\n$/, "")}
+                        language={match[1]}
+                        style={isFullscreen ? vscDarkPlus : prism}
+                        customStyle={{
+                          margin: 0,
+                          background: "transparent",
+                          padding: "1.25rem",
+                          fontSize: "13px",
+                          lineHeight: "1.6",
+                          borderRadius: "0",
+                        }}
+                      />
+                    </CodeBlock>
+                  );
+                },
+              }}
+            >
+              {displayAnswer}
+            </ReactMarkdown>
+            {isStreaming && (
+              <span className="ml-1 inline-block h-4 w-1.5 bg-brand/60 animate-pulse rounded-full align-middle" />
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );
 };
+
+interface ChatMessageProps {
+  message: Message;
+  isStreaming: boolean;
+  isFullscreen?: boolean;
+}

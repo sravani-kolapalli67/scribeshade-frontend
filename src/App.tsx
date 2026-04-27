@@ -37,7 +37,7 @@ function App() {
       <div className="min-h-screen bg-white flex items-center justify-center p-4">
         <div className="animate-pulse flex flex-col items-center gap-4">
           <div className="w-12 h-12 rounded-full border-4 border-blue-500 border-t-transparent animate-spin"></div>
-          <p className="text-slate-600 font-medium">Loading ScribeShade...</p>
+          <p className="text-slate-600 font-medium">Loading Craft Vita...</p>
         </div>
       </div>
     );
