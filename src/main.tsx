@@ -20,6 +20,7 @@ function ClerkProviderWithNavigate({
 
   return (
     <ClerkProvider
+      allowedRedirectProtocols={["tauri:","http:", "https:"]}
       publishableKey={PUBLISHABLE_KEY}
       afterSignOutUrl="/"
       routerPush={(to: string) => navigate(to)}

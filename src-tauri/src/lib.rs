@@ -1,4 +1,6 @@
 use tauri::{Manager, WebviewWindowBuilder, WebviewUrl, AppHandle, Window, PhysicalPosition, LogicalSize};
+use tauri_plugin_deep_link::DeepLinkExt;
+use tauri_plugin_opener::OpenerExt;
 use screenshots::Screen;
 use base64::{Engine as _, engine::general_purpose};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -266,9 +268,39 @@ async fn set_mini_state(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() { 
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_oauth::init())
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .setup(|app| {
+            // Create the main window manually so we can attach a navigation_handler.
+            // This intercepts all external URLs (e.g. Google OAuth) and opens them
+            // in the OS system browser instead of the Tauri webview.
+            let handle = app.handle().clone();
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+                .title("ScribeShade")
+                .inner_size(1200.0, 800.0)
+                .center()
+                .resizable(false)
+                .maximized(true)
+                .skip_taskbar(true)
+                .on_navigation(move |url| {
+                    let scheme = url.scheme();
+                    let host = url.host_str().unwrap_or("");
+                    // Allow Tauri internal URLs and local dev server
+                    if scheme == "tauri"
+                        || host == "localhost"
+                        || host == "tauri.localhost"
+                        || host == "127.0.0.1"
+                    {
+                        return true;
+                    }
+                    // All external URLs → OS system browser
+                    let _ = handle.opener().open_url(url.as_str(), None::<&str>);
+                    false
+                })
+                .build()?;
             #[cfg(target_os = "windows")]
             {
                 if let Some(win) = app.get_webview_window("mini") {
@@ -285,6 +317,30 @@ pub fn run() {
                     }
                 }
             }
+
+            // Deep-link handler — focuses main window whenever the OS opens
+            // craftvita:// (e.g. the "Return to ScribeShade" button in the
+            // browser after OAuth). The JS onOpenUrl listener in App.tsx
+            // handles URL routing; Rust only needs to bring the window forward.
+            let deep_link_handle = app.handle().clone();
+            app.handle().deep_link().on_open_url(move |_event| {
+                if let Some(win) = deep_link_handle.get_webview_window("main") {
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
+            });
+
+            // Handle the case where the app was cold-launched by a craftvita://
+            // deep link (e.g. OS invoked the .app bundle directly). The JS
+            // onOpenUrl will also fire, but focusing here ensures the window is
+            // visible before the React router processes the URL.
+            if let Ok(Some(_)) = app.handle().deep_link().get_current() {
+                if let Some(win) = app.handle().get_webview_window("main") {
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

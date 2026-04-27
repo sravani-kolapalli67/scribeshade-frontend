@@ -1,5 +1,8 @@
-import { Routes, Route, Navigate, useLocation } from "react-router-dom";
+import { Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { useUser } from "@clerk/clerk-react";
+import { useEffect } from "react";
+import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useSyncUser } from "@/hooks/useSyncUser";
 import "./App.css";
 import { AppSidebar } from "@/components/app-sidebar";
@@ -23,6 +26,7 @@ import BuildResume from "./pages/Resume/BuildResume/page";
 import ResumeEditor from "./pages/Resume/ResumeEditor/page";
 import SignInPage from "./pages/Auth/SignIn/page";
 import SignUpPage from "./pages/Auth/SignUp/page";
+import SSOCallbackPage from "./pages/Auth/SSOCallback/page";
 import BillingPage from "./pages/Billing/page";
 import AIProjects from "./pages/AIProjects/page";
 import ProjectRecommendations from "./pages/AIProjects/ProjectRecommendations/page";
@@ -30,7 +34,30 @@ import ProjectRecommendations from "./pages/AIProjects/ProjectRecommendations/pa
 function App() {
   const { isSignedIn, isLoaded } = useUser();
   const location = useLocation();
+  const navigate = useNavigate();
   useSyncUser();
+
+  // Listen for craftvita:// deep-links from the OS (e.g. "Return to ScribeShade"
+  // button after OAuth, or a craftvita://oauth-callback from Clerk).
+  // Rust already focuses the window; this handler covers URL routing.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    onOpenUrl((urls) => {
+      const url = Array.isArray(urls) ? urls[0] : urls;
+      if (typeof url !== "string") return;
+
+      // Always bring the window to front on any craftvita:// deep link.
+      getCurrentWebviewWindow().setFocus().catch(() => undefined);
+
+      // OAuth callback: forward Clerk params to the SSO handler page.
+      if (url.startsWith("craftvita://oauth-callback")) {
+        const parsed = new URL(url);
+        navigate(`/sso-callback${parsed.search}`);
+      }
+    }).then((fn) => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   if (!isLoaded) {
     return (
@@ -44,7 +71,7 @@ function App() {
   }
 
   // Define paths that don't require authentication
-  const authPaths = ["/sign-in", "/sign-up"];
+  const authPaths = ["/sign-in", "/sign-up", "/sso-callback", "/sign-in/sso-callback", "/sign-up/sso-callback"];
   const isAuthPage = authPaths.some((path) =>
     location.pathname.startsWith(path),
   );
@@ -63,6 +90,9 @@ function App() {
       <Routes>
         <Route path="/sign-in/*" element={<SignInPage />} />
         <Route path="/sign-up/*" element={<SignUpPage />} />
+        <Route path="/sso-callback" element={<SSOCallbackPage />} />
+        <Route path="/sign-in/sso-callback" element={<SSOCallbackPage />} />
+        <Route path="/sign-up/sso-callback" element={<SSOCallbackPage />} />
         <Route path="*" element={<Navigate to="/sign-in" replace />} />
       </Routes>
     );
