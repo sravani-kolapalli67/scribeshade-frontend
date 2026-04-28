@@ -36,6 +36,9 @@ cpal = "0.15"
 # screencapturekit captures system/display audio without a virtual audio device.
 # requires macOS 13.0+ for audio capture APIs.
 screencapturekit = { version = "1", features = ["macos_13_0"] }
+# objc2 for macOS-native window level APIs (NSStatusWindowLevel, etc.)
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSRunningApplication"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 winvd = "0.0.49"
 windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }

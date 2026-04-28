@@ -5,6 +5,8 @@ const FREE_SESSION_DURATION = 5 * 60; // 5 minutes in seconds
 interface UseFreeSessionTimerOptions {
   sessionId: string | undefined;
   onTimeUp: () => void;
+  /** For paid sessions: total minutes allowed (from activate response). Enables remaining-time countdown. */
+  maxAllowedMinutes?: number | null;
 }
 
 interface UseFreeSessionTimerReturn {
@@ -23,6 +25,7 @@ interface UseFreeSessionTimerReturn {
 export function useFreeSessionTimer({
   sessionId,
   onTimeUp,
+  maxAllowedMinutes,
 }: UseFreeSessionTimerOptions): UseFreeSessionTimerReturn {
   const [isFreeSession, setIsFreeSession] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -71,8 +74,13 @@ export function useFreeSessionTimer({
             hasEndedRef.current = true;
             setTimeout(() => onTimeUpRef.current(), 0);
           }
+        } else if (maxAllowedMinutes) {
+          // Paid session with a cap: count down remaining seconds
+          const totalAllowedSeconds = maxAllowedMinutes * 60;
+          const remaining = Math.max(0, totalAllowedSeconds - elapsed);
+          setSeconds(remaining);
         } else {
-          // Paid session: count up from 0
+          // Paid session without cap: count up from elapsed
           setSeconds(elapsed);
         }
       } catch (err) {
@@ -104,8 +112,11 @@ export function useFreeSessionTimer({
             return 0;
           }
           return prev - 1;
+        } else if (maxAllowedMinutes) {
+          // Paid with cap: count down
+          return Math.max(0, prev - 1);
         } else {
-          // Count up
+          // Paid without cap: count up
           return prev + 1;
         }
       });
@@ -128,6 +139,10 @@ export function useFreeSessionTimer({
     isFreeSession,
     isLoading,
     formattedTime: seconds !== null ? formatTime(seconds) : null,
-    progress: isFreeSession && seconds !== null ? seconds / FREE_SESSION_DURATION : 1,
+    progress: isFreeSession && seconds !== null
+      ? seconds / FREE_SESSION_DURATION
+      : maxAllowedMinutes && seconds !== null
+        ? seconds / (maxAllowedMinutes * 60)
+        : 1,
   };
 }

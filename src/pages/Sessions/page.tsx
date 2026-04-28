@@ -5,6 +5,7 @@ import { useNavigate } from "react-router-dom";
 import { ColumnDef } from "@tanstack/react-table";
 import { DataTable } from "@/components/data-table/data-table";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Trash2, FileText, BarChart3, Play } from "lucide-react";
 import { TranscriptDialog } from "./TranscriptDialog";
 import { SessionAnalyticsDialog } from "./SessionAnalyticsDialog";
@@ -18,6 +19,15 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
+type SessionStatus =
+  | "PRE_CHECK"
+  | "ACTIVE"
+  | "COMPLETING"
+  | "COMPLETED"
+  | "CREDIT_EXHAUSTED"
+  | "FORCE_ENDED"
+  | "ABANDONED";
+
 // Define Session interface
 interface Session extends ExportableData {
   id: string;
@@ -26,13 +36,15 @@ interface Session extends ExportableData {
   mode: "url" | "manual";
   free: boolean;
   aiUsage?: number;
-  status?: "Ended" | "Active";
+  status?: SessionStatus | "Ended" | "Active";
   isActive?: boolean;
   endedAt?: string | null;
   createdAt: string;
   updatedAt: string;
   autoGenerateResponse: boolean;
   saveTranscription: boolean;
+  creditsDeducted?: string | null;
+  deductionReason?: string | null;
 }
 
 export default function Sessions() {
@@ -159,6 +171,76 @@ export default function Sessions() {
         ),
       },
       {
+        accessorKey: "status",
+        header: "Status",
+        cell: ({ row }) => {
+          const status = row.original.status;
+          const isEnded =
+            status === "COMPLETED" ||
+            status === "Ended" ||
+            !!row.original.endedAt;
+          const statusConfig: Record<
+            string,
+            { label: string; className: string }
+          > = {
+            PRE_CHECK: {
+              label: "Pending",
+              className:
+                "bg-muted text-muted-foreground border-border/60",
+            },
+            ACTIVE: {
+              label: "Active",
+              className:
+                "bg-emerald-50 text-emerald-700 border-emerald-300",
+            },
+            COMPLETING: {
+              label: "Processing",
+              className: "bg-blue-50 text-blue-700 border-blue-300",
+            },
+            COMPLETED: {
+              label: "Completed",
+              className: "bg-muted text-foreground border-border",
+            },
+            CREDIT_EXHAUSTED: {
+              label: "Out of Credits",
+              className: "bg-red-50 text-red-700 border-red-300",
+            },
+            FORCE_ENDED: {
+              label: "Force Ended",
+              className:
+                "bg-amber-50 text-amber-700 border-amber-300",
+            },
+            ABANDONED: {
+              label: "Abandoned",
+              className: "bg-muted text-muted-foreground border-border",
+            },
+            Ended: {
+              label: "Completed",
+              className: "bg-muted text-foreground border-border",
+            },
+            Active: {
+              label: "Active",
+              className:
+                "bg-emerald-50 text-emerald-700 border-emerald-300",
+            },
+          };
+          const cfg = status
+            ? statusConfig[status]
+            : isEnded
+              ? statusConfig["COMPLETED"]
+              : statusConfig["ACTIVE"];
+          if (!cfg) return null;
+          return (
+            <Badge
+              variant="outline"
+              className={`text-[11px] font-semibold px-2.5 py-0.5 ${cfg.className}`}
+            >
+              {cfg.label}
+            </Badge>
+          );
+        },
+      },
+      {
         accessorKey: "createdAt",
         header: "Created At",
         cell: ({ row }) => {
@@ -179,7 +261,7 @@ export default function Sessions() {
         header: "Actions",
         cell: ({ row }) => (
           <div className="flex items-center justify-end gap-2 pr-2">
-            {!row.original.endedAt && (
+            {(row.original.status === "PRE_CHECK" || (!row.original.endedAt && row.original.status !== "COMPLETED" && row.original.status !== "CREDIT_EXHAUSTED" && row.original.status !== "FORCE_ENDED" && row.original.status !== "ABANDONED")) && (
               <Button
                 variant="ghost"
                 size="icon"

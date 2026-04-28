@@ -195,31 +195,69 @@ async fn capture_screen(window: Window) -> Result<String, String> {
 
 
 #[tauri::command]
-fn show_mini_top_center(app: AppHandle) {
-    let window = app.get_webview_window("mini").unwrap();
+fn show_mini_top_center(app: AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("mini")
+        .ok_or("mini window not found")?;
 
-    let monitor = window.primary_monitor().unwrap().unwrap();
-    let screen = monitor.size();
-    let size = window.outer_size().unwrap();
+    // Ensure the window has the right initial size before we read it back for
+    // centering. The tauri.conf.json default (700×36) should already be set,
+    // but an explicit call guards against hidden-window size quirks on macOS.
+    window
+        .set_size(LogicalSize::new(700u32, 36u32))
+        .map_err(|e| e.to_string())?;
+
+    let monitor = window
+        .primary_monitor()
+        .map_err(|e| e.to_string())?
+        .ok_or("no primary monitor")?;
+
+    let screen = monitor.size(); // PhysicalSize<u32>
+    let size = window.outer_size().map_err(|e| e.to_string())?; // PhysicalSize<u32>
 
     let x = (screen.width as i32 - size.width as i32) / 2;
     let y = 10;
 
-    window.set_position(PhysicalPosition { x, y }).unwrap();
-    window.set_always_on_top(true).unwrap();
-    window.set_minimizable(false).unwrap();
-    window.set_maximizable(false).unwrap();
+    window
+        .set_position(PhysicalPosition { x, y })
+        .map_err(|e| e.to_string())?;
+    window.set_minimizable(false).map_err(|e| e.to_string())?;
+    window.set_maximizable(false).map_err(|e| e.to_string())?;
 
-    // Strip all DWM chrome BEFORE showing the window so it never flashes
-    // with the default Windows frame/border/shadow.
+    // ── macOS: bump window to NSStatusWindowLevel (25) so it floats above
+    // Chrome, Meet, and other floating windows.  NSFloatingWindowLevel (3)
+    // from set_always_on_top can be beaten by Chrome's own floating layers.
+    // We also need .canJoinAllSpaces so the overlay survives Space switches.
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::msg_send_id;
+        use objc2_app_kit::NSWindow;
+
+        // NSStatusWindowLevel = 25 — above floating panels (level 3) but
+        // below screen-saver and security layers.
+        const NS_STATUS_WINDOW_LEVEL: i64 = 25;
+
+        unsafe {
+            let ns_win = window.ns_window().map_err(|e| e.to_string())?;
+            let ns_win_ptr = ns_win as *mut objc2::runtime::AnyObject;
+            // setLevel:
+            let _: () = objc2::msg_send![ns_win_ptr, setLevel: NS_STATUS_WINDOW_LEVEL];
+            // setCollectionBehavior: canJoinAllSpaces | stationary | ignoresCycle
+            //   canJoinAllSpaces (1<<0) = 1
+            //   stationary       (1<<4) = 16
+            //   ignoresCycle     (1<<6) = 64  (hides from Cmd+Tab)
+            let behavior: u64 = 1 | 16 | 64;
+            let _: () = objc2::msg_send![ns_win_ptr, setCollectionBehavior: behavior];
+        }
+    }
+
+    // ── Windows: strip DWM chrome and pin to all virtual desktops ─────────
     #[cfg(target_os = "windows")]
     {
         if let Ok(hwnd) = window.hwnd() {
             let win_hwnd = windows::Win32::Foundation::HWND(hwnd.0);
             let _ = winvd::pin_window(win_hwnd);
             remove_window_border(win_hwnd);
-            // Install rounded-corner click-through hit-testing (runs once; safe to
-            // re-register with same ID — just updates the ref_data).
             unsafe {
                 let _ = windows::Win32::UI::Shell::SetWindowSubclass(
                     win_hwnd, Some(mini_subclass_proc), 1, 0,
@@ -228,7 +266,11 @@ fn show_mini_top_center(app: AppHandle) {
         }
     }
 
-    window.show().unwrap();
+    window.show().map_err(|e| e.to_string())?;
+    window.set_always_on_top(true).map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())?;
+
+    Ok(())
 }
 
 /// Animate the mini overlay to one of three discrete states.

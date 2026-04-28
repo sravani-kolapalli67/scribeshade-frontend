@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Dialog,
   DialogContent,
@@ -8,6 +9,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
+import { useCreditsBalance } from "@/hooks/useCreditsBalance";
+import { useCreditBrackets } from "@/hooks/useCreditBrackets";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -36,10 +39,24 @@ import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { ModelSelector } from "@/pages/Sessions/ActiveSession/components/ModelSelector";
 
+export interface ActivateResponseData {
+  maxAllowedMinutes: number | null;
+  startedAt: string;
+  creditsHeld: string;
+}
+
 interface ConnectDialogProps {
   open: boolean;
-  onSuccess: (finalModel: string, finalLanguage: string) => void;
+  onSuccess: (
+    finalModel: string,
+    finalLanguage: string,
+    activateData: ActivateResponseData,
+  ) => void;
   onCancel: () => void;
+  // Called synchronously at the start of the connect button click — before any
+  // await — so that getDisplayMedia runs within the user gesture context.
+  // WKWebView (production) strictly requires this.
+  onStartShare?: () => void;
   sessionId: string;
   companyName: string;
   jobTitle: string;
@@ -73,6 +90,7 @@ export function ConnectDialog({
   open,
   onSuccess,
   onCancel,
+  onStartShare,
   sessionId,
   companyName,
   jobTitle,
@@ -81,6 +99,9 @@ export function ConnectDialog({
   simpleLanguage: initialSimple,
   aiModel: initialAIModel,
 }: ConnectDialogProps) {
+  const navigate = useNavigate();
+  const { balance } = useCreditsBalance();
+  const { brackets } = useCreditBrackets();
   //   console.log("ConnectDialog", {
   //     sessionId,
   //     companyName,
@@ -105,6 +126,10 @@ export function ConnectDialog({
   }, [open, initialLanguage, initialSimple, initialAIModel]);
 
   const handleActivate = async () => {
+    // Call onStartShare FIRST — synchronously, before any await — so that
+    // navigator.mediaDevices.getDisplayMedia() runs inside the user gesture
+    // handler context that WKWebView requires in production builds.
+    onStartShare?.();
     setActivating(true);
     try {
       // 1. Call activate API
@@ -119,11 +144,23 @@ export function ConnectDialog({
 
       if (!res.ok) {
         const err = await res.json();
-        throw new Error(err.message || "Failed to activate session");
+        if (res.status === 402) {
+          toast.error(
+            "Insufficient credits. Please purchase more credits to start a session.",
+          );
+          navigate("/billing");
+          return;
+        }
+        throw new Error(err.error || err.message || "Failed to activate session");
       }
 
-      // 3. Trigger success callback
-      onSuccess(aiModel, language);
+      const data = await res.json();
+      // 3. Trigger success callback with activate response data
+      onSuccess(aiModel, language, {
+        maxAllowedMinutes: data.maxAllowedMinutes ?? null,
+        startedAt: data.startedAt ?? new Date().toISOString(),
+        creditsHeld: data.creditsHeld ?? "0",
+      });
     } catch (err: any) {
       if (
         err?.name === "NotAllowedError" ||
@@ -293,6 +330,32 @@ export function ConnectDialog({
               </div>
             </div>
           </div>
+
+          {/* Credit cost preview (paid sessions only) */}
+          {balance && (() => {
+            const maxBracket = brackets.reduce<typeof brackets[0] | null>(
+              (max, b) => (!max || b.bracketMinutes > max.bracketMinutes ? b : max),
+              null,
+            );
+            const available = parseFloat(balance.totalAvailable);
+            const maxCost = maxBracket ? parseFloat(maxBracket.creditsFull) : null;
+            const lowBalance = maxCost !== null && available < maxCost;
+            return (
+              <div className={`flex items-center justify-between px-3 py-2.5 rounded-xl border text-xs font-medium ${lowBalance ? "bg-amber-50/60 border-amber-300/60" : "bg-muted/30 border-border/50"}`}>
+                <div className="flex items-center gap-2">
+                  <Sparkles className={`h-3.5 w-3.5 ${lowBalance ? "text-amber-500" : "text-brand"}`} />
+                  <span className="text-muted-foreground">
+                    {maxBracket
+                      ? `Up to ${maxBracket.creditsFull} credit · first ${maxBracket.freeZoneMinutes} min free`
+                      : "Free session"}
+                  </span>
+                </div>
+                <span className={`font-bold tabular-nums ${lowBalance ? "text-amber-600" : "text-foreground"}`}>
+                  {balance.totalAvailable} available
+                </span>
+              </div>
+            );
+          })()}
 
           {/* Footer Actions */}
           <div className="flex items-center gap-3 pt-1">

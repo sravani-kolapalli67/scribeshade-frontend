@@ -4,12 +4,12 @@ import { SubscriptionPricing } from "@/components/Subscription/SubscriptionPrici
 
 export default function Dashboard() {
   return (
-    <div className="flex flex-col space-y-6 w-full max-w-7xl mx-auto py-6">
+    <div className="flex flex-col space-y-6 w-full py-4 sm:py-6">
       <OnboardingStepper />
-      <div className="w-full py-12 my-12">
+      <div className="w-full py-8 sm:py-12 my-4 sm:my-12">
         <SubscriptionPricing />
       </div>
-      <div className="px-4 w-full">
+      <div className="w-full">
         <DownloadApp />
       </div>
     </div>

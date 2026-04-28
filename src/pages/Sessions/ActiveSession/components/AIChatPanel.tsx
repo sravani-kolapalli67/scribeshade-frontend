@@ -19,6 +19,7 @@ interface AIChatPanelProps {
   onSend?: () => void;
   isFullscreen?: boolean;
   isFreeSession?: boolean;
+  isWarning?: boolean;
   timerText?: string | null;
   selectedModel: string;
   onModelChange: (model: string) => void;
@@ -38,6 +39,7 @@ export const AIChatPanel = ({
   onSend,
   isFullscreen = false,
   isFreeSession = false,
+  isWarning = false,
   timerText = null,
   selectedModel,
   onModelChange,
@@ -50,7 +52,8 @@ export const AIChatPanel = ({
       <ChatHeader 
         onExit={onExit} 
         isFullscreen={isFullscreen} 
-        isFreeSession={isFreeSession} 
+        isFreeSession={isFreeSession}
+        isWarning={isWarning}
         timerText={timerText} 
         selectedModel={selectedModel}
         onModelChange={onModelChange}

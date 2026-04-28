@@ -2,14 +2,14 @@ import { Button } from "@/components/ui/button";
 
 export function DownloadApp() {
   return (
-    <div className="w-full max-w-6xl mx-auto py-12 px-8 bg-linear-to-br from-brand to-blue-700 rounded-3xl overflow-hidden relative shadow-2xl shadow-brand/20 my-8 border border-white/10">
+    <div className="w-full max-w-6xl mx-auto py-8 sm:py-12 px-5 sm:px-8 bg-linear-to-br from-brand to-blue-700 rounded-2xl sm:rounded-3xl overflow-hidden relative shadow-2xl shadow-brand/20 my-4 sm:my-8 border border-white/10">
       {/* Background decorative blobs */}
       <div className="absolute top-0 -left-1/4 w-1/2 h-full bg-white/20 blur-[120px] rounded-full pointer-events-none" />
       <div className="absolute bottom-0 -right-1/4 w-1/2 h-full bg-blue-400/20 blur-[120px] rounded-full pointer-events-none" />
 
       <div className="relative z-10 flex flex-col lg:flex-row items-center justify-between gap-10">
         <div className="flex-1 text-center lg:text-left space-y-4">
-          <h2 className="text-3xl md:text-4xl font-bold text-white tracking-tight">
+          <h2 className="text-2xl sm:text-3xl md:text-4xl font-bold text-white tracking-tight">
             Take Craft Vita Anywhere
           </h2>
           <p className="text-blue-50 text-lg max-w-2xl mx-auto lg:mx-0 leading-relaxed font-medium">

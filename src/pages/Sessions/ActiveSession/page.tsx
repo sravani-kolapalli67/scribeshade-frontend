@@ -6,10 +6,12 @@ import { useNativeTabTranscription } from "@/hooks/useNativeTabTranscription";
 import { useAIChat } from "@/hooks/useAIChat";
 import { useKeyboardShortcut } from "@/hooks/useKeyboardShortcut";
 import { useFreeSessionTimer } from "@/hooks/useFreeSessionTimer";
+import { useSessionHeartbeat } from "@/hooks/useSessionHeartbeat";
 import { toast } from "sonner";
 import { emit, listen } from "@tauri-apps/api/event";
 import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
+import type { ActivateResponseData } from "@/components/Sessions/ConnectDialog";
 
 import {
   ResizableHandle,
@@ -61,20 +63,28 @@ export default function ActiveSession() {
   );
   const connectData = location.state?.connectData || {};
 
-  const handleConnectSuccess = useCallback((finalModel: string, finalLanguage: string) => {
-    setIsConnectDialogOpen(false);
-    if (finalModel) {
-      setSelectedModel(finalModel);
-    }
-    if (finalLanguage) {
-      setSelectedLanguage(finalLanguage);
-    }
-  }, []);
+  // Activate response data — populated once the ConnectDialog succeeds
+  const [maxAllowedMinutes, setMaxAllowedMinutes] = useState<number | null>(null);
+  const [sessionStartedAt, setSessionStartedAt] = useState<string | null>(null);
+  const [creditWarning, setCreditWarning] = useState<number | null>(null); // remaining minutes
+
+  const handleConnectSuccess = useCallback(
+    (finalModel: string, finalLanguage: string, activateData: ActivateResponseData) => {
+      setIsConnectDialogOpen(false);
+      if (finalModel) setSelectedModel(finalModel);
+      if (finalLanguage) setSelectedLanguage(finalLanguage);
+      setMaxAllowedMinutes(activateData.maxAllowedMinutes);
+      setSessionStartedAt(activateData.startedAt);
+    },
+    [],
+  );
 
   const handleConnectCancel = useCallback(() => {
     setIsConnectDialogOpen(false);
     navigate("/sessions");
   }, [navigate]);
+
+  const stopHeartbeatRef = useRef<(() => void) | null>(null);
 
   const endSessionNow = useCallback(async () => {
     if (!id) return;
@@ -83,12 +93,15 @@ export default function ActiveSession() {
       duration: 3000,
     });
 
+    // Stop heartbeat immediately so no new ticks fire during cleanup
+    stopHeartbeatRef.current?.();
+
     try {
       const transcript = messages
         .map((m) => `[${m.sender}]: ${m.text}`)
         .join("\n");
       const aiUsage = parseInt(localStorage.getItem(`aiUsage_${id}`) || "0");
-      await fetch(
+      const res = await fetch(
         `${import.meta.env.VITE_BACKEND_URL}/api/session/${id}/deactivate`,
         {
           method: "POST",
@@ -99,6 +112,43 @@ export default function ActiveSession() {
         },
       );
       localStorage.removeItem(`aiUsage_${id}`);
+
+      // For paid sessions, wait up to 8 seconds for the BullMQ job to mark
+      // the session COMPLETED before navigating away.
+      if (res.ok && maxAllowedMinutes !== null) {
+        const data = await res.json();
+        if (data.status === "COMPLETING") {
+          let attempts = 0;
+          let deductedCredits: string | null = null;
+          let deductedReason: string | null = null;
+          while (attempts < 4) {
+            await new Promise((r) => setTimeout(r, 2000));
+            try {
+              const poll = await fetch(
+                `${import.meta.env.VITE_BACKEND_URL}/api/session/${id}`,
+              );
+              if (poll.ok) {
+                const session = await poll.json();
+                const sessionData = session.data || session;
+                const status = sessionData?.status;
+                deductedCredits = sessionData?.creditsDeducted ?? null;
+                deductedReason = sessionData?.deductionReason ?? null;
+                if (status === "COMPLETED" || status === "CREDIT_EXHAUSTED") break;
+              }
+            } catch {
+              // ignore poll errors — we'll navigate regardless
+            }
+            attempts++;
+          }
+          if (deductedReason === "FREE_ZONE") {
+            toast.success("Session ended — no credits charged (free zone)");
+          } else if (deductedReason === "HALF_BRACKET" && deductedCredits) {
+            toast.info(`Session ended — ${deductedCredits} credits charged (grace zone rate)`);
+          } else if (deductedCredits) {
+            toast.info(`Session ended — ${deductedCredits} credits deducted`);
+          }
+        }
+      }
     } catch (error) {
       console.error("Error ending session directly:", error);
     } finally {
@@ -120,17 +170,43 @@ export default function ActiveSession() {
       }
       navigate("/sessions");
     }
-  }, [id, messages, navigate]);
+  }, [id, messages, maxAllowedMinutes, navigate]);
 
   const onTimeUp = useCallback(async () => {
     toast.info("Free session time is up!");
     endSessionNow();
   }, [endSessionNow]);
 
+  const onCreditExhausted = useCallback(() => {
+    toast.error("Session ended — credits exhausted.", { duration: 6000 });
+    endSessionNow();
+  }, [endSessionNow]);
+
+  const onCreditWarning = useCallback((remaining: number) => {
+    setCreditWarning(remaining);
+    toast.warning(
+      `Only ${remaining} minute${remaining === 1 ? "" : "s"} of credit remaining!`,
+      { duration: 8000 },
+    );
+  }, []);
+
   const { isFreeSession, formattedTime } = useFreeSessionTimer({
     sessionId: id,
     onTimeUp,
+    maxAllowedMinutes,
   });
+
+  // Heartbeat: runs every 60s for paid sessions after activation
+  const { stop: stopHeartbeat } = useSessionHeartbeat({
+    sessionId: id,
+    enabled: !isFreeSession && !isConnectDialogOpen && sessionStartedAt !== null,
+    startedAt: sessionStartedAt,
+    onExhausted: onCreditExhausted,
+    onWarning: onCreditWarning,
+  });
+
+  // Keep the ref current so endSessionNow (defined above) can call stop
+  stopHeartbeatRef.current = stopHeartbeat;
 
   //   const { showDialog: showInactivityDialog, remainingTime, onStayActive } = useInactivityObserver(
   //     undefined, // Use default from env
@@ -139,16 +215,10 @@ export default function ActiveSession() {
 
   const { stream, videoRef, startShare, captureScreenshot } = useScreenShare();
 
-  // Auto-trigger screen share picker on first session load (requires user to
-  // confirm the macOS picker, so we call it once via a ref guard).
-  const didAutoStartRef = useRef(false);
-  useEffect(() => {
-    if (!didAutoStartRef.current && !isConnectDialogOpen) {
-      didAutoStartRef.current = true;
-      startShare();
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isConnectDialogOpen]);
+  // NOTE: Do NOT auto-start getDisplayMedia from useEffect — WKWebView in
+  // production strictly requires getDisplayMedia to originate from a direct
+  // synchronous user gesture (button click). The ScreenCapture panel's
+  // "Select Screen / Tab" button serves as the user gesture entry point.
 
   const handleTranscript = useCallback(
     (sender: "User" | "Interviewer", text: string, isFinal: boolean) => {
@@ -240,12 +310,13 @@ export default function ActiveSession() {
   // Display audio transcription: SCKit (Rust) ─► localhost WS ─► Deepgram WS
   // Captures the primary display's system audio directly via ScreenCaptureKit,
   // so YouTube/tab audio is transcribed — not the microphone.
+  // SCKit works independently of getDisplayMedia — no need to wait for stream.
   const tabTranscription = useNativeTabTranscription({
     apiKey: import.meta.env.VITE_DEEPGRAM_API_KEY || "",
     model: "nova-3",
     language: getLanguageCode(selectedLanguage),
     onTranscript: onInterviewerTranscript,
-    enabled: !!stream,
+    enabled: !isConnectDialogOpen,
   });
 
   // Surface cpal errors as toasts
@@ -644,12 +715,28 @@ export default function ActiveSession() {
     onExit: () => setIsEndSessionDialogOpen(true),
     isFreeSession,
     timerText: formattedTime,
+    isWarning: creditWarning !== null,
     selectedModel,
     onModelChange: setSelectedModel,
   };
 
   return (
     <div className="h-screen w-screen bg-[#f8f9fb] text-slate-900 flex flex-col overflow-hidden font-sans select-none fixed inset-0">
+      {/* Credit warning banner — shown for paid sessions approaching exhaustion */}
+      {creditWarning !== null && (
+        <div className="fixed top-0 inset-x-0 z-50 flex items-center justify-center gap-2 bg-amber-500 text-white text-sm font-semibold py-1.5 px-4 shadow-lg">
+          <span>⚠️</span>
+          <span>
+            Only {creditWarning} minute{creditWarning === 1 ? "" : "s"} of credit remaining — session will end soon.
+          </span>
+          <button
+            className="ml-2 opacity-70 hover:opacity-100 text-xs underline"
+            onClick={() => setCreditWarning(null)}
+          >
+            dismiss
+          </button>
+        </div>
+      )}
       {isFullscreen ? (
         /* ================= FULLSCREEN OVERLAY MODE ================= */
         <>
@@ -728,6 +815,7 @@ export default function ActiveSession() {
         open={isConnectDialogOpen}
         onSuccess={handleConnectSuccess}
         onCancel={handleConnectCancel}
+        onStartShare={startShare}
         sessionId={connectData?.sessionId || id || ""}
         companyName={connectData?.companyName || ""}
         jobTitle={connectData?.jobTitle || ""}

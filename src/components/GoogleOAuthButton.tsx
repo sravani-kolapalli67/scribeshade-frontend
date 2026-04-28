@@ -1,17 +1,36 @@
 import { useState } from "react";
 import { useSignIn, useClerk } from "@clerk/clerk-react";
 import { useNavigate } from "react-router-dom";
+import { start, cancel } from "@fabianlars/tauri-plugin-oauth";
+import { listen } from "@tauri-apps/api/event";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 interface GoogleOAuthButtonProps {
   label?: string;
 }
 
-const OAUTH_PORT = 10001;
+export function GoogleOAuthButton({ label = "Continue with Google" }: GoogleOAuthButtonProps) {
+  const { signIn, isLoaded } = useSignIn();
+  const { handleRedirectCallback, setActive, client } = useClerk();
+  const navigate = useNavigate();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-// True when running inside the Tauri WebView — Tauri injects window.__TAURI_INTERNALS__
-const IS_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  const handleClick = async () => {
+    if (!isLoaded || loading) return;
+    setLoading(true);
+    setError(null);
 
-const SUCCESS_HTML = `<!DOCTYPE html>
+    let port: number | undefined;
+    let unlisten: (() => void) | undefined;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    try {
+      // 1. Start the localhost OAuth capture server. The success page shown in
+      //    the system browser is purely cosmetic — the actual auth handshake is
+      //    driven by the oauth://url Tauri event captured below.
+      const successHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -45,134 +64,86 @@ const SUCCESS_HTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
-export function GoogleOAuthButton({ label = "Continue with Google" }: GoogleOAuthButtonProps) {
-  const { signIn, isLoaded } = useSignIn();
-  const { setActive, client } = useClerk();
-  const navigate = useNavigate();
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  // ── Web (browser) path ───────────────────────────────────────────────────
-  // Standard Clerk OAuth redirect — works in any browser with no Tauri APIs.
-  const handleWebOAuth = async () => {
-    try {
-      await signIn!.authenticateWithRedirect({
-        strategy: "oauth_google",
-        redirectUrl: `${window.location.origin}/sso-callback`,
-        redirectUrlComplete: "/dashboard",
-      });
-    } catch (err: unknown) {
-      const e = err as { errors?: { message: string }[]; message?: string };
-      setError(e?.errors?.[0]?.message ?? e?.message ?? "Google sign-in failed");
-      setLoading(false);
-    }
-  };
-
-  // ── Tauri (desktop) path ─────────────────────────────────────────────────
-  // Uses tauri-plugin-oauth localhost capture server + system browser.
-  const handleTauriOAuth = async () => {
-    // Lazy-import Tauri APIs so this module can be bundled for web without errors
-    const [{ start, cancel }, { listen }, { openUrl }, { getCurrentWebviewWindow }] =
-      await Promise.all([
-        import("@fabianlars/tauri-plugin-oauth"),
-        import("@tauri-apps/api/event"),
-        import("@tauri-apps/plugin-opener"),
-        import("@tauri-apps/api/webviewWindow"),
-      ]);
-
-    let port: number | undefined;
-    let unlisten: (() => void) | undefined;
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-
-    console.group("[OAuth] Google sign-in flow started");
-
-    try {
-      port = await start({ ports: [OAUTH_PORT], response: SUCCESS_HTML });
+      // Fixed port so Clerk's Allowed Redirect URLs can be whitelisted.
+      // In Clerk Dashboard → Redirects → Allowed redirect URLs, add:
+      //   http://localhost:10001
+      // A random port can never be pre-approved by Clerk, which causes the
+      // "cannot redirect to your application" fallback page.
+      const OAUTH_PORT = 10001;
+      port = await start({ ports: [OAUTH_PORT], response: successHtml });
       const callbackUrl = `http://localhost:${port}`;
-      console.log("[OAuth] 1. Capture server started on port:", port);
 
-      const callbackPromise = new Promise<URL>(async (resolve, reject) => {
+      // 2. Register the event listener synchronously inside the Promise constructor
+      //    so it is guaranteed active before openUrl() is called (eliminates race).
+      const callbackPromise = new Promise<URL>((resolve, reject) => {
         timeoutId = setTimeout(
           () => reject(new Error("Google sign-in timed out (2 min)")),
           120_000,
         );
-        unlisten = await listen<string>("oauth://url", (event) => {
+        listen<string>("oauth://url", (event) => {
           clearTimeout(timeoutId);
-          console.log("[OAuth] ✅ oauth://url received:", event.payload);
           try { resolve(new URL(event.payload)); }
           catch { reject(new Error("Invalid callback URL received")); }
-        });
-        console.log("[OAuth] 2. Listener registered OK");
+        }).then((fn) => { unlisten = fn; });
       });
 
-      console.log("[OAuth] 3. Calling signIn.create(oauth_google)...");
+      // 3. Prepare the Clerk OAuth flow — returns the Google authorization URL
       const result = await signIn!.create({
         strategy: "oauth_google",
         redirectUrl: callbackUrl,
         actionCompleteRedirectUrl: callbackUrl,
       });
 
-      const authUrl = result.firstFactorVerification.externalVerificationRedirectURL?.toString();
+      const authUrl =
+        result.firstFactorVerification.externalVerificationRedirectURL?.toString();
       if (!authUrl) throw new Error("No OAuth URL returned from Clerk");
-      console.log("[OAuth] 3. Got authUrl:", authUrl.slice(0, 80) + "...");
 
+      // 4. Open Google OAuth in the OS browser via tauri-plugin-opener
       await openUrl(authUrl);
-      console.log("[OAuth] 4. Browser opened, waiting for callback...");
 
+      // 5. Wait for the browser to complete OAuth and hit our localhost server
       const callbackParsed = await callbackPromise;
-      console.log("[OAuth] 5. Callback received:", callbackParsed.href);
-      console.log("[OAuth] 5. Params:", Object.fromEntries(callbackParsed.searchParams.entries()));
 
-      await getCurrentWebviewWindow().setFocus().catch(() => undefined);
+      // 6. Update window.location so handleRedirectCallback can read the
+      //    __clerk_handshake params. replaceState does NOT fire a popstate
+      //    event, which means:
+      //      - React Router does NOT re-render (SignIn stays in the tree)
+      //      - ClerkProvider does NOT detect a route change or re-process the URL
+      //      - The handshake token is NOT auto-consumed before we call it
+      window.history.replaceState({}, "", `/sso-callback${callbackParsed.search}`);
+      getCurrentWebviewWindow().setFocus().catch(() => undefined);
 
-      console.log("[OAuth] 7. Re-syncing Clerk client (skipping handleRedirectCallback)...");
-      await new Promise(r => setTimeout(r, 800));
-      await (client as unknown as { fetch: () => Promise<void> }).fetch();
-      console.log("[OAuth] 7. Active sessions after fetch:", client?.activeSessions?.length ?? 0);
+      // 7. Process the handshake token here — single controlled execution point.
+      //    Clerk reads params from window.location (set by replaceState above),
+      //    establishes the session, then calls routerPush via ClerkProvider.
+      await handleRedirectCallback({
+        signInForceRedirectUrl: "/dashboard",
+        signUpForceRedirectUrl: "/dashboard",
+      });
 
+      // Belt-and-suspenders: ensure session is active and navigate
       const session = client?.activeSessions?.[0];
-      console.log("[OAuth] 8. First active session:", session?.id ?? "none");
-
-      if (!session) throw new Error("No session created after OAuth — please try again");
-
-      await setActive({ session: session.id });
-      console.log("[OAuth] 8. Session activated:", session.id);
-
+      if (session) await setActive({ session: session.id }).catch(() => undefined);
       navigate("/dashboard", { replace: true });
-      console.log("[OAuth] 9. Navigated to /dashboard ✅");
-      console.groupEnd();
 
+      // Defer cancel — give the browser ~3 s to finish loading the success page.
       const capturedPort = port;
       port = undefined;
-      setTimeout(() => cancel(capturedPort).catch(() => undefined), 3000);
+      setTimeout(() => {
+        cancel(capturedPort).catch(() => undefined);
+      }, 3000);
 
     } catch (err: unknown) {
       clearTimeout(timeoutId);
-      console.error("[OAuth] ❌ Flow failed:", err);
       if (port !== undefined) {
-        const { cancel } = await import("@fabianlars/tauri-plugin-oauth");
         await cancel(port).catch(() => undefined);
         port = undefined;
       }
       const e = err as { errors?: { message: string }[]; message?: string };
-      const msg = e?.errors?.[0]?.message ?? e?.message ?? "Google sign-in failed";
-      console.error("[OAuth] ❌ Showing error:", msg);
-      console.groupEnd();
-      setError(msg);
+      setError(e?.errors?.[0]?.message ?? e?.message ?? "Google sign-in failed");
       setLoading(false);
     } finally {
       unlisten?.();
-    }
-  };
-
-  const handleClick = async () => {
-    if (!isLoaded || loading) return;
-    setLoading(true);
-    setError(null);
-    if (IS_TAURI) {
-      await handleTauriOAuth();
-    } else {
-      await handleWebOAuth();
     }
   };
 

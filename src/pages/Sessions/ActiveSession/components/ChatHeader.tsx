@@ -9,6 +9,7 @@ interface ChatHeaderProps {
   title?: string;
   isFullscreen?: boolean;
   isFreeSession?: boolean;
+  isWarning?: boolean;
   timerText?: string | null;
   selectedModel: string;
   onModelChange: (model: string) => void;
@@ -19,6 +20,7 @@ export const ChatHeader = ({
   title = "Craft Vita",
   isFullscreen = false,
   isFreeSession = false,
+  isWarning = false,
   timerText = null,
   selectedModel,
   onModelChange,
@@ -57,6 +59,7 @@ export const ChatHeader = ({
         <SessionTimer
           timerText={timerText}
           isFreeSession={isFreeSession}
+          isWarning={isWarning}
           isFullscreen={isFullscreen}
         />
 

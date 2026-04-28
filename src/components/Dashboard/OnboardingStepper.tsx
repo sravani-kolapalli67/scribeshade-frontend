@@ -11,11 +11,11 @@ export function OnboardingStepper() {
 
   return (
     <div className="w-full max-w-6xl mx-auto py-2 flex flex-col items-center">
-      <h2 className="text-3xl font-bold text-center mb-10 flex items-center justify-center gap-2">
+      <h2 className="text-2xl sm:text-3xl font-bold text-center mb-8 sm:mb-10 flex items-center justify-center gap-2">
         Hi, {firstName} <span className="animate-wave text-4xl">👋</span>
       </h2>
 
-      <div className="flex flex-col md:flex-row items-stretch justify-between w-full relative md:gap-8 gap-y-10">
+      <div className="flex flex-col lg:flex-row items-stretch justify-between w-full relative lg:gap-8 gap-y-6 lg:gap-y-0">
         {/* Step 1 */}
         <div className="flex-1 flex flex-col w-full">
           <h3 className="text-lg font-medium mb-3 text-foreground flex-none h-7 pl-2">
@@ -29,7 +29,7 @@ export function OnboardingStepper() {
               </div>
             </Card>
             {/* Arrow to next step */}
-            <ArrowRight className="hidden md:block absolute top-1/2 -right-4 translate-x-1/2 -translate-y-1/2 w-5 h-5 text-foreground/40 z-10" />
+            <ArrowRight className="hidden lg:block absolute top-1/2 -right-4 translate-x-1/2 -translate-y-1/2 w-5 h-5 text-foreground/40 z-10" />
           </div>
           <div className="pt-4 flex-none">
             <Button
@@ -55,7 +55,7 @@ export function OnboardingStepper() {
               </div>
             </Card>
             {/* Arrow to next step */}
-            <ArrowRight className="hidden md:block absolute top-1/2 -right-4 translate-x-1/2 -translate-y-1/2 w-5 h-5 text-foreground/40 z-10" />
+            <ArrowRight className="hidden lg:block absolute top-1/2 -right-4 translate-x-1/2 -translate-y-1/2 w-5 h-5 text-foreground/40 z-10" />
           </div>
           <div className="pt-4 flex-none">
             <Button
@@ -82,7 +82,7 @@ export function OnboardingStepper() {
             </Card>
 
             {/* Arrow to next step */}
-            <ArrowRight className="hidden md:block absolute top-1/2 -right-4 translate-x-1/2 -translate-y-1/2 w-5 h-5 text-foreground/40 z-10" />
+            <ArrowRight className="hidden lg:block absolute top-1/2 -right-4 translate-x-1/2 -translate-y-1/2 w-5 h-5 text-foreground/40 z-10" />
           </div>
 
           <div className="pt-4 flex-none relative">
