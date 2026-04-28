@@ -38,6 +38,7 @@ import {
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { ModelSelector } from "@/pages/Sessions/ActiveSession/components/ModelSelector";
+import { BuyCreditsDialog } from "@/components/Billing/BuyCreditsDialog";
 
 export interface ActivateResponseData {
   maxAllowedMinutes: number | null;
@@ -100,7 +101,8 @@ export function ConnectDialog({
   aiModel: initialAIModel,
 }: ConnectDialogProps) {
   const navigate = useNavigate();
-  const { balance } = useCreditsBalance();
+  const { balance, refresh: refreshBalance } = useCreditsBalance();
+
   const { brackets } = useCreditBrackets();
   //   console.log("ConnectDialog", {
   //     sessionId,
@@ -115,6 +117,7 @@ export function ConnectDialog({
   const [simpleLanguage, setSimpleLanguage] = React.useState(initialSimple);
   const [aiModel, setAIModel] = React.useState(initialAIModel);
   const [activating, setActivating] = React.useState(false);
+  const [buyCreditsOpen, setBuyCreditsOpen] = React.useState(false);
 
   // Sync props when dialog reopens with new session
   React.useEffect(() => {
@@ -143,15 +146,17 @@ export function ConnectDialog({
       );
 
       if (!res.ok) {
-        const err = await res.json();
         if (res.status === 402) {
           toast.error(
             "Insufficient credits. Please purchase more credits to start a session.",
           );
-          navigate("/billing");
+          setBuyCreditsOpen(true);
           return;
         }
-        throw new Error(err.error || err.message || "Failed to activate session");
+        const err = await res.json();
+        throw new Error(
+          err.error || err.message || "Failed to activate session",
+        );
       }
 
       const data = await res.json();
@@ -332,30 +337,58 @@ export function ConnectDialog({
           </div>
 
           {/* Credit cost preview (paid sessions only) */}
-          {balance && (() => {
-            const maxBracket = brackets.reduce<typeof brackets[0] | null>(
-              (max, b) => (!max || b.bracketMinutes > max.bracketMinutes ? b : max),
-              null,
-            );
-            const available = parseFloat(balance.totalAvailable);
-            const maxCost = maxBracket ? parseFloat(maxBracket.creditsFull) : null;
-            const lowBalance = maxCost !== null && available < maxCost;
-            return (
-              <div className={`flex items-center justify-between px-3 py-2.5 rounded-xl border text-xs font-medium ${lowBalance ? "bg-amber-50/60 border-amber-300/60" : "bg-muted/30 border-border/50"}`}>
-                <div className="flex items-center gap-2">
-                  <Sparkles className={`h-3.5 w-3.5 ${lowBalance ? "text-amber-500" : "text-brand"}`} />
-                  <span className="text-muted-foreground">
-                    {maxBracket
-                      ? `Up to ${maxBracket.creditsFull} credit · first ${maxBracket.freeZoneMinutes} min free`
-                      : "Free session"}
-                  </span>
+          {balance &&
+            (() => {
+              const maxBracket = brackets.reduce<(typeof brackets)[0] | null>(
+                (max, b) =>
+                  !max || b.bracketMinutes > max.bracketMinutes ? b : max,
+                null,
+              );
+              const available = parseFloat(balance.totalAvailable);
+              const maxCost = maxBracket
+                ? parseFloat(maxBracket.creditsFull)
+                : null;
+              const lowBalance = maxCost !== null && available < maxCost;
+              return (
+                <div
+                  className={`flex items-center justify-between px-3 py-2.5 rounded-xl border text-xs font-medium ${lowBalance ? "bg-amber-50/60 border-amber-300/60" : "bg-muted/30 border-border/50"}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <Sparkles
+                      className={`h-3.5 w-3.5 ${lowBalance ? "text-amber-500" : "text-brand"}`}
+                    />
+                    <span className="text-muted-foreground">
+                      {maxBracket
+                        ? `Up to ${maxBracket.creditsFull} credit · first ${maxBracket.freeZoneMinutes} min free`
+                        : "Free session"}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span
+                      className={`font-bold tabular-nums ${lowBalance ? "text-amber-600" : "text-foreground"}`}
+                    >
+                      {balance.totalAvailable} available
+                    </span>
+                    {lowBalance && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 px-2 text-[11px] font-bold text-amber-700 hover:text-amber-800 hover:bg-amber-100 rounded-lg border border-amber-300/50"
+                        onClick={() => setBuyCreditsOpen(true)}
+                      >
+                        Top up
+                      </Button>
+                    )}
+                  </div>
                 </div>
-                <span className={`font-bold tabular-nums ${lowBalance ? "text-amber-600" : "text-foreground"}`}>
-                  {balance.totalAvailable} available
-                </span>
-              </div>
-            );
-          })()}
+              );
+            })()}
+
+          <BuyCreditsDialog
+            open={buyCreditsOpen}
+            onOpenChange={setBuyCreditsOpen}
+            onSuccess={refreshBalance}
+          />
 
           {/* Footer Actions */}
           <div className="flex items-center gap-3 pt-1">

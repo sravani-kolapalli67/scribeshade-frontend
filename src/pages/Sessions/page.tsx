@@ -9,6 +9,9 @@ import { Badge } from "@/components/ui/badge";
 import { Trash2, FileText, BarChart3, Play } from "lucide-react";
 import { TranscriptDialog } from "./TranscriptDialog";
 import { SessionAnalyticsDialog } from "./SessionAnalyticsDialog";
+import { useCreditsBalance } from "@/hooks/useCreditsBalance";
+import { OutOfCreditsDialog } from "@/components/Billing/OutOfCreditsDialog";
+import { BuyCreditsDialog } from "@/components/Billing/BuyCreditsDialog";
 import type { ExportableData } from "@/components/data-table/utils/export-utils";
 import {
   Dialog,
@@ -61,6 +64,11 @@ export default function Sessions() {
   const [isAnalyticsDialogOpen, setIsAnalyticsDialogOpen] = useState(false);
   const [selectedSessionForAnalytics, setSelectedSessionForAnalytics] =
     useState<Session | null>(null);
+
+  // Credit check states
+  const { balance, refresh: refreshBalance } = useCreditsBalance();
+  const [isOutOfCreditsOpen, setIsOutOfCreditsOpen] = useState(false);
+  const [isBuyCreditsOpen, setIsBuyCreditsOpen] = useState(false);
 
   // ✅ FETCH DATA FUNCTION
   const fetchSessions = async (params: any) => {
@@ -185,13 +193,11 @@ export default function Sessions() {
           > = {
             PRE_CHECK: {
               label: "Pending",
-              className:
-                "bg-muted text-muted-foreground border-border/60",
+              className: "bg-muted text-muted-foreground border-border/60",
             },
             ACTIVE: {
               label: "Active",
-              className:
-                "bg-emerald-50 text-emerald-700 border-emerald-300",
+              className: "bg-emerald-50 text-emerald-700 border-emerald-300",
             },
             COMPLETING: {
               label: "Processing",
@@ -207,8 +213,7 @@ export default function Sessions() {
             },
             FORCE_ENDED: {
               label: "Force Ended",
-              className:
-                "bg-amber-50 text-amber-700 border-amber-300",
+              className: "bg-amber-50 text-amber-700 border-amber-300",
             },
             ABANDONED: {
               label: "Abandoned",
@@ -220,8 +225,7 @@ export default function Sessions() {
             },
             Active: {
               label: "Active",
-              className:
-                "bg-emerald-50 text-emerald-700 border-emerald-300",
+              className: "bg-emerald-50 text-emerald-700 border-emerald-300",
             },
           };
           const cfg = status
@@ -240,6 +244,29 @@ export default function Sessions() {
           );
         },
       },
+      //   {
+      //     accessorKey: "creditsDeducted",
+      //     header: "Credits",
+      //     cell: ({ row }) => {
+      //       const amount = row.original.creditsDeducted;
+      //       const reason = row.original.deductionReason;
+      //       if (!amount || amount === "0" || amount === "0.00") {
+      //         return <span className="text-muted-foreground text-xs">—</span>;
+      //       }
+      //       return (
+      //         <div className="flex flex-col">
+      //           <span className="text-sm font-bold text-foreground tabular-nums">
+      //             {amount}
+      //           </span>
+      //           {reason && (
+      //             <span className="text-[10px] text-muted-foreground leading-tight">
+      //               {reasonLabel(reason)}
+      //             </span>
+      //           )}
+      //         </div>
+      //       );
+      //     },
+      //   },
       {
         accessorKey: "createdAt",
         header: "Created At",
@@ -261,11 +288,23 @@ export default function Sessions() {
         header: "Actions",
         cell: ({ row }) => (
           <div className="flex items-center justify-end gap-2 pr-2">
-            {(row.original.status === "PRE_CHECK" || (!row.original.endedAt && row.original.status !== "COMPLETED" && row.original.status !== "CREDIT_EXHAUSTED" && row.original.status !== "FORCE_ENDED" && row.original.status !== "ABANDONED")) && (
+            {(row.original.status === "PRE_CHECK" ||
+              (!row.original.endedAt &&
+                row.original.status !== "COMPLETED" &&
+                row.original.status !== "CREDIT_EXHAUSTED" &&
+                row.original.status !== "FORCE_ENDED" &&
+                row.original.status !== "ABANDONED")) && (
               <Button
                 variant="ghost"
                 size="icon"
                 onClick={() => {
+                  if (!row.original.free && balance) {
+                    const available = parseFloat(balance.totalAvailable);
+                    if (available <= 0) {
+                      setIsOutOfCreditsOpen(true);
+                      return;
+                    }
+                  }
                   navigate(`/sessions/${row.original.id}`, {
                     state: {
                       showConnect: true,
@@ -413,6 +452,18 @@ export default function Sessions() {
           setSelectedSessionForAnalytics(null);
         }}
         session={selectedSessionForAnalytics}
+      />
+
+      <OutOfCreditsDialog
+        open={isOutOfCreditsOpen}
+        onOpenChange={setIsOutOfCreditsOpen}
+        onGetCredits={() => setIsBuyCreditsOpen(true)}
+      />
+
+      <BuyCreditsDialog
+        open={isBuyCreditsOpen}
+        onOpenChange={setIsBuyCreditsOpen}
+        onSuccess={refreshBalance}
       />
     </div>
   );

@@ -7,11 +7,11 @@ import { useAIChat } from "@/hooks/useAIChat";
 import { useKeyboardShortcut } from "@/hooks/useKeyboardShortcut";
 import { useFreeSessionTimer } from "@/hooks/useFreeSessionTimer";
 import { useSessionHeartbeat } from "@/hooks/useSessionHeartbeat";
+import { useSessionEvents } from "@/hooks/useSessionEvents";
 import { toast } from "sonner";
 import { emit, listen } from "@tauri-apps/api/event";
-import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
-import type { ActivateResponseData } from "@/components/Sessions/ConnectDialog";
 
 import {
   ResizableHandle,
@@ -25,8 +25,8 @@ import { OverlayContainer } from "./components/OverlayContainer";
 import { EndSessionDialog } from "./EndSessionDialog";
 import { Transcript, type Message } from "./Transcript";
 import { ConnectDialog } from "@/components/Sessions/ConnectDialog";
-import { useInactivityObserver } from "@/hooks/useInactivityObserver";
-import { InactivityDialog } from "@/components/Sessions/InactivityDialog";
+import { BuyCreditsDialog } from "@/components/Billing/BuyCreditsDialog";
+import { useCreditsBalance } from "@/hooks/useCreditsBalance";
 
 export default function ActiveSession() {
   const { id } = useParams();
@@ -36,10 +36,10 @@ export default function ActiveSession() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [selectedModel, setSelectedModel] = useState(
-    location.state?.connectData?.aiModel || "google/gemma-4-26b-a4b-it"
+    location.state?.connectData?.aiModel || "google/gemma-4-26b-a4b-it",
   );
   const [selectedLanguage, setSelectedLanguage] = useState(
-    location.state?.connectData?.language || "English"
+    location.state?.connectData?.language || "English",
   );
   const selectedModelRef = useRef(selectedModel);
 
@@ -64,12 +64,20 @@ export default function ActiveSession() {
   const connectData = location.state?.connectData || {};
 
   // Activate response data — populated once the ConnectDialog succeeds
-  const [maxAllowedMinutes, setMaxAllowedMinutes] = useState<number | null>(null);
+  const [maxAllowedMinutes, setMaxAllowedMinutes] = useState<number | null>(
+    null,
+  );
   const [sessionStartedAt, setSessionStartedAt] = useState<string | null>(null);
   const [creditWarning, setCreditWarning] = useState<number | null>(null); // remaining minutes
+  const [buyCreditsOpen, setBuyCreditsOpen] = useState(false);
+  const { refresh: refreshBalance } = useCreditsBalance();
 
   const handleConnectSuccess = useCallback(
-    (finalModel: string, finalLanguage: string, activateData: ActivateResponseData) => {
+    (
+      finalModel: string,
+      finalLanguage: string,
+      activateData: ActivateResponseData,
+    ) => {
       setIsConnectDialogOpen(false);
       if (finalModel) setSelectedModel(finalModel);
       if (finalLanguage) setSelectedLanguage(finalLanguage);
@@ -133,7 +141,8 @@ export default function ActiveSession() {
                 const status = sessionData?.status;
                 deductedCredits = sessionData?.creditsDeducted ?? null;
                 deductedReason = sessionData?.deductionReason ?? null;
-                if (status === "COMPLETED" || status === "CREDIT_EXHAUSTED") break;
+                if (status === "COMPLETED" || status === "CREDIT_EXHAUSTED")
+                  break;
               }
             } catch {
               // ignore poll errors — we'll navigate regardless
@@ -142,8 +151,6 @@ export default function ActiveSession() {
           }
           if (deductedReason === "FREE_ZONE") {
             toast.success("Session ended — no credits charged (free zone)");
-          } else if (deductedReason === "HALF_BRACKET" && deductedCredits) {
-            toast.info(`Session ended — ${deductedCredits} credits charged (grace zone rate)`);
           } else if (deductedCredits) {
             toast.info(`Session ended — ${deductedCredits} credits deducted`);
           }
@@ -199,8 +206,18 @@ export default function ActiveSession() {
   // Heartbeat: runs every 60s for paid sessions after activation
   const { stop: stopHeartbeat } = useSessionHeartbeat({
     sessionId: id,
-    enabled: !isFreeSession && !isConnectDialogOpen && sessionStartedAt !== null,
+    enabled:
+      !isFreeSession && !isConnectDialogOpen && sessionStartedAt !== null,
     startedAt: sessionStartedAt,
+    onExhausted: onCreditExhausted,
+    onWarning: onCreditWarning,
+  });
+
+  // SSE: real-time events for paid sessions
+  useSessionEvents({
+    sessionId: id,
+    enabled:
+      !isFreeSession && !isConnectDialogOpen && sessionStartedAt !== null,
     onExhausted: onCreditExhausted,
     onWarning: onCreditWarning,
   });
@@ -319,10 +336,50 @@ export default function ActiveSession() {
     enabled: !isConnectDialogOpen,
   });
 
+  // ── Browser tab audio transcription (getDisplayMedia path) ────────────────
+  // When the user shares a tab/window with "Also share tab audio" / "Include
+  // audio" enabled, the MediaStream contains audio tracks.  We pipe those
+  // directly into a second Deepgram instance so the Interviewer side of the
+  // transcript is populated even without the macOS SCKit backend.
+  const streamHasAudio = !!stream && stream.getAudioTracks().length > 0;
+
+  const tabAudioTranscription = useDeepgram({
+    apiKey: import.meta.env.VITE_DEEPGRAM_API_KEY || "",
+    model: "nova-3",
+    language: getLanguageCode(selectedLanguage),
+    onTranscript: onInterviewerTranscript,
+    inputStream: streamHasAudio ? stream : null,
+  });
+
+  // Auto-start / stop browser tab audio transcription based on stream audio
+  useEffect(() => {
+    if (streamHasAudio) {
+      tabAudioTranscription.startTranscription();
+    } else {
+      tabAudioTranscription.stopTranscription();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streamHasAudio]);
+
   // Surface cpal errors as toasts
   useEffect(() => {
     if (tabTranscription.error) toast.error(tabTranscription.error);
   }, [tabTranscription.error]);
+
+  // Surface browser tab audio errors as toasts
+  useEffect(() => {
+    if (tabAudioTranscription.error) toast.error(tabAudioTranscription.error);
+  }, [tabAudioTranscription.error]);
+
+  // Merged tab transcription state (SCKit native + browser stream audio)
+  const mergedTabIsTranscribing =
+    tabTranscription.isTranscribing || tabAudioTranscription.isTranscribing;
+  const mergedTabIsConnecting =
+    tabTranscription.isConnecting || tabAudioTranscription.isConnecting;
+  const mergedTabInterimTranscript =
+    tabTranscription.interimTranscript || tabAudioTranscription.interimTranscript;
+  const mergedTabError =
+    tabTranscription.error || tabAudioTranscription.error;
 
   const {
     aiChat,
@@ -393,7 +450,7 @@ export default function ActiveSession() {
     // Check if we have anything to answer (history or live interim text)
     const hasHistory = messages.length > 0;
     const interimText =
-      micTranscription.interimTranscript || tabTranscription.interimTranscript;
+      micTranscription.interimTranscript || mergedTabInterimTranscript;
 
     if (!hasHistory && !interimText) return;
 
@@ -401,11 +458,15 @@ export default function ActiveSession() {
     try {
       console.log("[Trigger] AI Answer initiated");
       let combinedTranscript = messages
-        .map((m) => `[${m.sender === "User" ? "YOU" : "Interviewer"}]: ${m.text}`)
+        .map(
+          (m) => `[${m.sender === "User" ? "YOU" : "Interviewer"}]: ${m.text}`,
+        )
         .join("\n");
 
       if (interimText) {
-        const sender = micTranscription.interimTranscript ? "YOU" : "Interviewer";
+        const sender = micTranscription.interimTranscript
+          ? "YOU"
+          : "Interviewer";
         combinedTranscript +=
           (combinedTranscript ? "\n" : "") + `[${sender}]: ${interimText}`;
       }
@@ -421,7 +482,7 @@ export default function ActiveSession() {
     messages,
     handleAiAnswer,
     micTranscription.interimTranscript,
-    tabTranscription.interimTranscript,
+    mergedTabInterimTranscript,
     selectedModel,
   ]);
 
@@ -486,12 +547,11 @@ export default function ActiveSession() {
       await emit("overlay-update", {
         transcript: combinedTranscript,
         interimTranscript:
-          micTranscription.interimTranscript ||
-          tabTranscription.interimTranscript,
+          micTranscription.interimTranscript || mergedTabInterimTranscript,
         status:
-          micTranscription.isConnecting || tabTranscription.isConnecting
+          micTranscription.isConnecting || mergedTabIsConnecting
             ? "Connecting"
-            : micTranscription.isTranscribing || tabTranscription.isTranscribing
+            : micTranscription.isTranscribing || mergedTabIsTranscribing
               ? "Recording"
               : "Connected",
         isMicActive: micTranscription.isTranscribing,
@@ -506,8 +566,8 @@ export default function ActiveSession() {
     messages,
     micTranscription.isTranscribing,
     micTranscription.interimTranscript,
-    tabTranscription.isTranscribing,
-    tabTranscription.interimTranscript,
+    mergedTabIsTranscribing,
+    mergedTabInterimTranscript,
     formattedTime,
     id,
     selectedModel,
@@ -544,6 +604,7 @@ export default function ActiveSession() {
   const onClearRef = useRef(() => {
     micTranscription.clearTranscript();
     tabTranscription.clearTranscript();
+    tabAudioTranscription.clearTranscript();
     setMessages([]);
   });
 
@@ -563,6 +624,7 @@ export default function ActiveSession() {
   onClearRef.current = () => {
     micTranscription.clearTranscript();
     tabTranscription.clearTranscript();
+    tabAudioTranscription.clearTranscript();
     setMessages([]);
   };
 
@@ -593,7 +655,8 @@ export default function ActiveSession() {
       });
       const u4 = await listen("overlay-ai-query", (event) => {
         const { query } = event.payload as { query: string };
-        if (active && id) handleCustomQueryRef.current(id, query, selectedModelRef.current);
+        if (active && id)
+          handleCustomQueryRef.current(id, query, selectedModelRef.current);
       });
       const uModel = await listen("overlay-model-change", (event) => {
         const { model } = event.payload as { model: string };
@@ -664,7 +727,7 @@ export default function ActiveSession() {
     disabled:
       (messages.length === 0 &&
         !micTranscription.interimTranscript &&
-        !tabTranscription.interimTranscript) ||
+        !mergedTabInterimTranscript) ||
       isAnswering,
   });
 
@@ -676,11 +739,11 @@ export default function ActiveSession() {
     messages,
     micInterimTranscript: micTranscription.interimTranscript,
     isMicTranscribing: micTranscription.isTranscribing,
-    tabInterimTranscript: tabTranscription.interimTranscript,
-    isTabTranscribing: tabTranscription.isTranscribing,
+    tabInterimTranscript: mergedTabInterimTranscript,
+    isTabTranscribing: mergedTabIsTranscribing,
     isConnecting:
-      micTranscription.isConnecting || tabTranscription.isConnecting,
-    error: micTranscription.error || tabTranscription.error,
+      micTranscription.isConnecting || mergedTabIsConnecting,
+    error: micTranscription.error || mergedTabError,
     onToggleMic: () => {
       if (micTranscription.isTranscribing) {
         micTranscription.stopTranscription();
@@ -691,6 +754,7 @@ export default function ActiveSession() {
     onClear: () => {
       micTranscription.clearTranscript();
       tabTranscription.clearTranscript();
+      tabAudioTranscription.clearTranscript();
       setMessages([]);
     },
     onMinimize: toggleFullscreen,
@@ -707,7 +771,7 @@ export default function ActiveSession() {
     canAnswer:
       messages.length > 0 ||
       !!micTranscription.interimTranscript ||
-      !!tabTranscription.interimTranscript,
+      !!mergedTabInterimTranscript,
     canAnalyze: !!stream,
     onAiAnswer,
     onAnalyzeScreen,
@@ -727,8 +791,15 @@ export default function ActiveSession() {
         <div className="fixed top-0 inset-x-0 z-50 flex items-center justify-center gap-2 bg-amber-500 text-white text-sm font-semibold py-1.5 px-4 shadow-lg">
           <span>⚠️</span>
           <span>
-            Only {creditWarning} minute{creditWarning === 1 ? "" : "s"} of credit remaining — session will end soon.
+            Only {creditWarning} minute{creditWarning === 1 ? "" : "s"} of
+            credit remaining — session will end soon.
           </span>
+          <button
+            className="ml-4 bg-white/20 hover:bg-white/30 text-white text-[10px] uppercase tracking-wider font-bold py-1 px-3 rounded-full border border-white/30 transition-colors shadow-sm"
+            onClick={() => setBuyCreditsOpen(true)}
+          >
+            Top up
+          </button>
           <button
             className="ml-2 opacity-70 hover:opacity-100 text-xs underline"
             onClick={() => setCreditWarning(null)}
@@ -737,6 +808,13 @@ export default function ActiveSession() {
           </button>
         </div>
       )}
+
+      <BuyCreditsDialog
+        open={buyCreditsOpen}
+        onOpenChange={setBuyCreditsOpen}
+        onSuccess={refreshBalance}
+      />
+
       {isFullscreen ? (
         /* ================= FULLSCREEN OVERLAY MODE ================= */
         <>

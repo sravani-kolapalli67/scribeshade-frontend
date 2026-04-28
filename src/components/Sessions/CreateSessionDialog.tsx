@@ -25,6 +25,9 @@ import { Step7_Review } from "./steps/Step7_Review";
 import { type Resume } from "@/components/Resume/ResumeSelector";
 import { type Document } from "@/components/Document/DocumentSelector";
 import { toast } from "sonner";
+import { useCreditsBalance } from "@/hooks/useCreditsBalance";
+import { OutOfCreditsDialog } from "@/components/Billing/OutOfCreditsDialog";
+import { BuyCreditsDialog } from "@/components/Billing/BuyCreditsDialog";
 
 type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7;
 
@@ -56,6 +59,11 @@ export default function CreateSessionDialog({
   const [createdSessionId, setCreatedSessionId] = React.useState<string | null>(
     null,
   );
+
+  // Credit check states
+  const { balance, refresh: refreshBalance } = useCreditsBalance();
+  const [isOutOfCreditsOpen, setIsOutOfCreditsOpen] = React.useState(false);
+  const [isBuyCreditsOpen, setIsBuyCreditsOpen] = React.useState(false);
 
   // State for all steps
   const [sessionData, setSessionData] = React.useState(INITIAL_SESSION_DATA);
@@ -150,8 +158,38 @@ export default function CreateSessionDialog({
     }
   };
 
+  const handleTriggerClick = (e: React.MouseEvent) => {
+    // If it's a paid session and balance is 0, show the out of credits dialog
+    if (!isFree && balance) {
+      const available = parseFloat(balance.totalAvailable);
+      if (available <= 0) {
+        e.preventDefault();
+        setIsOutOfCreditsOpen(true);
+        return;
+      }
+    }
+    setOpen(true);
+  };
+
   return (
     <>
+      <Button
+        onClick={handleTriggerClick}
+        className={cn(
+          "gap-2 px-6 py-6 rounded-xl font-semibold shadow-lg transition-all active:scale-95",
+          isFree
+            ? "bg-white text-black border border-black/10 hover:bg-gray-50"
+            : "bg-black text-white hover:bg-black/90",
+        )}
+      >
+        {isFree ? (
+          <Zap className="h-4 w-4 text-amber-500 fill-amber-500" />
+        ) : (
+          <Play className="h-4 w-4" />
+        )}
+        {isFree ? "Start Free Session" : "Start Session"}
+      </Button>
+
       <Dialog
         open={open}
         onOpenChange={(v) => {
@@ -159,23 +197,6 @@ export default function CreateSessionDialog({
           if (!v) resetDialog();
         }}
       >
-        <DialogTrigger asChild>
-          <Button
-            className={cn(
-              "gap-2 px-6 py-6 rounded-xl font-semibold shadow-lg transition-all active:scale-95",
-              isFree
-                ? "bg-white text-black border border-black/10 hover:bg-gray-50"
-                : "bg-black text-white hover:bg-black/90",
-            )}
-          >
-            {isFree ? (
-              <Zap className="h-4 w-4 text-amber-500 fill-amber-500" />
-            ) : (
-              <Play className="h-4 w-4" />
-            )}
-            {isFree ? "Start Free Session" : "Start Session"}
-          </Button>
-        </DialogTrigger>
 
         <DialogContent className="sm:max-w-2xl border-none shadow-2xl rounded-3xl p-0 overflow-hidden bg-background">
           <DialogHeader className="pt-6 px-8 pb-0 relative">
@@ -297,6 +318,18 @@ export default function CreateSessionDialog({
           </div>
         </DialogContent>
       </Dialog>
+
+      <OutOfCreditsDialog
+        open={isOutOfCreditsOpen}
+        onOpenChange={setIsOutOfCreditsOpen}
+        onGetCredits={() => setIsBuyCreditsOpen(true)}
+      />
+
+      <BuyCreditsDialog
+        open={isBuyCreditsOpen}
+        onOpenChange={setIsBuyCreditsOpen}
+        onSuccess={refreshBalance}
+      />
     </>
   );
 }

@@ -143,7 +143,8 @@ export function BuyCreditsDialog({
 
       await new Promise<void>((resolve, reject) => {
         const rzp = new window.Razorpay({
-          key: order.keyId,
+          key: order.keyId || import.meta.env.VITE_RAZORPAY_KEY_ID,
+
           amount: order.amountMinor,
           currency: order.currency,
           name: "ScribeShade",
@@ -190,6 +191,7 @@ export function BuyCreditsDialog({
             }
           },
         });
+        onOpenChange(false); // Close plans dialog before opening Razorpay
         rzp.open();
       });
     } catch (err: unknown) {
@@ -207,52 +209,55 @@ export function BuyCreditsDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-[480px] p-0 overflow-hidden gap-0">
+      <DialogContent className="max-w-[95vw] sm:max-w-[480px] lg:max-w-[720px] p-0 overflow-hidden gap-0 border-none shadow-2xl rounded-3xl bg-background/95 backdrop-blur-xl">
+
 
         {/* ── Header ─────────────────────────────────────────── */}
         <div className="px-6 pt-6 pb-4 border-b border-border/40 bg-gradient-to-br from-brand/5 via-transparent to-transparent">
-          <DialogHeader className="gap-1">
-            <DialogTitle className="flex items-center gap-2.5 text-lg">
-              <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-brand/15">
-                <Coins className="h-4 w-4 text-brand" />
+          <DialogHeader className="gap-1.5">
+            <DialogTitle className="flex items-center gap-3 text-xl font-bold tracking-tight">
+              <span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-brand/10 text-brand shadow-sm">
+                <Coins className="h-5 w-5" />
               </span>
               Buy Credits
             </DialogTitle>
-            <DialogDescription className="text-[13px]">
+            <DialogDescription className="text-sm text-muted-foreground font-medium leading-relaxed">
               One-time purchase · credits never expire · instant delivery
             </DialogDescription>
           </DialogHeader>
 
+
           {/* Currency tab switcher */}
-          <div className="mt-4 inline-flex rounded-xl bg-muted/60 p-1 gap-0.5">
+          <div className="mt-5 inline-flex rounded-2xl bg-muted/50 p-1.5 gap-1 border border-border/40 shadow-inner">
             {(["INR", "USD", "GBP"] as SupportedCurrency[]).map((c) => (
               <button
                 key={c}
                 type="button"
                 onClick={() => { setCurrency(c); setSelectedPlan(null); }}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand ${
+                className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand ${
                   currency === c
-                    ? "bg-white shadow-sm text-foreground"
-                    : "text-muted-foreground hover:text-foreground"
+                    ? "bg-white shadow-md text-foreground scale-105"
+                    : "text-muted-foreground hover:text-foreground hover:bg-white/40"
                 }`}
               >
-                <span>{CURRENCY_FLAGS[c]}</span>
+                <span className="text-sm">{CURRENCY_FLAGS[c]}</span>
                 {c}
               </button>
             ))}
           </div>
+
         </div>
 
         {/* ── Plan grid ──────────────────────────────────────── */}
         <div className="px-6 py-4 overflow-y-auto max-h-[360px]">
           {isLoading ? (
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
               {Array.from({ length: 6 }).map((_, i) => (
                 <div key={i} className="h-24 rounded-2xl bg-muted animate-pulse" />
               ))}
             </div>
           ) : (
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
               {plans.map((plan) => {
                 const isSelected = selectedPlan?.code === plan.code;
                 const isPopular = plan.code === POPULAR_CODE;
@@ -265,12 +270,13 @@ export function BuyCreditsDialog({
                     key={plan.code}
                     type="button"
                     onClick={() => setSelectedPlan(plan)}
-                    className={`relative rounded-2xl border p-3.5 text-left transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand ${
+                    className={`relative rounded-2xl border p-4 text-left transition-all duration-300 hover:scale-[1.02] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand ${
                       isSelected
-                        ? "border-brand bg-brand/8 ring-1 ring-brand/30 shadow-md"
-                        : "border-border/50 bg-card hover:border-brand/30 hover:bg-brand/4 hover:shadow-sm"
+                        ? "border-brand bg-brand/[0.03] ring-1 ring-brand/20 shadow-lg shadow-brand/10"
+                        : "border-border/60 bg-card hover:border-brand/40 hover:bg-brand/[0.01] hover:shadow-md"
                     }`}
                   >
+
                     {/* Badge */}
                     {(isPopular || isBestValue) && (
                       <span className={`absolute -top-2.5 left-3 text-[10px] font-bold px-2 py-0.5 rounded-full ${
@@ -296,9 +302,10 @@ export function BuyCreditsDialog({
                     </div>
 
                     <p className="text-sm font-bold text-foreground leading-tight">{plan.name}</p>
-                    <p className={`text-xl font-extrabold tabular-nums mt-0.5 ${isSelected ? "text-brand" : "text-foreground"}`}>
+                    <p className={`text-2xl font-black tabular-nums mt-1 tracking-tight ${isSelected ? "text-brand" : "text-foreground"}`}>
                       {sym}{plan.amountMajor}
                     </p>
+
 
                     {/* Value bar */}
                     <div className="mt-2.5 flex items-center gap-1.5">
@@ -321,24 +328,26 @@ export function BuyCreditsDialog({
         <div className="px-6 py-4 border-t border-border/40 bg-muted/20">
           {selectedPlan ? (
             <div className="flex items-center justify-between gap-4">
-              <div className="min-w-0">
-                <p className="text-xs text-muted-foreground">You're buying</p>
-                <p className="text-sm font-bold text-foreground truncate">
+              <div className="min-w-0 space-y-0.5">
+                <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">You're buying</p>
+                <p className="text-[15px] font-extrabold text-foreground truncate">
                   {selectedPlan.credits} credits · {selectedPlan.name}
                 </p>
               </div>
+
               <Button
                 onClick={handlePay}
                 disabled={paying}
-                className="shrink-0 gap-2 bg-brand hover:bg-brand/90 text-white font-semibold h-10 px-5 rounded-xl"
+                className="shrink-0 gap-2.5 bg-brand hover:bg-brand/90 text-white font-bold h-12 px-6 rounded-2xl shadow-lg shadow-brand/20 active:scale-95 transition-all"
               >
                 {paying ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <Loader2 className="h-5 w-5 animate-spin" />
                 ) : (
-                  <Coins className="h-4 w-4" />
+                  <Coins className="h-5 w-5" />
                 )}
                 {paying ? "Processing…" : `Pay ${sym}${selectedPlan.amountMajor}`}
               </Button>
+
             </div>
           ) : (
             <div className="flex items-center justify-between gap-4">
