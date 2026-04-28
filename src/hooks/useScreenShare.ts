@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
-export const useScreenShare = (
-  options: { autoStart?: boolean } = { autoStart: true },
-) => {
+// WKWebView (Tauri/macOS) enforces that getDisplayMedia MUST originate from a
+// direct user gesture (button click). Calling it from useEffect — even
+// indirectly — throws InvalidStateError. autoStart is therefore removed; the
+// caller must invoke startShare() from an onClick handler.
+export const useScreenShare = () => {
   const [stream, setStream] = useState<MediaStream | null>(null);
 
   // Keep a ref to the latest stream so the callback ref can access it
@@ -36,13 +38,13 @@ export const useScreenShare = (
   const startShare = useCallback(async () => {
     try {
       const displayMediaOptions: any = {
-        video: {
-          displaySurface: "monitor",
-        },
-        cursor: "never",
-        audio: {
-          systemAudio: "include",
-        },
+        video: true,
+        // `audio: true` is the standard constraint that WKWebView (Tauri/macOS)
+        // supports. Chrome-only `systemAudio: "include"` is silently ignored by
+        // WKWebView, causing the stream to have no audio tracks.
+        // With `audio: true` the OS picker shows an "Include audio" / "Share tab
+        // audio" toggle — the user must enable it to get tab/system audio.
+        audio: true,
       };
 
       // Create a CaptureController if supported to prevent focus switching
@@ -92,12 +94,8 @@ export const useScreenShare = (
     });
   }, []);
 
-  // Auto-start screen share on mount
+  // Cleanup on unmount — stop any active tracks
   useEffect(() => {
-    if (options.autoStart) {
-      startShare();
-    }
-
     return () => {
       setStream((prevStream) => {
         if (prevStream) {
@@ -106,7 +104,7 @@ export const useScreenShare = (
         return null;
       });
     };
-  }, [startShare, options.autoStart]);
+  }, []);
 
   return {
     stream,

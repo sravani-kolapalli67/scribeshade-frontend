@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { useParams, useNavigate, useLocation } from "react-router-dom";
 import { useDeepgram } from "@/hooks/useDeepgram";
 import { useScreenShare } from "@/hooks/useScreenShare";
+import { useNativeTabTranscription } from "@/hooks/useNativeTabTranscription";
 import { useAIChat } from "@/hooks/useAIChat";
 import { useKeyboardShortcut } from "@/hooks/useKeyboardShortcut";
 import { useFreeSessionTimer } from "@/hooks/useFreeSessionTimer";
@@ -136,9 +137,18 @@ export default function ActiveSession() {
   //     endSessionNow
   //   );
 
-  const { stream, videoRef, startShare, captureScreenshot } = useScreenShare({
-    autoStart: !isConnectDialogOpen,
-  });
+  const { stream, videoRef, startShare, captureScreenshot } = useScreenShare();
+
+  // Auto-trigger screen share picker on first session load (requires user to
+  // confirm the macOS picker, so we call it once via a ref guard).
+  const didAutoStartRef = useRef(false);
+  useEffect(() => {
+    if (!didAutoStartRef.current && !isConnectDialogOpen) {
+      didAutoStartRef.current = true;
+      startShare();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isConnectDialogOpen]);
 
   const handleTranscript = useCallback(
     (sender: "User" | "Interviewer", text: string, isFinal: boolean) => {
@@ -227,35 +237,21 @@ export default function ActiveSession() {
     onTranscript: onUserTranscript,
   });
 
-  const tabTranscription = useDeepgram({
+  // Display audio transcription: SCKit (Rust) ─► localhost WS ─► Deepgram WS
+  // Captures the primary display's system audio directly via ScreenCaptureKit,
+  // so YouTube/tab audio is transcribed — not the microphone.
+  const tabTranscription = useNativeTabTranscription({
     apiKey: import.meta.env.VITE_DEEPGRAM_API_KEY || "",
     model: "nova-3",
     language: getLanguageCode(selectedLanguage),
-    inputStream: stream,
     onTranscript: onInterviewerTranscript,
+    enabled: !!stream,
   });
 
-  // Auto-start tab transcription when a stream is available
+  // Surface cpal errors as toasts
   useEffect(() => {
-    console.log("[Auto-Start Check]", {
-      hasStream: !!stream,
-      isTranscribing: tabTranscription.isTranscribing,
-      isConnecting: tabTranscription.isConnecting,
-    });
-    if (
-      stream &&
-      !tabTranscription.isTranscribing &&
-      !tabTranscription.isConnecting
-    ) {
-      console.log("Auto-starting tab transcription...");
-      tabTranscription.startTranscription();
-    }
-  }, [
-    stream,
-    tabTranscription.isTranscribing,
-    tabTranscription.isConnecting,
-    tabTranscription.startTranscription,
-  ]);
+    if (tabTranscription.error) toast.error(tabTranscription.error);
+  }, [tabTranscription.error]);
 
   const {
     aiChat,

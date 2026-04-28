@@ -41,11 +41,25 @@ export const ScreenCapture = ({
 
       {!stream && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-slate-900">
-          <div className="h-16 w-16 rounded-3xl bg-white/5 border border-white/10 flex items-center justify-center animate-pulse">
-            <ScreenShare className="h-8 w-8 text-white/20" />
+          <div className="h-16 w-16 rounded-3xl bg-white/5 border border-white/10 flex items-center justify-center">
+            <ScreenShare className="h-8 w-8 text-white/40" />
           </div>
           <p className="text-sm text-white/40 font-medium">
-            Waiting for screen capture...
+            No screen selected
+          </p>
+          {/* Must be a real button click — WKWebView rejects getDisplayMedia
+              calls that don't originate from a direct user gesture. */}
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={onChangeTab}
+            className="h-8 bg-white/15 backdrop-blur-md border border-white/20 text-white hover:bg-white/25 rounded-lg px-4 text-xs font-bold"
+          >
+            <ScreenShare className="h-3.5 w-3.5 mr-1.5" />
+            Select Screen / Tab
+          </Button>
+          <p className="text-xs text-white/25 max-w-[220px] text-center leading-relaxed">
+            Enable "Include audio" in the picker to capture tab audio
           </p>
         </div>
       )}

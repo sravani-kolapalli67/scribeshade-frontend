@@ -21,5 +21,16 @@
       </array>
     </dict>
   </array>
+
+  <!-- Required for getDisplayMedia audio — WKWebView checks this key before
+       offering the "Include audio" / "Share tab audio" toggle in the macOS
+       screen-share picker. Without it the toggle is hidden and the stream
+       always has zero audio tracks. -->
+  <key>NSMicrophoneUsageDescription</key>
+  <string>ScribeShade needs microphone access to transcribe the conversation in real time.</string>
+
+  <!-- Required for getDisplayMedia video on macOS 14 + -->
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>ScribeShade needs screen capture access to display and analyze the shared content.</string>
 </dict>
 </plist>

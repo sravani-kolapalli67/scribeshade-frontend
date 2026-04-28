@@ -43,7 +43,9 @@ export const useDeepgram = ({
           console.error(
             "Deepgram: No audio tracks found in provided inputStream.",
           );
-          setError("No audio detected in share. Did you check 'Share audio'?");
+          setError(
+            "No audio in share. When the screen picker appears, enable the 'Share tab audio' or 'Include audio' toggle, then click Change Tab to restart.",
+          );
           setIsConnecting(false);
           isStartingRef.current = false;
           return;

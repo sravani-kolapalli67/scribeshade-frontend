@@ -3,12 +3,36 @@ use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
 use screenshots::Screen;
 use base64::{Engine as _, engine::general_purpose};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// Monotonic version counter — every new animation request bumps this.
-/// In-flight animation loops compare on each tick and exit if outdated,
-/// so the latest call always wins without explicit task cancellation.
 static ANIM_VERSION: AtomicU64 = AtomicU64::new(0);
+
+// ── Native audio WebSocket state ─────────────────────────────────────────────
+// On macOS, WKWebView never returns audio tracks from getDisplayMedia.
+// We capture the default input device (mic, or a virtual loopback device such
+// as BlackHole that routes app/tab audio) in Rust via cpal, then stream raw
+// PCM frames over a localhost WebSocket so the frontend can feed them to
+// Deepgram directly.
+
+#[cfg(target_os = "macos")]
+static AUDIO_RUNNING: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_os = "macos")]
+static AUDIO_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
+/// ScreenCaptureKit display audio stream state.
+/// Captures system/tab audio from the primary display — does NOT require a
+/// virtual audio device (BlackHole/Loopback).  Requires macOS 13.0+ and the
+/// user to have granted Screen Recording permission.
+#[cfg(target_os = "macos")]
+static DISPLAY_AUDIO_RUNNING: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_os = "macos")]
+static DISPLAY_AUDIO_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 /// Window subclass proc for the mini overlay.
 /// Returns HTTRANSPARENT (-1) for the transparent rounded-corner zones so that
@@ -265,6 +289,388 @@ async fn set_mini_state(
     Ok(())
 }
 
+// ── macOS native audio capture commands ──────────────────────────────────────
+// Start a cpal input stream on the chosen device, encode raw samples as 16-bit
+// little-endian PCM, and broadcast them to all connected WebSocket clients on
+// a random localhost port.  Returns the port number so the frontend can open
+// ws://127.0.0.1:{port}.
+//
+// Device selection:
+//   device_name = None  → default input (microphone)
+//   device_name = Some("BlackHole 2ch") etc. → virtual loopback for tab audio
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn start_audio_stream(device_name: Option<String>) -> Result<u16, String> {
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    use axum::{Router, extract::ws::{WebSocketUpgrade, WebSocket, Message}};
+    use axum::extract::State;
+    use tokio::sync::broadcast;
+
+    if AUDIO_RUNNING.load(Ordering::SeqCst) {
+        let port = AUDIO_PORT.load(Ordering::SeqCst);
+        if port != 0 {
+            return Ok(port);
+        }
+    }
+
+    let host = cpal::default_host();
+
+    let device = if let Some(ref name) = device_name {
+        host.input_devices()
+            .map_err(|e| e.to_string())?
+            .find(|d| d.name().map(|n| n.contains(name.as_str())).unwrap_or(false))
+            .ok_or_else(|| format!("Audio device '{}' not found", name))?
+    } else {
+        host.default_input_device()
+            .ok_or("No default input device")?
+    };
+
+    let config = device.default_input_config().map_err(|e| e.to_string())?;
+    let sample_rate = config.sample_rate().0;
+    let channels = config.channels() as u32;
+
+    // Broadcast channel — new WS clients subscribe, cpal thread publishes
+    let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(64);
+    let tx_arc = Arc::new(tx);
+    let tx_capture = tx_arc.clone();
+
+    // Spawn cpal on a dedicated OS thread (cpal streams are !Send)
+    AUDIO_RUNNING.store(true, Ordering::SeqCst);
+    std::thread::spawn(move || {
+        let tx = tx_capture;
+
+        let err_fn = |e| eprintln!("[cpal] stream error: {e}");
+
+        let stream = match config.sample_format() {
+            cpal::SampleFormat::F32 => device.build_input_stream(
+                &config.into(),
+                move |data: &[f32], _| {
+                    if !AUDIO_RUNNING.load(Ordering::Relaxed) { return; }
+                    // Convert f32 → i16 PCM
+                    let pcm: Vec<u8> = data.iter().flat_map(|&s| {
+                        let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                        v.to_le_bytes()
+                    }).collect();
+                    let _ = tx.send(Arc::new(pcm));
+                },
+                err_fn, None,
+            ),
+            cpal::SampleFormat::I16 => device.build_input_stream(
+                &config.into(),
+                move |data: &[i16], _| {
+                    if !AUDIO_RUNNING.load(Ordering::Relaxed) { return; }
+                    let pcm: Vec<u8> = data.iter().flat_map(|s| s.to_le_bytes()).collect();
+                    let _ = tx.send(Arc::new(pcm));
+                },
+                err_fn, None,
+            ),
+            _ => return,
+        };
+
+        if let Ok(s) = stream {
+            let _ = s.play();
+            while AUDIO_RUNNING.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            // stream dropped here → cpal stops
+        }
+    });
+
+    // Bind axum WebSocket server on a random port
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| e.to_string())?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    AUDIO_PORT.store(port, Ordering::SeqCst);
+
+    // Include sample_rate and channel count in the first message so the
+    // frontend can configure Deepgram correctly.
+    let meta = format!("{{\"sampleRate\":{sample_rate},\"channels\":{channels}}}");
+    let meta_bytes = Arc::new(meta.into_bytes());
+
+    let router = Router::new()
+        .route("/", axum::routing::get(
+            move |ws: WebSocketUpgrade, State(state): State<Arc<broadcast::Sender<Arc<Vec<u8>>>>>| {
+                let meta_clone = meta_bytes.clone();
+                async move {
+                    ws.on_upgrade(move |mut socket: WebSocket| async move {
+                        // Send metadata frame first
+                        let _ = socket.send(Message::Text(
+                            String::from_utf8_lossy(&meta_clone).into()
+                        )).await;
+                        let mut rx = state.subscribe();
+                        loop {
+                            match rx.recv().await {
+                                Ok(pcm) => {
+                                    if socket.send(Message::Binary((*pcm).clone())).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                Err(_) => break,
+                            }
+                        }
+                    })
+                }
+            }
+        ))
+        .with_state(tx_arc);
+
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    Ok(port)
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn stop_audio_stream() {
+    AUDIO_RUNNING.store(false, Ordering::SeqCst);
+    AUDIO_PORT.store(0, Ordering::SeqCst);
+}
+
+/// Returns the list of available audio input device names so the frontend can
+/// offer a picker (e.g. "BlackHole 2ch" for loopback / tab audio).
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn list_audio_devices() -> Vec<String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let host = cpal::default_host();
+    host.input_devices()
+        .map(|devs| devs.filter_map(|d| d.name().ok()).collect())
+        .unwrap_or_default()
+}
+
+// ── macOS ScreenCaptureKit display audio stream ───────────────────────────────
+// Captures the audio playing on the primary display (system/tab audio) via SCKit.
+// This does NOT require a virtual audio device — SCKit taps the OS audio graph
+// directly.  Requires macOS 13.0+ and Screen Recording permission.
+//
+// Same WS/broadcast architecture as start_audio_stream:
+//   SCKit callback → broadcast channel → axum WS → frontend → Deepgram
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn start_display_audio_stream() -> Result<u16, String> {
+    use screencapturekit::prelude::*;
+    use axum::{Router, extract::ws::{WebSocketUpgrade, WebSocket, Message}};
+    use axum::extract::State;
+    use tokio::sync::broadcast;
+
+    // Return existing port if already running
+    if DISPLAY_AUDIO_RUNNING.load(Ordering::SeqCst) {
+        let port = DISPLAY_AUDIO_PORT.load(Ordering::SeqCst);
+        if port != 0 {
+            return Ok(port);
+        }
+    }
+
+    // Broadcast channel: SCKit callback thread → axum WS clients
+    let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(128);
+    let tx_arc = Arc::new(tx);
+    let tx_capture = tx_arc.clone();
+
+    DISPLAY_AUDIO_RUNNING.store(true, Ordering::SeqCst);
+
+    // SCKit must be set up and kept alive on a dedicated OS thread.
+    // All SCKit objects (SCStream, SCShareableContent, etc.) are created and
+    // dropped on this thread — no Send constraints needed.
+    std::thread::spawn(move || {
+        let tx = tx_capture;
+
+        // Get the list of capturable displays
+        let content = match SCShareableContent::get() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[sckit] SCShareableContent::get() failed: {e:?}");
+                DISPLAY_AUDIO_RUNNING.store(false, Ordering::SeqCst);
+                return;
+            }
+        };
+
+        let displays = content.displays();
+        let display = match displays.into_iter().next() {
+            Some(d) => d,
+            None => {
+                eprintln!("[sckit] no display found");
+                DISPLAY_AUDIO_RUNNING.store(false, Ordering::SeqCst);
+                return;
+            }
+        };
+
+        let filter = SCContentFilter::create()
+            .with_display(&display)
+            .with_excluding_windows(&[])
+            .build();
+
+        // Audio-only config — 2×2 video size to minimise GPU overhead.
+        // with_captures_audio requires macOS 13.0+ (feature = "macos_13_0").
+        let config = SCStreamConfiguration::new()
+            .with_width(2)
+            .with_height(2)
+            .with_captures_audio(true)
+            .with_sample_rate(48000)
+            .with_channel_count(2);
+
+        let mut stream = SCStream::new(&filter, &config);
+
+        // The audio callback runs on SCKit's internal dispatch queue.
+        // AudioBufferList is !Send, so we extract bytes here and send Vec<u8>.
+        stream.add_output_handler(
+            move |sample: CMSampleBuffer, of_type: SCStreamOutputType| {
+                match of_type {
+                    SCStreamOutputType::Audio => {}
+                    _ => return,
+                }
+
+                let abl = match sample.audio_buffer_list() {
+                    Some(a) => a,
+                    None => return,
+                };
+
+                let num_bufs = abl.num_buffers();
+                if num_bufs == 0 { return; }
+
+                // Convert f32 LE PCM → i16 LE PCM for Deepgram linear16 encoding.
+                // SCKit delivers float32; interleave non-interleaved buffers.
+                let mut pcm: Vec<u8> = Vec::new();
+
+                if num_bufs == 1 {
+                    // Single buffer = interleaved (all channels, e.g. stereo i2)
+                    if let Some(buf) = abl.get(0) {
+                        for chunk in buf.data().chunks_exact(4) {
+                            let f = f32::from_le_bytes([
+                                chunk[0], chunk[1], chunk[2], chunk[3]
+                            ]);
+                            let v = (f.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                            pcm.extend_from_slice(&v.to_le_bytes());
+                        }
+                    }
+                } else {
+                    // Multiple buffers = non-interleaved (one buffer per channel)
+                    let samples_per_ch = abl.get(0)
+                        .map(|b| b.data().len() / 4)
+                        .unwrap_or(0);
+                    for i in 0..samples_per_ch {
+                        for b in 0..num_bufs {
+                            if let Some(buf) = abl.get(b) {
+                                let raw = buf.data();
+                                let off = i * 4;
+                                if off + 4 <= raw.len() {
+                                    let f = f32::from_le_bytes([
+                                        raw[off], raw[off+1], raw[off+2], raw[off+3]
+                                    ]);
+                                    let v = (f.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                                    pcm.extend_from_slice(&v.to_le_bytes());
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !pcm.is_empty() {
+                    let _ = tx.send(Arc::new(pcm));
+                }
+            },
+            SCStreamOutputType::Audio,
+        );
+
+        if let Err(e) = stream.start_capture() {
+            eprintln!("[sckit] start_capture failed: {e:?}");
+            DISPLAY_AUDIO_RUNNING.store(false, Ordering::SeqCst);
+            return;
+        }
+
+        while DISPLAY_AUDIO_RUNNING.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let _ = stream.stop_capture();
+        // stream, content, display, filter dropped here (on this thread)
+    });
+
+    // Bind axum WebSocket server on a random localhost port
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| e.to_string())?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    DISPLAY_AUDIO_PORT.store(port, Ordering::SeqCst);
+
+    // First WS message is JSON metadata so the frontend can configure Deepgram
+    let sample_rate: u32 = 48000;
+    let channels: u32 = 2;
+    let meta = format!("{{\"sampleRate\":{sample_rate},\"channels\":{channels}}}");
+    let meta_bytes = Arc::new(meta.into_bytes());
+
+    let router = Router::new()
+        .route("/", axum::routing::get(
+            move |ws: WebSocketUpgrade, State(state): State<Arc<broadcast::Sender<Arc<Vec<u8>>>>>| {
+                let meta_clone = meta_bytes.clone();
+                async move {
+                    ws.on_upgrade(move |mut socket: WebSocket| async move {
+                        let _ = socket.send(Message::Text(
+                            String::from_utf8_lossy(&meta_clone).into()
+                        )).await;
+                        let mut rx = state.subscribe();
+                        loop {
+                            match rx.recv().await {
+                                Ok(pcm) => {
+                                    if socket.send(Message::Binary((*pcm).clone())).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                Err(_) => break,
+                            }
+                        }
+                    })
+                }
+            }
+        ))
+        .with_state(tx_arc);
+
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    Ok(port)
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn stop_display_audio_stream() {
+    DISPLAY_AUDIO_RUNNING.store(false, Ordering::SeqCst);
+    DISPLAY_AUDIO_PORT.store(0, Ordering::SeqCst);
+}
+
+// Stubs for non-macOS so the invoke_handler compiles on all platforms
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn start_audio_stream(_device_name: Option<String>) -> Result<u16, String> {
+    Err("Native audio capture is macOS-only".into())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn stop_audio_stream() {}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn list_audio_devices() -> Vec<String> { vec![] }
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn start_display_audio_stream() -> Result<u16, String> {
+    Err("Display audio capture is macOS-only".into())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn stop_display_audio_stream() {}
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() { 
     tauri::Builder::default()
@@ -344,7 +750,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            toggle_floating, capture_screen, show_mini_top_center, set_mini_state
+            toggle_floating, capture_screen, show_mini_top_center, set_mini_state,
+            start_audio_stream, stop_audio_stream, list_audio_devices,
+            start_display_audio_stream, stop_display_audio_stream
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
