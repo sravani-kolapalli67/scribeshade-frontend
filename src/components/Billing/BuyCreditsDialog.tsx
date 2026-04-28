@@ -126,7 +126,16 @@ export function BuyCreditsDialog({
 
       if (!orderRes.ok) {
         const err = await orderRes.json().catch(() => ({}));
-        toast.error(err.error ?? "Could not create payment order.");
+        const msg = err.error ?? "";
+        if (msg === "Razorpay is not configured") {
+          toast.error("Payment gateway is not available right now.", {
+            description: "Please contact support or try again later.",
+          });
+        } else if (msg === "Invalid packCode") {
+          toast.error("Invalid pack selected. Please refresh and try again.");
+        } else {
+          toast.error(msg || "Could not create payment order. Please try again.");
+        }
         return;
       }
 

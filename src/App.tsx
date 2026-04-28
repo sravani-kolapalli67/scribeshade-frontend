@@ -54,7 +54,9 @@ function App() {
         const parsed = new URL(url);
         navigate(`/sso-callback${parsed.search}`);
       }
-    }).then((fn) => { unlisten = fn; });
+    }).then((fn) => { unlisten = fn; }).catch(() => {
+      // Plugin not available (browser dev mode or capability not registered) — ignore
+    });
     return () => { unlisten?.(); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
