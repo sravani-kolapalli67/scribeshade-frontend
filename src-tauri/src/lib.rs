@@ -1,13 +1,15 @@
-use tauri::{Manager, WebviewWindowBuilder, WebviewUrl, AppHandle, Window, PhysicalPosition, LogicalSize};
+use tauri::{Manager, WebviewWindowBuilder, WebviewUrl, AppHandle, Window, PhysicalPosition, LogicalSize, command};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
 use screenshots::Screen;
 use base64::{Engine as _, engine::general_purpose};
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+#[cfg(target_os = "macos")]
 use std::sync::Arc;
 
 /// Monotonic version counter — every new animation request bumps this.
 static ANIM_VERSION: AtomicU64 = AtomicU64::new(0);
+static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 // ── Native audio WebSocket state ─────────────────────────────────────────────
 // On macOS, WKWebView never returns audio tracks from getDisplayMedia.
@@ -711,6 +713,32 @@ async fn start_display_audio_stream() -> Result<u16, String> {
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
 fn stop_display_audio_stream() {}
+
+#[command]
+fn set_session_active(active: bool) {
+    SESSION_ACTIVE.store(active, Ordering::SeqCst);
+}
+
+#[command]
+fn handle_launcher_click(app: AppHandle) -> Result<(), String> {
+    let launcher = app.get_webview_window("launcher").ok_or("launcher missing")?;
+    let _ = launcher.hide();
+
+    if SESSION_ACTIVE.load(Ordering::SeqCst) {
+        if let Some(mini) = app.get_webview_window("mini") {
+            let _ = mini.show();
+            let _ = mini.unminimize();
+            let _ = mini.set_focus();
+        }
+    } else {
+        if let Some(main) = app.get_webview_window("main") {
+            let _ = main.show();
+            let _ = main.unminimize();
+            let _ = main.set_focus();
+        }
+    }
+    Ok(())
+}
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -727,15 +755,17 @@ pub fn run() {
             // in the OS system browser instead of the Tauri webview.
             let handle = app.handle().clone();
             WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
-                .title("ScribeShade")
+                .title("CraftVita")
                 .inner_size(1200.0, 800.0)
                 .center()
                 .resizable(false)
                 .maximized(true)
                 .skip_taskbar(true)
+                .content_protected(false)
                 .on_navigation(move |url| {
                     let scheme = url.scheme();
                     let host = url.host_str().unwrap_or("");
+
                     // Allow Tauri internal URLs and local dev server
                     if scheme == "tauri"
                         || host == "localhost"
@@ -744,11 +774,25 @@ pub fn run() {
                     {
                         return true;
                     }
-                    // All external URLs → OS system browser
+
+                    // Allow Razorpay domains to load inside the webview
+                    // (required for the checkout iframe and payment flow)
+                    if host.ends_with("razorpay.com") || host.ends_with("razorpay.in") {
+                        return true;
+                    }
+
+                    // All other external URLs → OS system browser
                     let _ = handle.opener().open_url(url.as_str(), None::<&str>);
                     false
                 })
                 .build()?;
+            
+            if let Some(main) = app.get_webview_window("main") {
+                let _ = main.set_focus();
+                if let Some(launcher) = app.get_webview_window("launcher") {
+                    let _ = launcher.hide();
+                }
+            }
             #[cfg(target_os = "windows")]
             {
                 if let Some(win) = app.get_webview_window("mini") {
@@ -761,6 +805,23 @@ pub fn run() {
                             let _ = windows::Win32::UI::Shell::SetWindowSubclass(
                                 win_hwnd, Some(mini_subclass_proc), 1, 0,
                             );
+                        }
+                    }
+                }
+
+                if let Some(launcher) = app.get_webview_window("launcher") {
+                    if let Ok(hwnd) = launcher.hwnd() {
+                        let win_hwnd = windows::Win32::Foundation::HWND(hwnd.0);
+                        remove_window_border(win_hwnd);
+                    }
+                    
+                    // Position at top center
+                    if let Ok(Some(monitor)) = launcher.primary_monitor() {
+                        let screen_size = monitor.size();
+                        if let Ok(size) = launcher.outer_size() {
+                            let x = (screen_size.width as i32 - size.width as i32) / 2;
+                            let y = 10; 
+                            let _ = launcher.set_position(PhysicalPosition { x, y });
                         }
                     }
                 }
@@ -789,12 +850,89 @@ pub fn run() {
                 }
             }
 
+            // Window event handlers for main and mini
+            let main_win = app.get_webview_window("main").unwrap();
+            let main_handle = app.handle().clone();
+            main_win.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { .. } = event {
+                    main_handle.exit(0);
+                } else if let tauri::WindowEvent::Resized(_) = event {
+                    let main = main_handle.get_webview_window("main").unwrap();
+                    if main.is_minimized().unwrap_or(false) {
+                        // On Windows, minimize usually hides the window from view but keeps it in taskbar.
+                        // We want to hide it completely so only our floating windows are seen.
+                        let _ = main.hide();
+
+                        if SESSION_ACTIVE.load(Ordering::SeqCst) {
+                            if let Some(mini) = main_handle.get_webview_window("mini") {
+                                let _ = mini.show();
+                            }
+                        } else {
+                            if let Some(launcher) = main_handle.get_webview_window("launcher") {
+                                let _ = launcher.show();
+                            }
+                        }
+                    }
+                } else if let tauri::WindowEvent::Focused(focused) = event {
+                    if !*focused {
+                        // Main window lost focus
+                        let main = main_handle.get_webview_window("main").unwrap();
+                        let is_minimized = main.is_minimized().unwrap_or(false);
+                        let is_visible = main.is_visible().unwrap_or(false);
+
+                        // Only show launcher if main is truly "away" (minimized or hidden)
+                        if !is_visible || is_minimized {
+                            if !SESSION_ACTIVE.load(Ordering::SeqCst) {
+                                if let Some(launcher) = main_handle.get_webview_window("launcher") {
+                                    let _ = launcher.show();
+                                }
+                            }
+                        }
+                    } else {
+                        // Main window gained focus
+                        if let Some(launcher) = main_handle.get_webview_window("launcher") {
+                            let _ = launcher.hide();
+                        }
+                    }
+                }
+            });
+
+            if let Some(mini_win) = app.get_webview_window("mini") {
+                let mini_handle = app.handle().clone();
+                mini_win.on_window_event(move |event| {
+                    if let tauri::WindowEvent::Resized(_) = event {
+                        let mini = mini_handle.get_webview_window("mini").unwrap();
+                        if mini.is_minimized().unwrap_or(false) {
+                            let _ = mini.hide();
+                            if let Some(launcher) = mini_handle.get_webview_window("launcher") {
+                                let _ = launcher.show();
+                            }
+                        }
+                    } else if let tauri::WindowEvent::Focused(focused) = event {
+                        if !*focused {
+                            // Mini window lost focus
+                            if SESSION_ACTIVE.load(Ordering::SeqCst) {
+                                if let Some(launcher) = mini_handle.get_webview_window("launcher") {
+                                    let _ = launcher.show();
+                                }
+                            }
+                        } else {
+                            // Mini window gained focus
+                            if let Some(launcher) = mini_handle.get_webview_window("launcher") {
+                                let _ = launcher.hide();
+                            }
+                        }
+                    }
+                });
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             toggle_floating, capture_screen, show_mini_top_center, set_mini_state,
             start_audio_stream, stop_audio_stream, list_audio_devices,
-            start_display_audio_stream, stop_display_audio_stream
+            start_display_audio_stream, stop_display_audio_stream,
+            set_session_active, handle_launcher_click
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

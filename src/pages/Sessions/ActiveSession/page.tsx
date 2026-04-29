@@ -24,11 +24,21 @@ import { AIChatPanel } from "./components/AIChatPanel";
 import { OverlayContainer } from "./components/OverlayContainer";
 import { EndSessionDialog } from "./EndSessionDialog";
 import { Transcript, type Message } from "./Transcript";
-import { ConnectDialog } from "@/components/Sessions/ConnectDialog";
+import {
+  ActivateResponseData,
+  ConnectDialog,
+} from "@/components/Sessions/ConnectDialog";
 import { BuyCreditsDialog } from "@/components/Billing/BuyCreditsDialog";
 import { useCreditsBalance } from "@/hooks/useCreditsBalance";
 
 export default function ActiveSession() {
+  useEffect(() => {
+    invoke("set_session_active", { active: true });
+    return () => {
+      invoke("set_session_active", { active: false });
+    };
+  }, []);
+
   const { id } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
@@ -377,9 +387,9 @@ export default function ActiveSession() {
   const mergedTabIsConnecting =
     tabTranscription.isConnecting || tabAudioTranscription.isConnecting;
   const mergedTabInterimTranscript =
-    tabTranscription.interimTranscript || tabAudioTranscription.interimTranscript;
-  const mergedTabError =
-    tabTranscription.error || tabAudioTranscription.error;
+    tabTranscription.interimTranscript ||
+    tabAudioTranscription.interimTranscript;
+  const mergedTabError = tabTranscription.error || tabAudioTranscription.error;
 
   const {
     aiChat,
@@ -741,8 +751,7 @@ export default function ActiveSession() {
     isMicTranscribing: micTranscription.isTranscribing,
     tabInterimTranscript: mergedTabInterimTranscript,
     isTabTranscribing: mergedTabIsTranscribing,
-    isConnecting:
-      micTranscription.isConnecting || mergedTabIsConnecting,
+    isConnecting: micTranscription.isConnecting || mergedTabIsConnecting,
     error: micTranscription.error || mergedTabError,
     onToggleMic: () => {
       if (micTranscription.isTranscribing) {

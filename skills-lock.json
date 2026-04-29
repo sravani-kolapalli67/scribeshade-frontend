@@ -1,6 +1,12 @@
 {
   "version": 1,
   "skills": {
+    "redux-toolkit": {
+      "source": "mindrally/skills",
+      "sourceType": "github",
+      "skillPath": "redux-toolkit/SKILL.md",
+      "computedHash": "327cbba7959a273fc04111e8f86a0be912491152d393b5dc9b55dbb8acc20a8b"
+    },
     "rust-best-practices": {
       "source": "apollographql/skills",
       "sourceType": "github",

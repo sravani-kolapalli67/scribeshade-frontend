@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "ScribeShade",
+  "productName": "CraftVita",
   "version": "0.1.0",
   "identifier": "com.hiddenmindsolutions.scribeshade-frontend",
   "build": {
@@ -13,20 +13,36 @@
     "windows": [
       {
         "label": "mini",
-        "title": "ScribeShade Floating Screen",
+        "title": "CraftVita Floating Screen",
         "url": "floating.html",
+        "transparent": true,
+        "decorations": false,
         "width": 700,
-        "height": 36,
+        "height": 360,
+        "visible": false,
+        "center": true,
+        "resizable": false,
+        "minimizable": true,
+        "maximizable": false,
+        "contentProtected": true,
+        "skipTaskbar": true,
+        "alwaysOnTop": true,
+        "visibleOnAllWorkspaces": true
+      },
+      {
+        "label": "launcher",
+        "title": "Launcher",
+        "url": "launcher.html",
+        "width": 80,
+        "height": 80,
         "transparent": true,
         "decorations": false,
         "visible": false,
         "center": true,
         "resizable": false,
-        "minimizable": false,
-        "maximizable": false,
-        "contentProtected": false,
-        "skipTaskbar": true,
+        "contentProtected": true,
         "alwaysOnTop": true,
+        "skipTaskbar": true,
         "visibleOnAllWorkspaces": true
       }
     ],
