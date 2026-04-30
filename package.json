@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "build:mac": "pnpm tauri build --target universal-apple-darwin"
   },
   "dependencies": {
     "@clerk/clerk-react": "^5.61.3",

@@ -3,9 +3,8 @@ use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
 use screenshots::Screen;
 use base64::{Engine as _, engine::general_purpose};
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+use std::sync::{Arc, atomic::{AtomicU64, AtomicBool, Ordering}};
 use url::Url as NavUrl;
-// Removed redundant Arc import
 
 /// Monotonic version counter — every new animation request bumps this.
 static ANIM_VERSION: AtomicU64 = AtomicU64::new(0);
