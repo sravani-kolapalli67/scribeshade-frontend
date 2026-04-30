@@ -17,6 +17,7 @@ export default defineConfig(async () => ({
       input: {
         main: path.resolve(__dirname, "index.html"),
         floating: path.resolve(__dirname, "floating.html"),
+        launcher: path.resolve(__dirname, "launcher.html"),
       },
     },
   },

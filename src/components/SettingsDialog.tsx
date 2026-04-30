@@ -48,7 +48,7 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
 
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-175 bg-white rounded-xl shadow-2xl border-none p-0 overflow-hidden">
+      <DialogContent className="sm:max-w-175 bg-white rounded-xl shadow-2xl border-none p-0 overflow-hidden" aria-describedby={undefined}>
         <DialogHeader className="p-8 pb-4 border-b border-slate-50">
           <div className="flex items-center gap-3">
             <div className="h-10 w-10 bg-brand/10 rounded-xl flex items-center justify-center">

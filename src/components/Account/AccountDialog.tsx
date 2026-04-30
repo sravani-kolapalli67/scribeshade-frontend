@@ -9,7 +9,7 @@ interface AccountDialogProps {
 export function AccountDialog({ isOpen, onClose }: AccountDialogProps) {
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="w-auto max-w-[95vw] sm:max-w-fit bg-white rounded-xl shadow-sm border border-gray-100 p-0 max-h-[85vh] flex flex-col [&>button]:bg-white! [&>button]:rounded-full! hover:[&>button]:bg-gray-100!">
+      <DialogContent className="w-auto max-w-[95vw] sm:max-w-fit bg-white rounded-xl shadow-sm border border-gray-100 p-0 max-h-[85vh] flex flex-col [&>button]:bg-white! [&>button]:rounded-full! hover:[&>button]:bg-gray-100!" aria-describedby={undefined}>
         <div className="flex-1 overflow-y-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
           <UserProfile
             routing="hash"

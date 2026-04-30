@@ -4,6 +4,7 @@ use tauri_plugin_opener::OpenerExt;
 use screenshots::Screen;
 use base64::{Engine as _, engine::general_purpose};
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+use url::Url as NavUrl;
 #[cfg(target_os = "macos")]
 use std::sync::Arc;
 
@@ -197,14 +198,11 @@ async fn capture_screen(window: Window) -> Result<String, String> {
 
 
 #[tauri::command]
-fn show_mini_top_center(app: AppHandle) -> Result<(), String> {
+async fn show_mini_top_center(app: AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window("mini")
         .ok_or("mini window not found")?;
 
-    // Ensure the window has the right initial size before we read it back for
-    // centering. The tauri.conf.json default (700×36) should already be set,
-    // but an explicit call guards against hidden-window size quirks on macOS.
     window
         .set_size(LogicalSize::new(700u32, 36u32))
         .map_err(|e| e.to_string())?;
@@ -214,8 +212,8 @@ fn show_mini_top_center(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .ok_or("no primary monitor")?;
 
-    let screen = monitor.size(); // PhysicalSize<u32>
-    let size = window.outer_size().map_err(|e| e.to_string())?; // PhysicalSize<u32>
+    let screen = monitor.size();
+    let size = window.outer_size().map_err(|e| e.to_string())?;
 
     let x = (screen.width as i32 - size.width as i32) / 2;
     let y = 10;
@@ -226,36 +224,63 @@ fn show_mini_top_center(app: AppHandle) -> Result<(), String> {
     window.set_minimizable(false).map_err(|e| e.to_string())?;
     window.set_maximizable(false).map_err(|e| e.to_string())?;
 
-    // ── macOS: bump window to NSStatusWindowLevel (25) so it floats above
-    // Chrome, Meet, and other floating windows.  NSFloatingWindowLevel (3)
-    // from set_always_on_top can be beaten by Chrome's own floating layers.
-    // We also need .canJoinAllSpaces so the overlay survives Space switches.
+    // ── macOS: atomic level + show in one run_on_main_thread block ────────
+    //
+    // PROBLEM: `run_on_main_thread` from setup() (which runs on the main
+    // thread) does NOT execute the closure inline — it enqueues it to the
+    // Winit event-loop user-event queue for the NEXT iteration. Any Tauri
+    // call after `run_on_main_thread` that dispatches via the same path
+    // (e.g. set_focus → makeKeyAndOrderFront at the current level 3) will
+    // race with our closure and may show the window at level 3 first.
+    //
+    // SOLUTION: Do NOT call set_focus / window.show() outside this block on
+    // macOS. All show + level + collection-behavior work happens in a single
+    // closure so it executes atomically on one event-loop tick.
+    //
+    //   orderFrontRegardless — shows the window unconditionally even when
+    //     the app is not frontmost (unlike makeKeyAndOrderFront which silently
+    //     no-ops if the app is inactive).
+    //   activateIgnoringOtherApps — brings our process to the front so the
+    //     window actually receives the key-window state.
+    //
+    // NSWindowCollectionBehavior:
+    //   1   = canJoinAllSpaces       — visible on every Mission Control space
+    //   16  = stationary             — doesn't slide away on space switch
+    //   64  = ignoresCycle           — Cmd+` skips it
+    //   256 = fullScreenAuxiliary    — floats over fullscreen apps
     #[cfg(target_os = "macos")]
     {
-        use objc2::msg_send_id;
-        use objc2_app_kit::NSWindow;
-
-        // NSStatusWindowLevel = 25 — above floating panels (level 3) but
-        // below screen-saver and security layers.
-        const NS_STATUS_WINDOW_LEVEL: i64 = 25;
-
-        unsafe {
-            let ns_win = window.ns_window().map_err(|e| e.to_string())?;
-            let ns_win_ptr = ns_win as *mut objc2::runtime::AnyObject;
-            // setLevel:
-            let _: () = objc2::msg_send![ns_win_ptr, setLevel: NS_STATUS_WINDOW_LEVEL];
-            // setCollectionBehavior: canJoinAllSpaces | stationary | ignoresCycle
-            //   canJoinAllSpaces (1<<0) = 1
-            //   stationary       (1<<4) = 16
-            //   ignoresCycle     (1<<6) = 64  (hides from Cmd+Tab)
-            let behavior: u64 = 1 | 16 | 64;
-            let _: () = objc2::msg_send![ns_win_ptr, setCollectionBehavior: behavior];
-        }
+        let win_clone = window.clone();
+        window
+            .run_on_main_thread(move || {
+                const NS_STATUS_WINDOW_LEVEL: i64 = 1;
+                unsafe {
+                    if let Ok(ns_win) = win_clone.ns_window() {
+                        let ptr = ns_win as *mut objc2::runtime::AnyObject;
+                        // 1. Set level — MUST happen before the window is ordered front.
+                        let _: () = objc2::msg_send![ptr, setLevel: NS_STATUS_WINDOW_LEVEL];
+                        // 2. Collection behavior.
+                        let behavior: u64 = 1 | 16 | 64 | 256;
+                        let _: () = objc2::msg_send![ptr, setCollectionBehavior: behavior];
+                        // 3. Show regardless of app-active state (NSApp.active not required).
+                        //    This is the correct call for floating overlay windows.
+                        let _: () = objc2::msg_send![ptr, orderFrontRegardless];
+                        // 4. Activate the app so the widget can receive key events.
+                        let app_cls = objc2::class!(NSApplication);
+                        let ns_app: *mut objc2::runtime::AnyObject =
+                            objc2::msg_send![app_cls, sharedApplication];
+                        let _: () = objc2::msg_send![ns_app, activateIgnoringOtherApps: true];
+                    }
+                }
+            })
+            .map_err(|e| e.to_string())?;
     }
 
-    // ── Windows: strip DWM chrome and pin to all virtual desktops ─────────
+    // ── Windows ───────────────────────────────────────────────────────────
     #[cfg(target_os = "windows")]
     {
+        window.show().map_err(|e| e.to_string())?;
+        window.set_always_on_top(true).map_err(|e| e.to_string())?;
         if let Ok(hwnd) = window.hwnd() {
             let win_hwnd = windows::Win32::Foundation::HWND(hwnd.0);
             let _ = winvd::pin_window(win_hwnd);
@@ -268,8 +293,15 @@ fn show_mini_top_center(app: AppHandle) -> Result<(), String> {
         }
     }
 
-    window.show().map_err(|e| e.to_string())?;
-    window.set_always_on_top(true).map_err(|e| e.to_string())?;
+    // ── Linux ─────────────────────────────────────────────────────────────
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        window.show().map_err(|e| e.to_string())?;
+        window.set_always_on_top(true).map_err(|e| e.to_string())?;
+    }
+
+    // On macOS focus is handled by activateIgnoringOtherApps in the block above.
+    #[cfg(not(target_os = "macos"))]
     window.set_focus().map_err(|e| e.to_string())?;
 
     Ok(())
@@ -721,28 +753,264 @@ fn set_session_active(active: bool) {
 
 #[command]
 fn handle_launcher_click(app: AppHandle) -> Result<(), String> {
-    let launcher = app.get_webview_window("launcher").ok_or("launcher missing")?;
-    let _ = launcher.hide();
-
     if SESSION_ACTIVE.load(Ordering::SeqCst) {
         if let Some(mini) = app.get_webview_window("mini") {
-            let _ = mini.show();
-            let _ = mini.unminimize();
-            let _ = mini.set_focus();
+            // macOS: never call show() or set_focus() on overlay windows —
+            // they both route through makeKeyAndOrderFront which resets the
+            // compositor level back to NSFloatingWindowLevel (3). Use
+            // orderFrontRegardless instead, which honours the existing level.
+            #[cfg(target_os = "macos")]
+            {
+                let w = mini.clone();
+                let _ = mini.run_on_main_thread(move || {
+                    unsafe {
+                        if let Ok(ns_win) = w.ns_window() {
+                            let ptr = ns_win as *mut objc2::runtime::AnyObject;
+                            let _: () = objc2::msg_send![ptr, orderFrontRegardless];
+                        }
+                    }
+                });
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = mini.show();
+                let _ = mini.unminimize();
+                let _ = mini.set_focus();
+            }
         }
     } else {
-        if let Some(main) = app.get_webview_window("main") {
-            let _ = main.show();
-            let _ = main.unminimize();
-            let _ = main.set_focus();
+        if let Some(launcher) = app.get_webview_window("launcher") {
+            #[cfg(target_os = "macos")]
+            {
+                let w = launcher.clone();
+                let _ = launcher.run_on_main_thread(move || {
+                    unsafe {
+                        if let Ok(ns_win) = w.ns_window() {
+                            let ptr = ns_win as *mut objc2::runtime::AnyObject;
+                            let _: () = objc2::msg_send![ptr, orderFrontRegardless];
+                        }
+                    }
+                });
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = launcher.show();
+                let _ = launcher.set_focus();
+            }
         }
     }
+    Ok(())
+}
+
+/// Show (or create) the full dashboard window and navigate it directly to the
+/// requested route with conditions encoded as URL query params.
+///
+/// The frontend reads `?openCreate=true&isFree=true` via `useSearchParams` —
+/// no separate Tauri event is needed, and there is no race condition between
+/// window creation and event delivery.
+///
+/// Called from the widget for: Start Session, Buy Credits, Past Sessions, Sign In.
+/// The dashboard window is NOT opened for any other widget interaction.
+#[tauri::command]
+async fn open_main_dashboard(
+    app: AppHandle,
+    route: Option<String>,
+    show_create: Option<bool>,
+    is_free: Option<bool>,
+) -> Result<(), String> {
+    // ── 1. Create the main window lazily — only when the user explicitly needs it ──
+    let is_new_window = app.get_webview_window("main").is_none();
+
+    let main_win = if let Some(win) = app.get_webview_window("main") {
+        win
+    } else {
+        let nav_handle = app.clone();
+        WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
+            .title("CraftVita")
+            .inner_size(1200.0, 800.0)
+            .center()
+            .resizable(false)
+            .maximized(true)
+            .skip_taskbar(false)
+            .content_protected(false)
+            .on_navigation(move |url| {
+                let scheme = url.scheme();
+                let host = url.host_str().unwrap_or("");
+                // Allow internal app URLs in both dev and production.
+                if scheme == "tauri"
+                    || host == "localhost"
+                    || host == "tauri.localhost"
+                    || host == "127.0.0.1"
+                {
+                    return true;
+                }
+                // Allow Razorpay payment gateway pages to open inside the window.
+                if host.ends_with("razorpay.com") || host.ends_with("razorpay.in") {
+                    return true;
+                }
+                // All other external URLs open in the system browser.
+                let _ = nav_handle.opener().open_url(url.as_str(), None::<&str>);
+                false
+            })
+            .build()
+            .map_err(|e| e.to_string())?
+    };
+
+    main_win.show().map_err(|e| e.to_string())?;
+    main_win.unminimize().map_err(|e| e.to_string())?;
+    main_win.set_focus().map_err(|e| e.to_string())?;
+
+    // ── 2. Navigate to the target route with conditions as URL query params ──
+    //
+    // Approach: derive the origin (scheme + host + port) from the window's
+    // current URL so it works in both dev (http://localhost:PORT) and
+    // production (tauri://localhost). Append the route as the path and encode
+    // showCreate / isFree as query params so the React frontend can read them
+    // via useSearchParams without needing a Tauri event.
+    //
+    // For NEW windows: `navigate()` cancels the default index.html load and
+    // goes directly to the target URL — no race condition with React mounting.
+    // For EXISTING windows: a full webview navigation to the new URL.
+    let route_path = route.as_deref().unwrap_or("/dashboard");
+
+    if route.is_some() || show_create.unwrap_or(false) || is_new_window {
+        let current = main_win.url().map_err(|e| e.to_string())?;
+
+        // Extract origin: scheme://host[:port]
+        let scheme = current.scheme();
+        let host = current.host_str().unwrap_or("localhost");
+        let mut origin = format!("{}://{}", scheme, host);
+        if let Some(port) = current.port() {
+            origin = format!("{}:{}", origin, port);
+        }
+
+        // Build the full URL: origin + /route?params
+        let raw = format!("{}{}", origin, route_path);
+        let mut nav_url = NavUrl::parse(&raw).map_err(|e| e.to_string())?;
+
+        // Append condition params so the frontend knows what action to trigger.
+        {
+            let mut qp = nav_url.query_pairs_mut();
+            if show_create.unwrap_or(false) {
+                qp.append_pair("openCreate", "true");
+            }
+            if is_free.unwrap_or(false) {
+                qp.append_pair("isFree", "true");
+            }
+        }
+
+        main_win.navigate(nav_url).map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+/// Position and show the launcher widget with proper OS-level floating settings.
+/// Mirrors the logic in `show_mini_top_center` but targets the "launcher" window.
+///
+/// SAFETY NOTE: This function calls objc2::msg_send! (NSWindow APIs on macOS)
+/// which must run on the main thread. It is called directly from setup() which
+/// runs on the main thread. The macOS block uses run_on_main_thread as a safety
+/// net in case it is ever called from a tokio worker via invoke.
+#[tauri::command]
+fn show_launcher_widget(app: AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("launcher")
+        .ok_or("launcher window not found")?;
+
+    window
+        .set_size(LogicalSize::new(460u32, 260u32))
+        .map_err(|e| e.to_string())?;
+
+    let monitor = window
+        .primary_monitor()
+        .map_err(|e| e.to_string())?
+        .ok_or("no primary monitor")?;
+
+    let screen = monitor.size();
+    let size = window.outer_size().map_err(|e| e.to_string())?;
+    let x = (screen.width as i32 - size.width as i32) / 2;
+    let y = 20i32;
+
+    window
+        .set_position(PhysicalPosition { x, y })
+        .map_err(|e| e.to_string())?;
+    window.set_minimizable(false).map_err(|e| e.to_string())?;
+    window.set_maximizable(false).map_err(|e| e.to_string())?;
+
+    // ── macOS: atomic level + show in one run_on_main_thread block ────────
+    //
+    // Same race-condition fix as show_mini_top_center. See that function for
+    // the detailed explanation. TL;DR: run_on_main_thread enqueues to the
+    // Winit event-loop user-event queue, so any Tauri call made AFTER it on
+    // the calling thread may execute BEFORE the closure. We therefore put ALL
+    // macOS show/level/focus work inside one closure and skip set_focus() on
+    // the outer call path for macOS.
+    //
+    // orderFrontRegardless — shows the overlay even when the app is inactive.
+    // activateIgnoringOtherApps — lets the widget receive key events.
+    #[cfg(target_os = "macos")]
+    {
+        let win_clone = window.clone();
+        window
+            .run_on_main_thread(move || {
+                const NS_STATUS_WINDOW_LEVEL: i64 = 25;
+                unsafe {
+                    if let Ok(ns_win) = win_clone.ns_window() {
+                        let ptr = ns_win as *mut objc2::runtime::AnyObject;
+                        // 1. Set level before showing — compositor locks at
+                        //    the level the window has when first ordered front.
+                        let _: () = objc2::msg_send![ptr, setLevel: NS_STATUS_WINDOW_LEVEL];
+                        // 2. canJoinAllSpaces | stationary | ignoresCycle | fullScreenAuxiliary
+                        let behavior: u64 = 1 | 16 | 64 | 256;
+                        let _: () = objc2::msg_send![ptr, setCollectionBehavior: behavior];
+                        // 3. Show regardless of app-active state.
+                        let _: () = objc2::msg_send![ptr, orderFrontRegardless];
+                        // 4. Activate so the widget can receive key events.
+                        let app_cls = objc2::class!(NSApplication);
+                        let ns_app: *mut objc2::runtime::AnyObject =
+                            objc2::msg_send![app_cls, sharedApplication];
+                        let _: () = objc2::msg_send![ns_app, activateIgnoringOtherApps: true];
+                    }
+                }
+            })
+            .map_err(|e| e.to_string())?;
+    }
+
+    // ── Windows ───────────────────────────────────────────────────────────
+    #[cfg(target_os = "windows")]
+    {
+        window.show().map_err(|e| e.to_string())?;
+        window.set_always_on_top(true).map_err(|e| e.to_string())?;
+        if let Ok(hwnd) = window.hwnd() {
+            let win_hwnd = windows::Win32::Foundation::HWND(hwnd.0);
+            let _ = winvd::pin_window(win_hwnd);
+            remove_window_border(win_hwnd);
+            unsafe {
+                let _ = windows::Win32::UI::Shell::SetWindowSubclass(
+                    win_hwnd, Some(mini_subclass_proc), 1, 0,
+                );
+            }
+        }
+    }
+
+    // ── Linux ─────────────────────────────────────────────────────────────
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        window.show().map_err(|e| e.to_string())?;
+        window.set_always_on_top(true).map_err(|e| e.to_string())?;
+    }
+
+    // macOS: focus handled by activateIgnoringOtherApps in the block above.
+    #[cfg(not(target_os = "macos"))]
+    window.set_focus().map_err(|e| e.to_string())?;
+
     Ok(())
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() { 
+pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_oauth::init())
@@ -750,57 +1018,37 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .setup(|app| {
-            // Create the main window manually so we can attach a navigation_handler.
-            // This intercepts all external URLs (e.g. Google OAuth) and opens them
-            // in the OS system browser instead of the Tauri webview.
-            let handle = app.handle().clone();
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
-                .title("CraftVita")
-                .inner_size(1200.0, 800.0)
-                .center()
-                .resizable(false)
-                .maximized(true)
-                .skip_taskbar(true)
-                .content_protected(false)
-                .on_navigation(move |url| {
-                    let scheme = url.scheme();
-                    let host = url.host_str().unwrap_or("");
-
-                    // Allow Tauri internal URLs and local dev server
-                    if scheme == "tauri"
-                        || host == "localhost"
-                        || host == "tauri.localhost"
-                        || host == "127.0.0.1"
-                    {
-                        return true;
-                    }
-
-                    // Allow Razorpay domains to load inside the webview
-                    // (required for the checkout iframe and payment flow)
-                    if host.ends_with("razorpay.com") || host.ends_with("razorpay.in") {
-                        return true;
-                    }
-
-                    // All other external URLs → OS system browser
-                    let _ = handle.opener().open_url(url.as_str(), None::<&str>);
-                    false
-                })
-                .build()?;
-            
-            if let Some(main) = app.get_webview_window("main") {
-                let _ = main.set_focus();
-                if let Some(launcher) = app.get_webview_window("launcher") {
-                    let _ = launcher.hide();
-                }
+            // ── macOS: switch to Accessory activation policy ───────────────
+            //
+            // ROOT CAUSE FIX: The default NSApplicationActivationPolicyRegular
+            // (0) makes macOS treat us as a foreground app whose windows can be
+            // beaten by any active app, even at NSStatusWindowLevel (25).
+            //
+            // NSApplicationActivationPolicyAccessory (1) means:
+            //   - No dock icon / menu bar (pure overlay / background app)
+            //   - Our windows float above ALL regular-policy windows
+            //   - We never steal the active-app indicator from the frontmost app
+            //
+            // This is how Loom, Parakeet, Raycast, and every true macOS overlay
+            // achieves persistent above-all-others behavior.
+            //
+            // setup() runs on the main thread — safe to call ObjC directly.
+            #[cfg(target_os = "macos")]
+            unsafe {
+                let app_cls = objc2::class!(NSApplication);
+                let ns_app: *mut objc2::runtime::AnyObject =
+                    objc2::msg_send![app_cls, sharedApplication];
+                // 1 = NSApplicationActivationPolicyAccessory
+                let _: () = objc2::msg_send![ns_app, setActivationPolicy: 1i64];
             }
+
+            // ── Apply OS chrome removal to the mini overlay ────────────────
             #[cfg(target_os = "windows")]
             {
                 if let Some(win) = app.get_webview_window("mini") {
                     if let Ok(hwnd) = win.hwnd() {
                         let win_hwnd = windows::Win32::Foundation::HWND(hwnd.0);
                         remove_window_border(win_hwnd);
-                        // Install rounded-corner click-through subclass so the
-                        // transparent corners pass clicks to whatever's under us.
                         unsafe {
                             let _ = windows::Win32::UI::Shell::SetWindowSubclass(
                                 win_hwnd, Some(mini_subclass_proc), 1, 0,
@@ -808,95 +1056,72 @@ pub fn run() {
                         }
                     }
                 }
-
-                if let Some(launcher) = app.get_webview_window("launcher") {
-                    if let Ok(hwnd) = launcher.hwnd() {
-                        let win_hwnd = windows::Win32::Foundation::HWND(hwnd.0);
-                        remove_window_border(win_hwnd);
-                    }
-                    
-                    // Position at top center
-                    if let Ok(Some(monitor)) = launcher.primary_monitor() {
-                        let screen_size = monitor.size();
-                        if let Ok(size) = launcher.outer_size() {
-                            let x = (screen_size.width as i32 - size.width as i32) / 2;
-                            let y = 10; 
-                            let _ = launcher.set_position(PhysicalPosition { x, y });
-                        }
-                    }
-                }
             }
 
-            // Deep-link handler — focuses main window whenever the OS opens
-            // craftvita:// (e.g. the "Return to ScribeShade" button in the
-            // browser after OAuth). The JS onOpenUrl listener in App.tsx
-            // handles URL routing; Rust only needs to bring the window forward.
+            // ── Launch the compact widget as the primary interface ─────────
+            // show_launcher_widget calls objc2::msg_send! (NSWindow ObjC APIs)
+            // which MUST run on the main thread. setup() already runs on the
+            // main thread, so call it directly — never via async_runtime::spawn
+            // which would put it on a tokio worker and cause EXC_BREAKPOINT/SIGTRAP.
+            if let Err(e) = show_launcher_widget(app.handle().clone()) {
+                eprintln!("[setup] show_launcher_widget failed: {e}");
+            }
+
+            // ── Deep-link: open widget (or main if already open) ──────────
             let deep_link_handle = app.handle().clone();
             app.handle().deep_link().on_open_url(move |_event| {
-                if let Some(win) = deep_link_handle.get_webview_window("main") {
-                    let _ = win.show();
-                    let _ = win.set_focus();
+                // If a main window exists bring it forward (OAuth callback),
+                // otherwise just ensure the widget is visible.
+                if let Some(main) = deep_link_handle.get_webview_window("main") {
+                    let _ = main.show();
+                    let _ = main.set_focus();
+                } else if let Some(widget) = deep_link_handle.get_webview_window("launcher") {
+                    // macOS: orderFrontRegardless preserves NSStatusWindowLevel;
+                    // show()/set_focus() would reset it via makeKeyAndOrderFront.
+                    #[cfg(target_os = "macos")]
+                    {
+                        let w = widget.clone();
+                        let _ = widget.run_on_main_thread(move || {
+                            unsafe {
+                                if let Ok(ns_win) = w.ns_window() {
+                                    let ptr = ns_win as *mut objc2::runtime::AnyObject;
+                                    let _: () = objc2::msg_send![ptr, orderFrontRegardless];
+                                }
+                            }
+                        });
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        let _ = widget.show();
+                        let _ = widget.set_focus();
+                    }
                 }
             });
 
-            // Handle the case where the app was cold-launched by a craftvita://
-            // deep link (e.g. OS invoked the .app bundle directly). The JS
-            // onOpenUrl will also fire, but focusing here ensures the window is
-            // visible before the React router processes the URL.
             if let Ok(Some(_)) = app.handle().deep_link().get_current() {
-                if let Some(win) = app.handle().get_webview_window("main") {
-                    let _ = win.show();
-                    let _ = win.set_focus();
+                if let Some(widget) = app.handle().get_webview_window("launcher") {
+                    #[cfg(target_os = "macos")]
+                    {
+                        let w = widget.clone();
+                        let _ = widget.run_on_main_thread(move || {
+                            unsafe {
+                                if let Ok(ns_win) = w.ns_window() {
+                                    let ptr = ns_win as *mut objc2::runtime::AnyObject;
+                                    let _: () = objc2::msg_send![ptr, orderFrontRegardless];
+                                }
+                            }
+                        });
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        let _ = widget.show();
+                        let _ = widget.set_focus();
+                    }
                 }
             }
 
-            // Window event handlers for main and mini
-            let main_win = app.get_webview_window("main").unwrap();
-            let main_handle = app.handle().clone();
-            main_win.on_window_event(move |event| {
-                if let tauri::WindowEvent::CloseRequested { .. } = event {
-                    main_handle.exit(0);
-                } else if let tauri::WindowEvent::Resized(_) = event {
-                    let main = main_handle.get_webview_window("main").unwrap();
-                    if main.is_minimized().unwrap_or(false) {
-                        // On Windows, minimize usually hides the window from view but keeps it in taskbar.
-                        // We want to hide it completely so only our floating windows are seen.
-                        let _ = main.hide();
-
-                        if SESSION_ACTIVE.load(Ordering::SeqCst) {
-                            if let Some(mini) = main_handle.get_webview_window("mini") {
-                                let _ = mini.show();
-                            }
-                        } else {
-                            if let Some(launcher) = main_handle.get_webview_window("launcher") {
-                                let _ = launcher.show();
-                            }
-                        }
-                    }
-                } else if let tauri::WindowEvent::Focused(focused) = event {
-                    if !*focused {
-                        // Main window lost focus
-                        let main = main_handle.get_webview_window("main").unwrap();
-                        let is_minimized = main.is_minimized().unwrap_or(false);
-                        let is_visible = main.is_visible().unwrap_or(false);
-
-                        // Only show launcher if main is truly "away" (minimized or hidden)
-                        if !is_visible || is_minimized {
-                            if !SESSION_ACTIVE.load(Ordering::SeqCst) {
-                                if let Some(launcher) = main_handle.get_webview_window("launcher") {
-                                    let _ = launcher.show();
-                                }
-                            }
-                        }
-                    } else {
-                        // Main window gained focus
-                        if let Some(launcher) = main_handle.get_webview_window("launcher") {
-                            let _ = launcher.hide();
-                        }
-                    }
-                }
-            });
-
+            // ── Mini window events ─────────────────────────────────────────
+            // When the active-session overlay is minimized, restore the widget.
             if let Some(mini_win) = app.get_webview_window("mini") {
                 let mini_handle = app.handle().clone();
                 mini_win.on_window_event(move |event| {
@@ -904,26 +1129,85 @@ pub fn run() {
                         let mini = mini_handle.get_webview_window("mini").unwrap();
                         if mini.is_minimized().unwrap_or(false) {
                             let _ = mini.hide();
-                            if let Some(launcher) = mini_handle.get_webview_window("launcher") {
-                                let _ = launcher.show();
-                            }
-                        }
-                    } else if let tauri::WindowEvent::Focused(focused) = event {
-                        if !*focused {
-                            // Mini window lost focus
-                            if SESSION_ACTIVE.load(Ordering::SeqCst) {
-                                if let Some(launcher) = mini_handle.get_webview_window("launcher") {
-                                    let _ = launcher.show();
+                            if !SESSION_ACTIVE.load(Ordering::SeqCst) {
+                                if let Some(widget) = mini_handle.get_webview_window("launcher") {
+                                    // macOS: avoid makeKeyAndOrderFront path.
+                                    #[cfg(target_os = "macos")]
+                                    {
+                                        let w = widget.clone();
+                                        let _ = widget.run_on_main_thread(move || {
+                                            unsafe {
+                                                if let Ok(ns_win) = w.ns_window() {
+                                                    let ptr = ns_win as *mut objc2::runtime::AnyObject;
+                                                    let _: () = objc2::msg_send![ptr, orderFrontRegardless];
+                                                }
+                                            }
+                                        });
+                                    }
+                                    #[cfg(not(target_os = "macos"))]
+                                    {
+                                        let _ = widget.show();
+                                        let _ = widget.set_focus();
+                                    }
                                 }
-                            }
-                        } else {
-                            // Mini window gained focus
-                            if let Some(launcher) = mini_handle.get_webview_window("launcher") {
-                                let _ = launcher.hide();
                             }
                         }
                     }
                 });
+            }
+
+            // ── macOS: re-apply NSStatusWindowLevel on every Focused event ─
+            //
+            // macOS resets window levels after any focus / show lifecycle
+            // event (Tauri internally calls makeKeyAndOrderFront which
+            // re-enters the Quartz Compositor at the current level — which
+            // may have been downgraded to NSFloatingWindowLevel (3) by
+            // system events like Mission Control, Exposé, or another app
+            // stealing focus).
+            //
+            // The fix: install a persistent on_window_event listener on both
+            // overlay windows. On every Focused(_) event we re-apply level 25
+            // (NSStatusWindowLevel) atomically on the main thread. This costs
+            // one msg_send per focus event and is invisible to the user.
+            #[cfg(target_os = "macos")]
+            {
+                // launcher window — always shown
+                if let Some(win) = app.get_webview_window("launcher") {
+                    let w = win.clone();
+                    win.on_window_event(move |event| {
+                        if let tauri::WindowEvent::Focused(_) = event {
+                            let ww = w.clone();
+                            let _ = w.run_on_main_thread(move || {
+                                const NS_STATUS_WINDOW_LEVEL: i64 = 25;
+                                unsafe {
+                                    if let Ok(ns_win) = ww.ns_window() {
+                                        let ptr = ns_win as *mut objc2::runtime::AnyObject;
+                                        let _: () = objc2::msg_send![ptr, setLevel: NS_STATUS_WINDOW_LEVEL];
+                                    }
+                                }
+                            });
+                        }
+                    });
+                }
+
+                // mini overlay — shown during active sessions
+                if let Some(win) = app.get_webview_window("mini") {
+                    let w = win.clone();
+                    win.on_window_event(move |event| {
+                        if let tauri::WindowEvent::Focused(_) = event {
+                            let ww = w.clone();
+                            let _ = w.run_on_main_thread(move || {
+                                const NS_STATUS_WINDOW_LEVEL: i64 = 25;
+                                unsafe {
+                                    if let Ok(ns_win) = ww.ns_window() {
+                                        let ptr = ns_win as *mut objc2::runtime::AnyObject;
+                                        let _: () = objc2::msg_send![ptr, setLevel: NS_STATUS_WINDOW_LEVEL];
+                                    }
+                                }
+                            });
+                        }
+                    });
+                }
             }
 
             Ok(())
@@ -932,7 +1216,8 @@ pub fn run() {
             toggle_floating, capture_screen, show_mini_top_center, set_mini_state,
             start_audio_stream, stop_audio_stream, list_audio_devices,
             start_display_audio_stream, stop_display_audio_stream,
-            set_session_active, handle_launcher_click
+            set_session_active, handle_launcher_click,
+            open_main_dashboard, show_launcher_widget,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

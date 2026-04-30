@@ -10,6 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "label": "mini",
@@ -24,25 +25,25 @@
         "resizable": false,
         "minimizable": true,
         "maximizable": false,
-        "contentProtected": true,
-        "skipTaskbar": true,
+        "contentProtected": false,
+        "skipTaskbar": false,
         "alwaysOnTop": true,
         "visibleOnAllWorkspaces": true
       },
       {
         "label": "launcher",
-        "title": "Launcher",
+        "title": "CraftVita",
         "url": "launcher.html",
-        "width": 80,
-        "height": 80,
+        "width": 460,
+        "height": 260,
         "transparent": true,
         "decorations": false,
         "visible": false,
         "center": true,
         "resizable": false,
-        "contentProtected": true,
+        "contentProtected": false,
         "alwaysOnTop": true,
-        "skipTaskbar": true,
+        "skipTaskbar": false,
         "visibleOnAllWorkspaces": true
       }
     ],

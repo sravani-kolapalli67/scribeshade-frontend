@@ -2,8 +2,13 @@ fn main() {
     #[cfg(target_os = "macos")]
     {
         // screencapturekit-rs links against Swift runtime libraries.
-        // Without these rpaths the dynamic linker cannot find
-        // libswift_Concurrency.dylib at runtime and the app crashes.
+        // The system Swift runtime at /usr/lib/swift MUST be added to the
+        // rpath FIRST so dyld picks it up before the Xcode toolchain copy.
+        // Reversing this order causes "Class implemented in both …" duplicates
+        // because dyld loads the Xcode swift-5.5 libswift_Concurrency.dylib
+        // and then finds the system one, logging duplicate-class warnings.
+        println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
+
         let dev_dir = std::process::Command::new("xcode-select")
             .arg("-p")
             .output()
@@ -16,7 +21,7 @@ fn main() {
                 "{}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx",
                 dev_dir
             );
-            // swift-5.5 is where libswift_Concurrency.dylib lives
+            // swift-5.5 is where libswift_Concurrency.dylib lives in Xcode
             let toolchain_swift55 = format!(
                 "{}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.5/macosx",
                 dev_dir
@@ -25,10 +30,10 @@ fn main() {
                 "{}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib/swift",
                 dev_dir
             );
+            // These are fallback paths; system path above takes precedence.
             println!("cargo:rustc-link-arg=-Wl,-rpath,{}", toolchain_swift);
             println!("cargo:rustc-link-arg=-Wl,-rpath,{}", toolchain_swift55);
             println!("cargo:rustc-link-arg=-Wl,-rpath,{}", sdk_swift);
-            println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
         }
     }
     tauri_build::build()

@@ -12,6 +12,7 @@ import { toast } from "sonner";
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
+import { isTauri } from "@/lib/utils";
 
 import {
   ResizableHandle,
@@ -33,6 +34,7 @@ import { useCreditsBalance } from "@/hooks/useCreditsBalance";
 
 export default function ActiveSession() {
   useEffect(() => {
+    if (!isTauri()) return;
     invoke("set_session_active", { active: true });
     return () => {
       invoke("set_session_active", { active: false });
@@ -502,7 +504,7 @@ export default function ActiveSession() {
   const lastMinimizeTriggerRef = useRef(0);
 
   const handleOpenOverlay = async () => {
-    if (isOpeningOverlayRef.current) return;
+    if (!isTauri() || isOpeningOverlayRef.current) return;
     isOpeningOverlayRef.current = true;
 
     try {
@@ -522,6 +524,7 @@ export default function ActiveSession() {
     let isMounted = true;
 
     const setup = async () => {
+      if (!isTauri()) return;
       const window = getCurrentWindow();
       const fn = await window.onResized(async () => {
         const minimized = await window.isMinimized();
@@ -553,6 +556,7 @@ export default function ActiveSession() {
   // Sync data with overlay
   useEffect(() => {
     const syncOverlay = async () => {
+      if (!isTauri()) return;
       const combinedTranscript = messages.map((m) => m.text).join("\n");
       await emit("overlay-update", {
         transcript: combinedTranscript,
@@ -585,7 +589,7 @@ export default function ActiveSession() {
 
   // Forward AI chat responses to overlay
   useEffect(() => {
-    if (aiChat.length === 0) return;
+    if (!isTauri() || aiChat.length === 0) return;
     const latest = aiChat[aiChat.length - 1];
     const forwardToOverlay = async () => {
       await emit("overlay-ai-response", {
@@ -644,6 +648,7 @@ export default function ActiveSession() {
     const unlisteners: (() => void)[] = [];
 
     const setup = async () => {
+      if (!isTauri()) return;
       const u1 = await listen("overlay-ai-answer", () => {
         if (active) onAiAnswerRef.current();
       });

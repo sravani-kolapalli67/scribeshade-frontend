@@ -3,6 +3,7 @@ import { useUser } from "@clerk/clerk-react";
 import { useEffect } from "react";
 import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { emit } from "@tauri-apps/api/event";
 import { useSyncUser } from "@/hooks/useSyncUser";
 import "./App.css";
 import { AppSidebar } from "@/components/app-sidebar";
@@ -36,6 +37,16 @@ function App() {
   const location = useLocation();
   const navigate = useNavigate();
   useSyncUser();
+
+  // ── Auth sync: broadcast sign-out to widget ────────────────────────────────
+  // Navigation from widget → dashboard is handled via URL params (no event
+  // needed — Rust calls win.navigate(url?openCreate=true&isFree=true) so the
+  // React app loads directly at the right route with conditions in the URL.)
+  useEffect(() => {
+    if (isLoaded && !isSignedIn) {
+      emit("auth:signed-out").catch(() => undefined);
+    }
+  }, [isSignedIn, isLoaded]);
 
   // Listen for craftvita:// deep-links from the OS (e.g. "Return to ScribeShade"
   // button after OAuth, or a craftvita://oauth-callback from Clerk).

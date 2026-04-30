@@ -184,7 +184,7 @@ export function ConnectDialog({
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onCancel()}>
-      <DialogContent className="sm:max-w-lg border-none shadow-2xl rounded-3xl p-0 overflow-hidden bg-background">
+      <DialogContent className="sm:max-w-lg border-none shadow-2xl rounded-3xl p-0 overflow-hidden bg-background" aria-describedby={undefined}>
         <DialogHeader className="pt-6 px-7 pb-0">
           <DialogTitle className="text-xl font-bold tracking-tight">
             Connect

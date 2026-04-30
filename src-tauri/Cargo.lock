@@ -3935,6 +3935,7 @@ dependencies = [
  "tauri-plugin-oauth",
  "tauri-plugin-opener",
  "tokio",
+ "url",
  "windows 0.58.0",
  "winvd",
 ]

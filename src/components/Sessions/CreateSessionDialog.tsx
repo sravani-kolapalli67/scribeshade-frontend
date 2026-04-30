@@ -33,6 +33,7 @@ type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7;
 
 interface CreateSessionDialogProps {
   isFree?: boolean;
+  defaultOpen?: boolean;
 }
 
 const INITIAL_SESSION_DATA = {
@@ -51,9 +52,10 @@ const INITIAL_SESSION_DATA = {
 
 export default function CreateSessionDialog({
   isFree = false,
+  defaultOpen = false,
 }: CreateSessionDialogProps) {
   const navigate = useNavigate();
-  const [open, setOpen] = React.useState(false);
+  const [open, setOpen] = React.useState(defaultOpen);
   const [step, setStep] = React.useState<Step>(1);
   const [loading, setLoading] = React.useState(false);
   const [createdSessionId, setCreatedSessionId] = React.useState<string | null>(
@@ -198,7 +200,7 @@ export default function CreateSessionDialog({
         }}
       >
 
-        <DialogContent className="sm:max-w-2xl border-none shadow-2xl rounded-3xl p-0 overflow-hidden bg-background">
+        <DialogContent className="sm:max-w-2xl border-none shadow-2xl rounded-3xl p-0 overflow-hidden bg-background" aria-describedby={undefined}>
           <DialogHeader className="pt-6 px-8 pb-0 relative">
             <div className="flex items-center justify-between mb-2">
               <div className="space-y-1">
