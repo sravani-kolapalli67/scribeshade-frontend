@@ -131,7 +131,15 @@ export function useFreeSessionTimer({
     const h = Math.floor(totalSeconds / 3600);
     const m = Math.floor((totalSeconds % 3600) / 60);
     const s = totalSeconds % 60;
-    return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+    
+    const mm = m.toString().padStart(2, "0");
+    const ss = s.toString().padStart(2, "0");
+    
+    if (h > 0) {
+      const hh = h.toString().padStart(2, "0");
+      return `${hh}:${mm}:${ss}`;
+    }
+    return `${mm}:${ss}`;
   }, []);
 
   return {

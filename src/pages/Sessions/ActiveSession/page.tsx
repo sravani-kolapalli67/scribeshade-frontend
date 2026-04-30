@@ -308,6 +308,14 @@ export default function ActiveSession() {
             console.error("Failed to save transcript segment:", err),
           );
 
+          // Forward structured transcript to the mini overlay so it can render
+          // both sides even when native SCKit audio is unavailable (e.g. Windows).
+          if (isTauri()) {
+            emit("overlay-transcript", { sender, text, timestamp: now }).catch(
+              () => {},
+            );
+          }
+
           return [...prev, newMsg];
         });
       }

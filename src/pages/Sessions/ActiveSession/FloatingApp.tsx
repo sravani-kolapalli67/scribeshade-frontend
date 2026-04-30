@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, useCallback } from "react";
 import { createRoot } from "react-dom/client";
 import { listen, emit } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -24,9 +24,18 @@ import {
   Star,
   LogOut,
   Loader2,
+  Headphones,
+  HeadphoneOff,
+  AlignJustify,
 } from "lucide-react";
 import { ChatActionButtons } from "./components/ChatActionButtons";
 import { ModelSelector } from "./components/ModelSelector";
+import { useFreeSessionTimer } from "@/hooks/useFreeSessionTimer";
+import { useDeepgram } from "@/hooks/useDeepgram";
+import { useNativeTabTranscription } from "@/hooks/useNativeTabTranscription";
+import { useAIChat } from "@/hooks/useAIChat";
+import { useSessionHeartbeat } from "@/hooks/useSessionHeartbeat";
+import { useSessionEvents } from "@/hooks/useSessionEvents";
 import { cn } from "@/lib/utils";
 import {
   Tooltip,
@@ -35,7 +44,7 @@ import {
   TooltipProvider,
 } from "@/components/ui/tooltip";
 import "@/App.css";
-import { toast } from "sonner";
+import { toast, Toaster } from "sonner";
 
 const KEYWORD_CONFIGS = [
   { color: "text-blue-400" },
@@ -54,26 +63,49 @@ const getKeywordConfig = (text: string) => {
   return KEYWORD_CONFIGS[Math.abs(hash) % KEYWORD_CONFIGS.length];
 };
 
-// ─── Types
-interface OverlayData {
-  transcript: string;
-  interimTranscript?: string;
-  status: string;
-  isMicActive: boolean;
-  isMicConnecting: boolean;
-  timerText: string | null;
-  sessionId: string | null;
-  selectedModel?: string;
+// â”€â”€â”€ Types
+interface SessionInitData {
+  sessionId: string;
+  isFree: boolean;
+  aiModel: string;
+  language: string;
+  companyName: string;
+  startedAt: string | null;
+  maxAllowedMinutes: number | null;
 }
 
-interface AIResponse {
+interface TranscriptMessage {
+  id: string;
+  sender: "User" | "Interviewer";
+  text: string;
+  timestamp: number;
+}
+
+interface AIDisplayResponse {
   text: string;
   isStreaming: boolean;
   messageId: string;
-  sender?: "User" | "AI" | "Interviewer";
 }
 
-// ─── CodeBlock (for markdown rendering)
+const getLanguageCode = (lang: string): string => {
+  const mapping: Record<string, string> = {
+    English: "en",
+    Spanish: "es",
+    French: "fr",
+    German: "de",
+    Hindi: "hi",
+    Arabic: "ar",
+    Chinese: "zh",
+    Portuguese: "pt",
+    Japanese: "ja",
+  };
+  return mapping[lang] || "en";
+};
+
+const DEEPGRAM_KEY = import.meta.env.VITE_DEEPGRAM_API_KEY || "";
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "";
+
+// â”€â”€â”€ CodeBlock (for markdown rendering)
 const CodeBlock = ({
   children,
   language,
@@ -158,7 +190,7 @@ const CodeBlock = ({
   );
 };
 
-// ─── Response Parser ────────────────────────────────────────────────
+// â”€â”€â”€ Response Parser â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Splits an AI response into optional question + answer sections so we can
 // render them with ParakeetAI-style iconic headers.
 interface ParsedSection {
@@ -190,9 +222,9 @@ const parseAIResponse = (raw: string): ParsedSection => {
   return { answer: text };
 };
 
-// ─── Answer Area ─────────────────────────────────────────────────────
+// â”€â”€â”€ Answer Area â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const AnswerArea: React.FC<{
-  responses: AIResponse[];
+  responses: AIDisplayResponse[];
   isStreaming: boolean;
 }> = ({ responses, isStreaming }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -219,7 +251,7 @@ const AnswerArea: React.FC<{
             {parsed.question && (
               <div className="flex items-start gap-2 mb-3 text-[13.5px] leading-relaxed text-white">
                 <MessageSquare className="h-4 w-4 mt-0.5 shrink-0 text-white/60" />
-                <div className="flex-1 break-words">
+                <div className="flex-1 wrap-break-word">
                   <span className="font-bold">Question:</span>{" "}
                   <span className="font-medium text-white/90">
                     {parsed.question}
@@ -238,7 +270,7 @@ const AnswerArea: React.FC<{
             {/* Markdown Content */}
             <div
               className={[
-                "text-[13px] leading-relaxed font-medium text-white break-words",
+                "text-[13px] leading-relaxed font-medium text-white wrap-break-word",
                 "[&_p]:mb-3 [&_p:last-child]:mb-0",
                 "[&_ul]:list-disc [&_ul]:pl-5 [&_ul]:mb-3 [&_ul]:space-y-1",
                 "[&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:mb-3 [&_ol]:space-y-1",
@@ -317,63 +349,345 @@ const AnswerArea: React.FC<{
   );
 };
 
-// ─── Main FloatingApp ────────────────────────────────────────────────
+// â”€â”€â”€ Main FloatingApp â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const FloatingApp: React.FC = () => {
-  const [data, setData] = useState<OverlayData>({
-    transcript: "",
-    status: "Initializing",
-    isMicActive: false,
-    isMicConnecting: false,
-    timerText: null,
-    sessionId: null,
-    selectedModel: "google/gemma-4-26b-a4b-it",
-  });
+  // â”€â”€ Session context (received from launcher via "session-init" event) â”€â”€â”€
+  const [sessionInfo, setSessionInfo] = useState<SessionInitData | null>(null);
+  const [selectedModel, setSelectedModel] = useState(
+    "google/gemma-4-26b-a4b-it",
+  );
 
-  const [responses, setResponses] = useState<AIResponse[]>([]);
-  const [isAnswering, setIsAnswering] = useState(false);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [inputValue, setInputValue] = useState("");
-  const [isResponsesExpanded, setIsResponsesExpanded] = useState(false);
-  const [currentResponseIndex, setCurrentResponseIndex] = useState(0);
+  const [messages, setMessages] = useState<TranscriptMessage[]>([]);
   const [isEnding, setIsEnding] = useState(false);
   const [isWindowCollapsed, setIsWindowCollapsed] = useState(false);
+  const [isResponsesExpanded, setIsResponsesExpanded] = useState(false);
+  const [isTranscriptExpanded, setIsTranscriptExpanded] = useState(false);
+  const [currentResponseIndex, setCurrentResponseIndex] = useState(0);
+  const [inputValue, setInputValue] = useState("");
+  const [creditWarning, setCreditWarning] = useState<number | null>(null);
+  // Controls whether remote (interviewer/tab) audio transcription is active
+  const [isTabEnabled, setIsTabEnabled] = useState(true);
+
   const rootRef = useRef<HTMLDivElement>(null);
-  // Auto-advance to latest response and show panel when new responses arrive
+  const lastSentHeightRef = useRef<number>(185);
+  const heightDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isEmittingRef = useRef(false);
+
+  // â”€â”€ Stable refs so event-listeners never stale â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const sessionInfoRef = useRef<SessionInitData | null>(null);
+  const messagesRef = useRef<TranscriptMessage[]>([]);
+  const selectedModelRef = useRef(selectedModel);
+
+  sessionInfoRef.current = sessionInfo;
+  messagesRef.current = messages;
+  selectedModelRef.current = selectedModel;
+
+  // â”€â”€ AI Chat (direct backend calls) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const {
+    aiChat,
+    isAnalyzing,
+    isAnswering,
+    handleAiAnswer,
+    handleAnalyzeScreen,
+    handleCustomQuery,
+  } = useAIChat();
+
+  // AI messages are always sender="AI" in aiChat
+  const aiResponses = aiChat;
+
+  const endSessionNow = useCallback(async () => {
+    if (isEnding) return;
+    setIsEnding(true);
+    const info = sessionInfoRef.current;
+    if (!info) {
+      await getCurrentWindow().close();
+      return;
+    }
+    try {
+      const transcript = messagesRef.current
+        .map((m) => `[${m.sender}]: ${m.text}`)
+        .join("\n");
+      const aiUsage = parseInt(
+        localStorage.getItem(`aiUsage_${info.sessionId}`) || "0",
+      );
+
+      // Parallelize cleanup operations: call backend, reset Rust state, and notify main window
+      await Promise.all([
+        fetch(`${BACKEND_URL}/api/session/${info.sessionId}/deactivate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ transcript, aiUsage }),
+        }).catch((err) => console.error("Deactivate fetch failed:", err)),
+        invoke("set_session_active", { active: false }).catch(() => {}),
+        emit("overlay-end-session-direct").catch(() => {}),
+      ]);
+
+      localStorage.removeItem(`aiUsage_${info.sessionId}`);
+    } catch (err) {
+      console.error("Error ending session:", err);
+    } finally {
+      await getCurrentWindow().close();
+    }
+  }, [isEnding]);
+
+  const endSessionNowRef = useRef(endSessionNow);
+  endSessionNowRef.current = endSessionNow;
+
+  const onTimeUp = useCallback(() => {
+    toast.info("Free session time is up!");
+    endSessionNowRef.current();
+  }, []);
+
+  const { formattedTime } = useFreeSessionTimer({
+    sessionId: sessionInfo?.sessionId,
+    onTimeUp,
+    maxAllowedMinutes: sessionInfo?.maxAllowedMinutes ?? null,
+  });
+
+  // â”€â”€ Credit callbacks (stable) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const handleExhausted = useCallback(() => {
+    toast.error("Session ended â€” credits exhausted.", { duration: 6000 });
+    endSessionNowRef.current();
+  }, []);
+
+  const handleCreditWarning = useCallback((remaining: number) => {
+    setCreditWarning(remaining);
+    toast.warning(
+      `Only ${remaining} minute${remaining === 1 ? "" : "s"} of credit remaining!`,
+      { duration: 8000 },
+    );
+  }, []);
+
+  // â”€â”€ Heartbeat (paid sessions) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  useSessionHeartbeat({
+    sessionId: sessionInfo?.sessionId,
+    enabled: !!(sessionInfo && !sessionInfo.isFree && sessionInfo.startedAt),
+    startedAt: sessionInfo?.startedAt ?? null,
+    onExhausted: handleExhausted,
+    onWarning: handleCreditWarning,
+  });
+
+  // â”€â”€ SSE events (paid sessions) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  useSessionEvents({
+    sessionId: sessionInfo?.sessionId,
+    enabled: !!(sessionInfo && !sessionInfo.isFree && sessionInfo.startedAt),
+    onExhausted: handleExhausted,
+    onWarning: handleCreditWarning,
+  });
+
+  // â”€â”€ Stable transcript callbacks (use refs so Deepgram WS never stales) â”€â”€
+  const handleUserTranscript = useCallback(
+    (text: string, isFinal: boolean) => {
+      if (!isFinal || !text.trim()) return;
+      const sid = sessionInfoRef.current?.sessionId;
+      setMessages((prev) => {
+        const now = Date.now();
+        const normalized = text.toLowerCase().trim().replace(/[.!?]/g, "");
+        const isDupe = prev.some((m) => {
+          if (m.sender === "User") return false;
+          if (now - m.timestamp > 2000) return false;
+          const existing = m.text.toLowerCase().trim().replace(/[.!?]/g, "");
+          return (
+            existing === normalized ||
+            existing.includes(normalized) ||
+            normalized.includes(existing)
+          );
+        });
+        if (isDupe) return prev;
+        if (sid) {
+          fetch(`${BACKEND_URL}/api/session/${sid}/save-message`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              role: "USER",
+              question: text,
+              answer: "",
+              time: new Date().toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              }),
+            }),
+          }).catch(console.error);
+        }
+        return [
+          ...prev,
+          {
+            id: Math.random().toString(36).slice(7),
+            sender: "User" as const,
+            text,
+            timestamp: now,
+          },
+        ];
+      });
+    },
+    [], // no deps â€” reads sessionInfoRef
+  );
+
+  const handleInterviewerTranscript = useCallback(
+    (text: string, isFinal: boolean) => {
+      if (!isFinal || !text.trim()) return;
+      const sid = sessionInfoRef.current?.sessionId;
+      setMessages((prev) => {
+        const now = Date.now();
+        const normalized = text.toLowerCase().trim().replace(/[.!?]/g, "");
+        const isDupe = prev.some((m) => {
+          if (m.sender === "Interviewer") return false;
+          if (now - m.timestamp > 2000) return false;
+          const existing = m.text.toLowerCase().trim().replace(/[.!?]/g, "");
+          return (
+            existing === normalized ||
+            existing.includes(normalized) ||
+            normalized.includes(existing)
+          );
+        });
+        if (isDupe) return prev;
+        if (sid) {
+          fetch(`${BACKEND_URL}/api/session/${sid}/save-message`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              role: "INTERVIEWER",
+              question: text,
+              answer: "",
+              time: new Date().toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              }),
+            }),
+          }).catch(console.error);
+        }
+        return [
+          ...prev,
+          {
+            id: Math.random().toString(36).slice(7),
+            sender: "Interviewer" as const,
+            text,
+            timestamp: now,
+          },
+        ];
+      });
+    },
+    [], // no deps â€” reads sessionInfoRef
+  );
+
+  const micTranscription = useDeepgram({
+    apiKey: DEEPGRAM_KEY,
+    model: "nova-3",
+    language: getLanguageCode(sessionInfo?.language ?? "English"),
+    onTranscript: handleUserTranscript,
+  });
+
+  // Keep ref fresh so session-init listener can call startTranscription
+  const startMicRef = useRef(micTranscription.startTranscription);
+  startMicRef.current = micTranscription.startTranscription;
+
+  // â”€â”€ Tab / system audio transcription (Interviewer) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const tabTranscription = useNativeTabTranscription({
+    apiKey: DEEPGRAM_KEY,
+    model: "nova-3",
+    language: getLanguageCode(sessionInfo?.language ?? "English"),
+    onTranscript: handleInterviewerTranscript,
+    // enabled only when session is active AND user hasn't manually disabled remote audio
+    enabled: !!sessionInfo && isTabEnabled,
+  });
+
+  // â”€â”€ Listen for session-init from launcher â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   useEffect(() => {
-    if (responses.length > 0) {
-      setCurrentResponseIndex(responses.length - 1);
+    let unlisten: (() => void) | undefined;
+    listen<SessionInitData>("session-init", (event) => {
+      const info = event.payload;
+      setSessionInfo(info);
+      setSelectedModel(info.aiModel || "google/gemma-4-26b-a4b-it");
+      // Notify Rust that a session is now active
+      invoke("set_session_active", { active: true }).catch(() => {});
+      // Auto-start mic after a short delay so Deepgram hook has settled
+      setTimeout(() => startMicRef.current(), 500);
+    })
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch(console.error);
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  // Listen for structured transcript events from the main window
+  // page.tsx emits overlay-transcript for every finalized message from BOTH mic and tab audio.
+  // We deduplicate against messages already added by the native audio path.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<{ sender: "User" | "Interviewer"; text: string; timestamp: number }>(
+      "overlay-transcript",
+      (event) => {
+        const { sender, text, timestamp } = event.payload;
+        if (!text.trim()) return;
+        setMessages((prev) => {
+          const normalized = text.toLowerCase().trim().replace(/[.!?]/g, "");
+          // Skip if already present (added by native mic/tab audio path)
+          const alreadyExists = prev.some((m) => {
+            if (m.sender !== sender) return false;
+            if (Math.abs(m.timestamp - timestamp) > 3000) return false;
+            const existing = m.text.toLowerCase().trim().replace(/[.!?]/g, "");
+            return (
+              existing === normalized ||
+              existing.includes(normalized) ||
+              normalized.includes(existing)
+            );
+          });
+          if (alreadyExists) return prev;
+          return [
+            ...prev,
+            {
+              id: Math.random().toString(36).slice(7),
+              sender,
+              text,
+              timestamp,
+            },
+          ];
+        });
+      },
+    )
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch(console.error);
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  // â”€â”€ Auto-expand responses panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  useEffect(() => {
+    if (aiResponses.length > 0) {
+      setCurrentResponseIndex(aiResponses.length - 1);
       setIsResponsesExpanded(true);
     }
-  }, [responses.length]);
+  }, [aiResponses.length]);
 
-  // Show panel immediately when generation starts
   useEffect(() => {
     if (isAnswering || isAnalyzing) {
       setIsResponsesExpanded(true);
     }
   }, [isAnswering, isAnalyzing]);
 
-  const lastSentHeightRef = useRef<number>(185);
-  const heightDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // ─── Derived state machine — single source of truth for the OS window
+  // â”€â”€â”€ Derived state machine â€” single source of truth for the OS window â”€â”€â”€
   type MiniState = "badge" | "bar" | "expanded";
   const miniState: MiniState = isWindowCollapsed
     ? "badge"
     : isAnswering ||
         isAnalyzing ||
-        (responses.length > 0 && isResponsesExpanded)
+        (aiResponses.length > 0 && isResponsesExpanded)
       ? "expanded"
       : "bar";
 
-  // Push discrete state transitions to Rust. Rust owns the eased animation.
+  // Push discrete state transitions to Rust
   useEffect(() => {
-    if (miniState === "expanded") return; // expanded height is sent by the observer below
+    if (miniState === "expanded") return;
     invoke("set_mini_state", { state: miniState }).catch(() => {});
   }, [miniState]);
 
-  // While expanded, watch real DOM height and forward changes to Rust
-  // (debounced — one IPC call per ~60 ms of stable size).
+  // While expanded, forward real DOM height to Rust (debounced ~60ms)
   useEffect(() => {
     if (!rootRef.current || miniState !== "expanded") return;
 
@@ -393,188 +707,130 @@ const FloatingApp: React.FC = () => {
     });
 
     observer.observe(rootRef.current);
-    // Send initial height immediately so Rust animates to it without waiting
     send(Math.ceil(rootRef.current.getBoundingClientRect().height));
 
     return () => {
       observer.disconnect();
       if (heightDebounceRef.current) clearTimeout(heightDebounceRef.current);
+      // Reset the dedup guard so the next expansion always fires a Rust resize.
+      // Without this, collapsing then re-expanding would see the same height as
+      // last time and skip the invoke(), leaving the window stuck at bar size.
+      lastSentHeightRef.current = 0;
     };
   }, [miniState]);
 
-  // Listen for overlay-update from main window
-  useEffect(() => {
-    let active = true;
-    const unlisteners: (() => void)[] = [];
+  // â”€â”€ Actions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const handleAiAnswerClick = useCallback(async () => {
+    if (isEmittingRef.current || isAnswering) return;
+    const info = sessionInfoRef.current;
+    if (!info) return;
 
-    const setup = async () => {
-      const fn = await listen("overlay-update", (event) => {
-        if (active) setData(event.payload as OverlayData);
-      });
-      if (!active) {
-        fn();
-        return;
-      }
-      unlisteners.push(fn);
-    };
+    const msgs = messagesRef.current;
+    const interimMic = micTranscription.interimTranscript;
+    const interimTab = tabTranscription.interimTranscript;
+    const combined = msgs
+      .map((m) => `[${m.sender === "User" ? "YOU" : "Interviewer"}]: ${m.text}`)
+      .join("\n");
+    const fullTranscript =
+      combined +
+      (interimMic ? `\n[YOU]: ${interimMic}` : "") +
+      (interimTab ? `\n[Interviewer]: ${interimTab}` : "");
 
-    setup();
-    return () => {
-      active = false;
-      unlisteners.forEach((u) => u());
-    };
-  }, []);
+    if (!fullTranscript.trim()) return;
 
-  // Listen for AI response chunks from main window
-  useEffect(() => {
-    let active = true;
-    const unlisteners: (() => void)[] = [];
-
-    const setup = async () => {
-      const fn = await listen("overlay-ai-response", (event) => {
-        if (!active) return;
-        const payload = event.payload as AIResponse;
-
-        setResponses((prev) => {
-          const existing = prev.find((r) => r.messageId === payload.messageId);
-          if (existing) {
-            return prev.map((r) =>
-              r.messageId === payload.messageId
-                ? {
-                    ...r,
-                    text: payload.text,
-                    isStreaming: payload.isStreaming,
-                    sender: payload.sender,
-                  }
-                : r,
-            );
-          }
-          return [...prev, payload];
-        });
-
-        // Update loading states based on streaming status
-        if (!payload.isStreaming) {
-          setIsAnswering(false);
-          setIsAnalyzing(false);
-        }
-      });
-
-      if (!active) {
-        fn();
-        return;
-      }
-      unlisteners.push(fn);
-    };
-
-    setup();
-    return () => {
-      active = false;
-      unlisteners.forEach((u) => u());
-    };
-  }, []);
-
-  const isEmittingRef = useRef(false);
-
-  const handleAiAnswer = async () => {
-    if (isEmittingRef.current || isAnswering || !data.sessionId) return;
     isEmittingRef.current = true;
     try {
-      setResponses([]);
-      setCurrentResponseIndex(0);
-      setIsAnswering(true);
-      await emit("overlay-ai-answer", { sessionId: data.sessionId });
+      await handleAiAnswer(
+        info.sessionId,
+        fullTranscript,
+        selectedModelRef.current,
+      );
     } finally {
-      // Debounce emission
       setTimeout(() => {
         isEmittingRef.current = false;
       }, 800);
     }
-  };
+  }, [
+    isAnswering,
+    handleAiAnswer,
+    micTranscription.interimTranscript,
+    tabTranscription.interimTranscript,
+  ]);
 
-  const handleAnalyzeScreen = async () => {
-    if (isEmittingRef.current || isAnalyzing || !data.sessionId) return;
+  const handleAnalyzeScreenClick = useCallback(async () => {
+    if (isEmittingRef.current || isAnalyzing) return;
+    const info = sessionInfoRef.current;
+    if (!info) return;
+
     isEmittingRef.current = true;
     try {
-      setResponses([]);
-      setCurrentResponseIndex(0);
-      setIsAnalyzing(true);
-      // Capture the screen the floating app is currently on via Rust command
       const screenshotData = await invoke<string>("capture_screen");
-      await emit("overlay-analyze-screen", {
-        sessionId: data.sessionId,
-        screenshotData,
-      });
+      // Convert base64 to Blob
+      const hasPrefix = screenshotData.includes(",");
+      const base64Data = hasPrefix
+        ? screenshotData.split(",")[1]
+        : screenshotData;
+      const contentType = hasPrefix
+        ? screenshotData.split(",")[0].split(":")[1].split(";")[0]
+        : "image/jpeg";
+      const binary = atob(base64Data);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const blob = new Blob([bytes.buffer], { type: contentType });
+      await handleAnalyzeScreen(info.sessionId, blob, selectedModelRef.current);
     } catch (err) {
       console.error("Failed to capture screen:", err);
       toast.error("Failed to capture screen");
-      setIsAnalyzing(false);
     } finally {
-      // Debounce emission
       setTimeout(() => {
         isEmittingRef.current = false;
       }, 800);
     }
-  };
+  }, [isAnalyzing, handleAnalyzeScreen]);
 
-  const handleClose = async () => {
-    await emit("overlay-restore", {});
-    setTimeout(async () => {
-      await getCurrentWindow().close();
-    }, 100);
-  };
-
-  const handleSend = async () => {
-    if (!inputValue.trim() || !data.sessionId) return;
+  const handleSend = useCallback(async () => {
+    if (!inputValue.trim() || !sessionInfoRef.current) return;
     const query = inputValue.trim();
     setInputValue("");
-    setIsAnswering(true);
-    await emit("overlay-ai-query", { query, sessionId: data.sessionId });
-  };
+    handleCustomQuery(
+      sessionInfoRef.current.sessionId,
+      query,
+      selectedModelRef.current,
+    );
+  }, [inputValue, handleCustomQuery]);
 
-  const handleToggleMic = async () => {
-    await emit("overlay-toggle-mic", {});
-  };
-
-  const handleClearTranscript = async () => {
-    await emit("overlay-clear-transcript", {});
-  };
-
-  const handleRestore = async () => {
-    try {
-      const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
-      const mainWindow = await WebviewWindow.getByLabel("main");
-      if (mainWindow) {
-        await mainWindow.show();
-        await mainWindow.unminimize();
-        await mainWindow.setFocus();
-      }
-    } catch (err) {
-      console.error("Failed to restore main window:", err);
+  const handleToggleMic = useCallback(() => {
+    if (micTranscription.isTranscribing) {
+      micTranscription.stopTranscription();
+    } else {
+      micTranscription.startTranscription();
     }
-    await getCurrentWindow().close();
-  };
+  }, [micTranscription]);
 
-  const handleHideMain = async () => {
-    await emit("overlay-hide-main", {});
-  };
+  const handleClearTranscript = useCallback(() => {
+    micTranscription.clearTranscript();
+    tabTranscription.clearTranscript();
+    setMessages([]);
+  }, [micTranscription, tabTranscription]);
 
-  const handleExit = async () => {
-    if (isEnding) return;
-    setIsEnding(true);
-    try {
-      await emit("overlay-end-session-direct", {});
-      // Close the mini-screen after a short delay to ensure the event is sent
-      setTimeout(async () => {
-        const win = getCurrentWindow();
-        await win.close();
-      }, 300);
-    } catch (err) {
-      console.error("Failed to end session:", err);
-      setIsEnding(false);
-    }
-  };
+  const handleToggleTab = useCallback(() => {
+    setIsTabEnabled((v) => !v);
+  }, []);
 
-  // ── Badge state: entire window collapsed to a tiny pill ──────────────────
+  const handleExit = useCallback(() => {
+    endSessionNowRef.current();
+  }, []);
+
+  const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
+  const lastTranscriptLine = lastMessage?.text ?? "";
+  const lastTranscriptSender = lastMessage?.sender ?? null;
+  const interimTranscript =
+    micTranscription.interimTranscript || tabTranscription.interimTranscript;
+  const isMicActive = micTranscription.isTranscribing;
+  const isMicConnecting = micTranscription.isConnecting;
+  const isTabActive = tabTranscription.isTranscribing;
+  const isTabConnecting = tabTranscription.isConnecting;
+
   if (isWindowCollapsed) {
     return (
       <div ref={rootRef} className="w-full h-full flex items-center">
@@ -587,10 +843,10 @@ const FloatingApp: React.FC = () => {
           <span className="text-[11px] font-bold text-white/60 group-hover:text-white uppercase tracking-widest transition-colors leading-none">
             Craft Vita
           </span>
-          {responses.length > 0 && (
+          {aiResponses.length > 0 && (
             <span className="ml-1 flex items-center justify-center w-3.5 h-3.5 rounded-full bg-blue-500/30 border border-blue-500/50">
               <span className="text-[8px] font-bold text-blue-300">
-                {responses.length}
+                {aiResponses.length}
               </span>
             </span>
           )}
@@ -604,9 +860,15 @@ const FloatingApp: React.FC = () => {
       ref={rootRef}
       className="w-full flex flex-col outline-none bg-zinc-900/95 backdrop-blur-2xl rounded-xl overflow-hidden"
     >
-      {/* ─── Top Card: Controls ─── */}
+      <Toaster
+        position="top-center"
+        theme="dark"
+        toastOptions={{ style: { fontSize: "12px" } }}
+      />
+
+      {/* â”€â”€â”€ Top Card: Controls â”€â”€â”€ */}
       <div className="shrink-0">
-        {/* Header Area */}
+        {/* Header */}
         <div className="px-4 py-2 flex items-center justify-between border-b border-white/5 relative group/header cursor-default no-drag">
           {/* Left: Title & Drag Handle */}
           <div className="flex items-center gap-3 data-tauri-drag-region">
@@ -616,7 +878,6 @@ const FloatingApp: React.FC = () => {
                 Craft Vita
               </h1>
             </div>
-            {/* Dedicated Drag Handle */}
             <Tooltip delayDuration={500}>
               <TooltipTrigger asChild>
                 <div
@@ -635,24 +896,20 @@ const FloatingApp: React.FC = () => {
             </Tooltip>
           </div>
 
-          {/* Right: Actions Area */}
+          {/* Right: Model + Timer + Actions */}
           <div className="flex items-center gap-2">
             <div className="scale-90 origin-right">
               <ModelSelector
-                value={data.selectedModel || "google/gemma-4-26b-a4b-it"}
-                onChange={(val) => {
-                  setData((prev) => ({ ...prev, selectedModel: val }));
-                  emit("overlay-model-change", { model: val });
-                }}
+                value={selectedModel}
+                onChange={setSelectedModel}
                 isFullscreen={true}
               />
             </div>
 
-            {/* Custom Timer Pill */}
             <div className="flex items-center gap-2 bg-white/5 px-3 h-9 rounded-xl border border-white/10 shadow-inner transition-all hover:bg-white/10 group">
               <Clock className="h-3.5 w-3.5 text-blue-400 group-hover:animate-pulse" />
               <span className="text-[13px] font-mono font-bold text-white/90 tabular-nums tracking-tight">
-                {data.timerText || "00:00"}
+                {formattedTime || "00:00"}
               </span>
             </div>
 
@@ -674,7 +931,8 @@ const FloatingApp: React.FC = () => {
                 </TooltipContent>
               </Tooltip>
 
-              <div className="w-[1px] h-4 bg-white/10 mx-0.5" />
+              <div className="w-px h-4 bg-white/10 mx-0.5" />
+
               <Tooltip delayDuration={300}>
                 <TooltipTrigger asChild>
                   <button
@@ -705,35 +963,68 @@ const FloatingApp: React.FC = () => {
         </div>
 
         {/* Live Monitor Row */}
-        <div className="px-4 py-2 flex items-center justify-between bg-white/[0.02] border-b border-white/5">
-          <div className="flex-1 flex items-center gap-2 overflow-hidden mr-4">
-            <div
-              className={cn(
-                "shrink-0 w-1.5 h-1.5 rounded-full transition-all duration-300",
-                data.isMicConnecting
-                  ? "bg-amber-500 animate-pulse shadow-[0_0_8px_rgba(245,158,11,0.5)]"
-                  : data.isMicActive
-                    ? "bg-emerald-500 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)]"
-                    : "bg-white/20",
+        <div className="px-4 py-2 flex items-center justify-between bg-white/2 border-b border-white/5">
+          <div className="flex-1 flex items-center gap-2 overflow-hidden mr-3">
+            {/* Dual status dots: green = mic, purple = remote */}
+            <div className="flex gap-1 shrink-0">
+              <div
+                className={cn(
+                  "w-1.5 h-1.5 rounded-full transition-all duration-300",
+                  isMicConnecting
+                    ? "bg-amber-500 animate-pulse shadow-[0_0_8px_rgba(245,158,11,0.5)]"
+                    : isMicActive
+                      ? "bg-emerald-500 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)]"
+                      : "bg-white/20",
+                )}
+              />
+              {isTabEnabled && (
+                <div
+                  className={cn(
+                    "w-1.5 h-1.5 rounded-full transition-all duration-300",
+                    isTabConnecting
+                      ? "bg-amber-500 animate-pulse shadow-[0_0_8px_rgba(245,158,11,0.5)]"
+                      : isTabActive
+                        ? "bg-purple-500 animate-pulse shadow-[0_0_8px_rgba(168,85,247,0.5)]"
+                        : "bg-white/20",
+                  )}
+                />
               )}
-            />
+            </div>
+
             <div className="flex-1 truncate text-[12px] font-medium text-white italic">
               {isEnding ? (
                 <span className="text-rose-400 font-bold animate-pulse">
                   Ending Session...
                 </span>
-              ) : data.transcript || data.interimTranscript ? (
+              ) : !sessionInfo ? (
+                <span className="text-white/20 flex items-center gap-1.5">
+                  <Loader2 size={11} className="animate-spin shrink-0" />
+                  Waiting for session...
+                </span>
+              ) : lastTranscriptLine || interimTranscript ? (
                 <>
-                  {data.transcript.split("\n").slice(-1)[0]}
-                  {data.interimTranscript && (
+                  {lastTranscriptLine && (
+                    <span
+                      className={cn(
+                        "font-bold mr-1 text-[9px] uppercase tracking-wider not-italic",
+                        lastTranscriptSender === "User"
+                          ? "text-blue-400"
+                          : "text-purple-400",
+                      )}
+                    >
+                      {lastTranscriptSender === "User" ? "You:" : "Them:"}
+                    </span>
+                  )}
+                  {lastTranscriptLine}
+                  {interimTranscript && (
                     <span className="text-white/30 ml-1">
-                      {data.interimTranscript}
+                      {interimTranscript}
                     </span>
                   )}
                 </>
               ) : (
                 <span className="text-white/20">
-                  {data.isMicActive
+                  {isMicActive
                     ? "Listening for speech..."
                     : "Waiting for audio..."}
                 </span>
@@ -741,21 +1032,50 @@ const FloatingApp: React.FC = () => {
             </div>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-1.5 shrink-0">
+            {/* Transcript expand/collapse */}
+            <Tooltip delayDuration={300}>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={() => setIsTranscriptExpanded((v) => !v)}
+                  disabled={!sessionInfo || messages.length === 0}
+                  className={cn(
+                    "p-2 rounded-xl transition-all active:scale-95 border",
+                    isTranscriptExpanded
+                      ? "bg-blue-500/20 text-blue-400 border-blue-500/30"
+                      : "bg-white/10 text-zinc-300 border-white/10 hover:bg-blue-500/10 hover:text-blue-400",
+                    (!sessionInfo || messages.length === 0) &&
+                      "opacity-40 cursor-not-allowed",
+                  )}
+                >
+                  <AlignJustify size={14} />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent
+                side="left"
+                className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
+              >
+                {isTranscriptExpanded ? "Hide Transcript" : "Show Transcript"}
+              </TooltipContent>
+            </Tooltip>
+
+            {/* User mic toggle */}
             <Tooltip delayDuration={300}>
               <TooltipTrigger asChild>
                 <button
                   onClick={handleToggleMic}
+                  disabled={!sessionInfo}
                   className={cn(
                     "p-2 rounded-xl transition-all active:scale-95 border",
-                    data.isMicActive
+                    isMicActive
                       ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/30 shadow-[0_0_15px_rgba(16,185,129,0.2)]"
-                      : "bg-white/10 text-zinc-300 border-white/10 hover:bg-white/20 hover:text-white",
+                      : "bg-white/10 text-zinc-300 border-white/10 hover:bg-emerald-500/10 hover:text-emerald-400",
+                    !sessionInfo && "opacity-40 cursor-not-allowed",
                   )}
                 >
-                  {data.isMicConnecting ? (
+                  {isMicConnecting ? (
                     <Loader2 size={14} className="animate-spin" />
-                  ) : data.isMicActive ? (
+                  ) : isMicActive ? (
                     <Mic size={14} />
                   ) : (
                     <MicOff size={14} />
@@ -766,14 +1086,51 @@ const FloatingApp: React.FC = () => {
                 side="left"
                 className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
               >
-                {data.isMicActive ? "Disable Mic" : "Enable Mic"}
+                {isMicActive ? "Mute My Mic" : "Unmute My Mic"}
               </TooltipContent>
             </Tooltip>
+
+            {/* Remote (interviewer) audio toggle */}
+            <Tooltip delayDuration={300}>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={handleToggleTab}
+                  disabled={!sessionInfo}
+                  className={cn(
+                    "p-2 rounded-xl transition-all active:scale-95 border",
+                    isTabEnabled
+                      ? "bg-purple-500/20 text-purple-400 border-purple-500/30 shadow-[0_0_15px_rgba(168,85,247,0.2)]"
+                      : "bg-white/10 text-zinc-300 border-white/10 hover:bg-purple-500/10 hover:text-purple-400",
+                    !sessionInfo && "opacity-40 cursor-not-allowed",
+                  )}
+                >
+                  {isTabConnecting ? (
+                    <Loader2 size={14} className="animate-spin" />
+                  ) : isTabEnabled ? (
+                    <Headphones size={14} />
+                  ) : (
+                    <HeadphoneOff size={14} />
+                  )}
+                </button>
+              </TooltipTrigger>
+              <TooltipContent
+                side="left"
+                className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
+              >
+                {isTabEnabled ? "Disable Remote Audio" : "Enable Remote Audio"}
+              </TooltipContent>
+            </Tooltip>
+
+            {/* Clear transcript */}
             <Tooltip delayDuration={300}>
               <TooltipTrigger asChild>
                 <button
                   onClick={handleClearTranscript}
-                  className="p-2 rounded-xl bg-white/10 text-zinc-300 border border-white/10 hover:bg-rose-500/20 hover:text-rose-400 hover:border-rose-500/30 transition-all active:scale-95 flex items-center justify-center"
+                  disabled={!sessionInfo}
+                  className={cn(
+                    "p-2 rounded-xl bg-white/10 text-zinc-300 border border-white/10 hover:bg-rose-500/20 hover:text-rose-400 hover:border-rose-500/30 transition-all active:scale-95 flex items-center justify-center",
+                    !sessionInfo && "opacity-40 cursor-not-allowed",
+                  )}
                 >
                   <Trash2 size={14} />
                 </button>
@@ -788,18 +1145,94 @@ const FloatingApp: React.FC = () => {
           </div>
         </div>
 
+        {/* Collapsible Transcript Panel — full conversation log */}
+        {isTranscriptExpanded && (
+          <div className="border-b border-white/10 max-h-52 overflow-y-auto no-scrollbar px-3 py-2 space-y-2">
+            {messages.length === 0 ? (
+              <p className="text-[11px] text-white/20 text-center py-2">
+                No transcript yet...
+              </p>
+            ) : (
+              messages.map((m) => (
+                <div
+                  key={m.id}
+                  className={cn(
+                    "flex gap-2 items-start",
+                    m.sender === "User" ? "flex-row" : "flex-row-reverse",
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "shrink-0 text-[9px] font-bold uppercase tracking-wider pt-1.5",
+                      m.sender === "User"
+                        ? "text-blue-400"
+                        : "text-purple-400",
+                    )}
+                  >
+                    {m.sender === "User" ? "You" : "Them"}
+                  </span>
+                  <span
+                    className={cn(
+                      "px-2.5 py-1.5 rounded-xl text-[12px] leading-snug font-medium max-w-[85%]",
+                      m.sender === "User"
+                        ? "bg-blue-500/10 text-blue-100 rounded-tl-none"
+                        : "bg-purple-500/10 text-purple-100 rounded-tr-none",
+                    )}
+                  >
+                    {m.text}
+                  </span>
+                </div>
+              ))
+            )}
+            {/* Live interim bubble */}
+            {(micTranscription.interimTranscript ||
+              tabTranscription.interimTranscript) && (
+              <div
+                className={cn(
+                  "flex gap-2 items-start opacity-50",
+                  micTranscription.interimTranscript
+                    ? "flex-row"
+                    : "flex-row-reverse",
+                )}
+              >
+                <span
+                  className={cn(
+                    "shrink-0 text-[9px] font-bold uppercase tracking-wider pt-1.5",
+                    micTranscription.interimTranscript
+                      ? "text-blue-400"
+                      : "text-purple-400",
+                  )}
+                >
+                  {micTranscription.interimTranscript ? "You" : "Them"}
+                </span>
+                <span
+                  className={cn(
+                    "px-2.5 py-1.5 rounded-xl text-[12px] leading-snug font-medium italic",
+                    micTranscription.interimTranscript
+                      ? "bg-blue-500/10 text-blue-100 rounded-tl-none"
+                      : "bg-purple-500/10 text-purple-100 rounded-tr-none",
+                  )}
+                >
+                  {micTranscription.interimTranscript ||
+                    tabTranscription.interimTranscript}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Action Bar */}
-        <div className="px-4 py-2.5 flex items-center justify-between">
+        <div className="px-4 py-2.5 flex items-center justify-between gap-3">
           <ChatActionButtons
-            onAiAnswer={handleAiAnswer}
-            onAnalyzeScreen={handleAnalyzeScreen}
+            onAiAnswer={handleAiAnswerClick}
+            onAnalyzeScreen={handleAnalyzeScreenClick}
             isAnswering={isAnswering}
             isAnalyzing={isAnalyzing}
-            canAnswer={!!data.sessionId}
-            canAnalyze={!!data.sessionId}
+            canAnswer={!!sessionInfo && messages.length > 0}
+            canAnalyze={!!sessionInfo}
             isFullscreen={true}
           />
-          <div className="relative group">
+          <div className="relative flex-1">
             <input
               className="w-full h-10 rounded-xl pl-4 pr-12 text-sm font-medium bg-white/5 border border-white/10 text-white placeholder:text-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500/50 transition-all"
               placeholder="Ask AI anything..."
@@ -816,7 +1249,7 @@ const FloatingApp: React.FC = () => {
               <TooltipTrigger asChild>
                 <button
                   onClick={handleSend}
-                  disabled={!inputValue.trim()}
+                  disabled={!inputValue.trim() || !sessionInfo}
                   className="absolute right-1 top-1 h-8 w-10 rounded-lg bg-blue-500 hover:bg-blue-600 disabled:bg-white/10 flex items-center justify-center text-white transition-all active:scale-95 shadow-lg shadow-blue-500/20"
                 >
                   <Send size={14} />
@@ -833,20 +1266,19 @@ const FloatingApp: React.FC = () => {
         </div>
       </div>
 
-      {/* ─── Bottom Card: AI Responses ─── */}
-      {/* Kept in DOM while there is content; CSS grid-template-rows transition
-          drives the open/close animation so ResizeObserver + window follows
-          every CSS frame — no JS animation loop needed. */}
-      {(isAnswering || isAnalyzing || responses.length > 0) && (
+      {/* â”€â”€â”€ AI Responses Panel â”€â”€â”€ */}
+      {(isAnswering || isAnalyzing || aiResponses.length > 0) && (
         <div className="flex flex-col border-t border-white/10">
-          {/* Nav Row — always visible so user can see/re-expand after collapsing */}
+          {/* Nav Row */}
           <div className="px-3 py-2 flex items-center justify-between shrink-0">
             <div className="flex items-center gap-1">
               <button
                 onClick={() =>
                   setCurrentResponseIndex((i) => Math.max(0, i - 1))
                 }
-                disabled={currentResponseIndex === 0 || responses.length === 0}
+                disabled={
+                  currentResponseIndex === 0 || aiResponses.length === 0
+                }
                 className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-25 disabled:cursor-not-allowed text-white transition-all active:scale-95"
               >
                 <ChevronLeft size={14} />
@@ -854,20 +1286,20 @@ const FloatingApp: React.FC = () => {
               <button
                 onClick={() =>
                   setCurrentResponseIndex((i) =>
-                    Math.min(responses.length - 1, i + 1),
+                    Math.min(aiResponses.length - 1, i + 1),
                   )
                 }
-                disabled={currentResponseIndex >= responses.length - 1}
+                disabled={currentResponseIndex >= aiResponses.length - 1}
                 className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-25 disabled:cursor-not-allowed text-white transition-all active:scale-95"
               >
                 <ChevronRight size={14} />
               </button>
-              {responses.length > 1 && (
+              {aiResponses.length > 1 && (
                 <span className="text-[11px] text-white/40 ml-1 font-mono">
-                  {currentResponseIndex + 1}/{responses.length}
+                  {currentResponseIndex + 1}/{aiResponses.length}
                 </span>
               )}
-              {(isAnswering || isAnalyzing) && responses.length === 0 && (
+              {(isAnswering || isAnalyzing) && aiResponses.length === 0 && (
                 <span className="flex items-center gap-1.5 ml-1 text-[11px] text-blue-400/80">
                   <Loader2 size={11} className="animate-spin" />
                   Generating...
@@ -891,35 +1323,38 @@ const FloatingApp: React.FC = () => {
                 side="left"
                 className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
               >
-                {isResponsesExpanded ? "Collapse panel" : "Expand panel"}
+                {isResponsesExpanded ? "Collapse" : "Expand"}
               </TooltipContent>
             </Tooltip>
           </div>
 
-          {/* Animated content — slides open/closed while nav row stays pinned */}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateRows: isResponsesExpanded ? "1fr" : "0fr",
-              transition: "grid-template-rows 220ms cubic-bezier(0.4,0,0.2,1)",
-            }}
-          >
-            <div style={{ overflow: "hidden", minHeight: 0 }}>
-              {responses.length > 0 && (
-                <div className="border-t border-white/10 max-h-[480px] overflow-y-auto overflow-x-hidden no-scrollbar">
-                  <AnswerArea
-                    responses={[responses[currentResponseIndex]].filter(
-                      Boolean,
-                    )}
-                    isStreaming={
-                      (isAnswering || isAnalyzing) &&
-                      currentResponseIndex === responses.length - 1
-                    }
-                  />
-                </div>
-              )}
+          {isResponsesExpanded && aiResponses.length > 0 && (
+            <div className="border-t border-white/10 max-h-120 overflow-y-auto overflow-x-hidden no-scrollbar">
+              <AnswerArea
+                responses={[
+                  {
+                    messageId: aiResponses[currentResponseIndex]?.id ?? "",
+                    text: aiResponses[currentResponseIndex]?.text ?? "",
+                    isStreaming:
+                      currentResponseIndex === aiResponses.length - 1 &&
+                      (isAnswering || isAnalyzing),
+                  },
+                ].filter((r) => r.messageId)}
+                isStreaming={isAnswering || isAnalyzing}
+              />
             </div>
-          </div>
+          )}
+
+          {isResponsesExpanded &&
+            (isAnswering || isAnalyzing) &&
+            aiResponses.length === 0 && (
+              <div className="flex items-center justify-center py-8 gap-2 text-blue-400/70">
+                <Loader2 size={16} className="animate-spin" />
+                <span className="text-[13px] font-medium">
+                  Generating response...
+                </span>
+              </div>
+            )}
         </div>
       )}
     </div>
