@@ -5,6 +5,7 @@ import { start, cancel } from "@fabianlars/tauri-plugin-oauth";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { isTauri } from "../lib/utils";
 
 interface GoogleOAuthButtonProps {
   label?: string;
@@ -21,6 +22,22 @@ export function GoogleOAuthButton({ label = "Continue with Google" }: GoogleOAut
     if (!isLoaded || loading) return;
     setLoading(true);
     setError(null);
+
+    if (!isTauri()) {
+      // Standard web browser fallback (Vercel deployment / dev server)
+      try {
+        await signIn!.authenticateWithRedirect({
+          strategy: "oauth_google",
+          redirectUrl: "/sso-callback",
+          redirectUrlComplete: "/dashboard",
+        });
+      } catch (err: unknown) {
+        const e = err as { errors?: { longMessage?: string; message?: string }[]; message?: string };
+        setError(e?.errors?.[0]?.longMessage || e?.errors?.[0]?.message || e?.message || "Google sign-in failed");
+        setLoading(false);
+      }
+      return;
+    }
 
     let port: number | undefined;
     let unlisten: (() => void) | undefined;

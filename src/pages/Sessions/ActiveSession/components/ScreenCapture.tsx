@@ -58,7 +58,7 @@ export const ScreenCapture = ({
             <ScreenShare className="h-3.5 w-3.5 mr-1.5" />
             Select Screen / Tab
           </Button>
-          <p className="text-xs text-white/25 max-w-[220px] text-center leading-relaxed">
+          <p className="text-xs text-white/25 max-w-55 text-center leading-relaxed">
             Enable "Include audio" in the picker to capture tab audio
           </p>
         </div>

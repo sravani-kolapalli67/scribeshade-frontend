@@ -5,8 +5,7 @@ use screenshots::Screen;
 use base64::{Engine as _, engine::general_purpose};
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use url::Url as NavUrl;
-#[cfg(target_os = "macos")]
-use std::sync::Arc;
+// Removed redundant Arc import
 
 /// Monotonic version counter — every new animation request bumps this.
 static ANIM_VERSION: AtomicU64 = AtomicU64::new(0);
@@ -19,20 +18,20 @@ static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 // PCM frames over a localhost WebSocket so the frontend can feed them to
 // Deepgram directly.
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 static AUDIO_RUNNING: AtomicBool = AtomicBool::new(false);
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 static AUDIO_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
 
 /// ScreenCaptureKit display audio stream state.
 /// Captures system/tab audio from the primary display — does NOT require a
 /// virtual audio device (BlackHole/Loopback).  Requires macOS 13.0+ and the
 /// user to have granted Screen Recording permission.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 static DISPLAY_AUDIO_RUNNING: AtomicBool = AtomicBool::new(false);
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 static DISPLAY_AUDIO_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -204,7 +203,7 @@ async fn show_mini_top_center(app: AppHandle) -> Result<(), String> {
         .ok_or("mini window not found")?;
 
     window
-        .set_size(LogicalSize::new(700u32, 36u32))
+        .set_size(LogicalSize::new(700u32, 222u32))
         .map_err(|e| e.to_string())?;
 
     let monitor = window
@@ -721,28 +720,249 @@ fn stop_display_audio_stream() {
     DISPLAY_AUDIO_PORT.store(0, Ordering::SeqCst);
 }
 
-// Stubs for non-macOS so the invoke_handler compiles on all platforms
-#[cfg(not(target_os = "macos"))]
+// ── Windows: cpal mic audio stream ───────────────────────────────────────────
+#[cfg(target_os = "windows")]
 #[tauri::command]
-async fn start_audio_stream(_device_name: Option<String>) -> Result<u16, String> {
-    Err("Native audio capture is macOS-only".into())
+async fn start_audio_stream(device_name: Option<String>) -> Result<u16, String> {
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    use axum::{Router, extract::ws::{WebSocketUpgrade, WebSocket, Message}};
+    use axum::extract::State;
+    use tokio::sync::broadcast;
+    use std::sync::Arc;
+
+    if AUDIO_RUNNING.load(Ordering::SeqCst) {
+        let port = AUDIO_PORT.load(Ordering::SeqCst);
+        if port != 0 { return Ok(port); }
+    }
+
+    let host = cpal::default_host();
+    let device = if let Some(ref name) = device_name {
+        host.input_devices().map_err(|e| e.to_string())?
+            .find(|d| d.name().map(|n| n.contains(name.as_str())).unwrap_or(false))
+            .ok_or_else(|| format!("Audio device '{}' not found", name))?
+    } else {
+        host.default_input_device().ok_or("No default input device")?
+    };
+
+    let config = device.default_input_config().map_err(|e| e.to_string())?;
+    let sample_rate = config.sample_rate().0;
+    let channels = config.channels() as u32;
+
+    let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(64);
+    let tx_arc = Arc::new(tx);
+    let tx_capture = tx_arc.clone();
+
+    AUDIO_RUNNING.store(true, Ordering::SeqCst);
+    std::thread::spawn(move || {
+        let tx = tx_capture;
+        let err_fn = |e| eprintln!("[cpal win mic] stream error: {e}");
+        let stream = match config.sample_format() {
+            cpal::SampleFormat::F32 => device.build_input_stream(
+                &config.into(),
+                move |data: &[f32], _| {
+                    if !AUDIO_RUNNING.load(Ordering::Relaxed) { return; }
+                    let pcm: Vec<u8> = data.iter().flat_map(|&s| {
+                        let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                        v.to_le_bytes()
+                    }).collect();
+                    let _ = tx.send(Arc::new(pcm));
+                }, err_fn, None,
+            ),
+            cpal::SampleFormat::I16 => device.build_input_stream(
+                &config.into(),
+                move |data: &[i16], _| {
+                    if !AUDIO_RUNNING.load(Ordering::Relaxed) { return; }
+                    let pcm: Vec<u8> = data.iter().flat_map(|s| s.to_le_bytes()).collect();
+                    let _ = tx.send(Arc::new(pcm));
+                }, err_fn, None,
+            ),
+            _ => return,
+        };
+        if let Ok(s) = stream {
+            let _ = s.play();
+            while AUDIO_RUNNING.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    });
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.map_err(|e| e.to_string())?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    AUDIO_PORT.store(port, Ordering::SeqCst);
+
+    let meta = format!("{{\"sampleRate\":{sample_rate},\"channels\":{channels}}}");
+    let meta_bytes = Arc::new(meta.into_bytes());
+
+    let router = Router::new().route("/", axum::routing::get(
+        move |ws: WebSocketUpgrade, State(state): State<Arc<broadcast::Sender<Arc<Vec<u8>>>>>| {
+            let meta_clone = meta_bytes.clone();
+            async move {
+                ws.on_upgrade(move |mut socket: WebSocket| async move {
+                    let _ = socket.send(Message::Text(String::from_utf8_lossy(&meta_clone).into())).await;
+                    let mut rx = state.subscribe();
+                    loop {
+                        match rx.recv().await {
+                            Ok(pcm) => { if socket.send(Message::Binary((*pcm).clone())).await.is_err() { break; } }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(_) => break,
+                        }
+                    }
+                })
+            }
+        }
+    )).with_state(tx_arc);
+
+    tokio::spawn(async move { let _ = axum::serve(listener, router).await; });
+    Ok(port)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn stop_audio_stream() {
+    AUDIO_RUNNING.store(false, Ordering::SeqCst);
+    AUDIO_PORT.store(0, Ordering::SeqCst);
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn list_audio_devices() -> Vec<String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let host = cpal::default_host();
+    host.input_devices()
+        .map(|devs| devs.filter_map(|d| d.name().ok()).collect())
+        .unwrap_or_default()
+}
+
+// ── Windows: WASAPI loopback — captures system/speaker audio ──────────────────
+// On Windows, cpal's WASAPI backend supports loopback capture by calling
+// build_input_stream on an *output* device. This taps whatever is currently
+// playing through the speakers — i.e. the remote interviewer's voice.
+
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn start_display_audio_stream() -> Result<u16, String> {
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    use axum::{Router, extract::ws::{WebSocketUpgrade, WebSocket, Message}};
+    use axum::extract::State;
+    use tokio::sync::broadcast;
+    use std::sync::Arc;
+
+    if DISPLAY_AUDIO_RUNNING.load(Ordering::SeqCst) {
+        let port = DISPLAY_AUDIO_PORT.load(Ordering::SeqCst);
+        if port != 0 { return Ok(port); }
+    }
+
+    let host = cpal::default_host();
+    // WASAPI loopback: use default OUTPUT device as an input source.
+    // cpal's WASAPI backend automatically enables loopback mode when
+    // build_input_stream is called on a device obtained from output_devices().
+    let device = host.default_output_device()
+        .ok_or("No default output device found for loopback capture")?;
+
+    // Output config gives us the native sample rate / channel count that the
+    // system is actually running at — important for Deepgram accuracy.
+    let config = device.default_output_config().map_err(|e| e.to_string())?;
+    let sample_rate = config.sample_rate().0;
+    let channels = config.channels() as u32;
+
+    let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(128);
+    let tx_arc = Arc::new(tx);
+    let tx_capture = tx_arc.clone();
+
+    DISPLAY_AUDIO_RUNNING.store(true, Ordering::SeqCst);
+    std::thread::spawn(move || {
+        let tx = tx_capture;
+        let err_fn = |e| eprintln!("[wasapi loopback] stream error: {e}");
+        let stream = match config.sample_format() {
+            cpal::SampleFormat::F32 => device.build_input_stream(
+                &config.into(),
+                move |data: &[f32], _| {
+                    if !DISPLAY_AUDIO_RUNNING.load(Ordering::Relaxed) { return; }
+                    let pcm: Vec<u8> = data.iter().flat_map(|&s| {
+                        let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                        v.to_le_bytes()
+                    }).collect();
+                    let _ = tx.send(Arc::new(pcm));
+                }, err_fn, None,
+            ),
+            cpal::SampleFormat::I16 => device.build_input_stream(
+                &config.into(),
+                move |data: &[i16], _| {
+                    if !DISPLAY_AUDIO_RUNNING.load(Ordering::Relaxed) { return; }
+                    let pcm: Vec<u8> = data.iter().flat_map(|s| s.to_le_bytes()).collect();
+                    let _ = tx.send(Arc::new(pcm));
+                }, err_fn, None,
+            ),
+            _ => return,
+        };
+        if let Ok(s) = stream {
+            let _ = s.play();
+            while DISPLAY_AUDIO_RUNNING.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    });
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.map_err(|e| e.to_string())?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    DISPLAY_AUDIO_PORT.store(port, Ordering::SeqCst);
+
+    let meta = format!("{{\"sampleRate\":{sample_rate},\"channels\":{channels}}}");
+    let meta_bytes = Arc::new(meta.into_bytes());
+
+    let router = Router::new().route("/", axum::routing::get(
+        move |ws: WebSocketUpgrade, State(state): State<Arc<broadcast::Sender<Arc<Vec<u8>>>>>| {
+            let meta_clone = meta_bytes.clone();
+            async move {
+                ws.on_upgrade(move |mut socket: WebSocket| async move {
+                    let _ = socket.send(Message::Text(String::from_utf8_lossy(&meta_clone).into())).await;
+                    let mut rx = state.subscribe();
+                    loop {
+                        match rx.recv().await {
+                            Ok(pcm) => { if socket.send(Message::Binary((*pcm).clone())).await.is_err() { break; } }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(_) => break,
+                        }
+                    }
+                })
+            }
+        }
+    )).with_state(tx_arc);
+
+    tokio::spawn(async move { let _ = axum::serve(listener, router).await; });
+    Ok(port)
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn stop_display_audio_stream() {
+    DISPLAY_AUDIO_RUNNING.store(false, Ordering::SeqCst);
+    DISPLAY_AUDIO_PORT.store(0, Ordering::SeqCst);
+}
+
+// ── Linux stubs (audio capture not supported) ─────────────────────────────────
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[tauri::command]
+async fn start_audio_stream(_device_name: Option<String>) -> Result<u16, String> {
+    Err("Native audio capture is macOS/Windows-only".into())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[tauri::command]
 fn stop_audio_stream() {}
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[tauri::command]
 fn list_audio_devices() -> Vec<String> { vec![] }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[tauri::command]
 async fn start_display_audio_stream() -> Result<u16, String> {
-    Err("Display audio capture is macOS-only".into())
+    Err("Display audio capture is macOS/Windows-only".into())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[tauri::command]
 fn stop_display_audio_stream() {}
 
@@ -817,6 +1037,9 @@ async fn open_main_dashboard(
     route: Option<String>,
     show_create: Option<bool>,
     is_free: Option<bool>,
+    // When `false`: create/navigate the window without showing it — used as a
+    // hidden background session-processor (e.g. event bus for the mini overlay).
+    visible: Option<bool>,
 ) -> Result<(), String> {
     // ── 1. Create the main window lazily — only when the user explicitly needs it ──
     let is_new_window = app.get_webview_window("main").is_none();
@@ -825,8 +1048,21 @@ async fn open_main_dashboard(
         win
     } else {
         let nav_handle = app.clone();
-        WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
+        
+        let mut path = route.clone().unwrap_or_else(|| "/dashboard".to_string());
+        let mut query = Vec::new();
+        if show_create.unwrap_or(false) { query.push("openCreate=true"); }
+        if is_free.unwrap_or(false) { query.push("isFree=true"); }
+        if !query.is_empty() {
+            path.push('?');
+            path.push_str(&query.join("&"));
+        }
+        
+        let url = WebviewUrl::App(path.into());
+
+        WebviewWindowBuilder::new(&app, "main", url)
             .title("CraftVita")
+            .decorations(false)
             .inner_size(1200.0, 800.0)
             .center()
             .resizable(false)
@@ -856,24 +1092,22 @@ async fn open_main_dashboard(
             .map_err(|e| e.to_string())?
     };
 
-    main_win.show().map_err(|e| e.to_string())?;
-    main_win.unminimize().map_err(|e| e.to_string())?;
-    main_win.set_focus().map_err(|e| e.to_string())?;
+    // Ensure decorations are always off, even if the window was reused from a
+    // previous call that predates this setting being added to the builder.
+    main_win.set_decorations(false).map_err(|e| e.to_string())?;
+
+    // Only show/focus when caller wants the window to be visible (default true).
+    // Passing `visible: false` creates or navigates the window as a hidden
+    // background processor (e.g. session event bus for the mini overlay).
+    if visible.unwrap_or(true) {
+        main_win.show().map_err(|e| e.to_string())?;
+        main_win.unminimize().map_err(|e| e.to_string())?;
+        main_win.set_focus().map_err(|e| e.to_string())?;
+    }
 
     // ── 2. Navigate to the target route with conditions as URL query params ──
-    //
-    // Approach: derive the origin (scheme + host + port) from the window's
-    // current URL so it works in both dev (http://localhost:PORT) and
-    // production (tauri://localhost). Append the route as the path and encode
-    // showCreate / isFree as query params so the React frontend can read them
-    // via useSearchParams without needing a Tauri event.
-    //
-    // For NEW windows: `navigate()` cancels the default index.html load and
-    // goes directly to the target URL — no race condition with React mounting.
     // For EXISTING windows: a full webview navigation to the new URL.
-    let route_path = route.as_deref().unwrap_or("/dashboard");
-
-    if route.is_some() || show_create.unwrap_or(false) || is_new_window {
+    if !is_new_window && (route.is_some() || show_create.unwrap_or(false)) {
         let current = main_win.url().map_err(|e| e.to_string())?;
 
         // Extract origin: scheme://host[:port]
@@ -883,6 +1117,8 @@ async fn open_main_dashboard(
         if let Some(port) = current.port() {
             origin = format!("{}:{}", origin, port);
         }
+
+        let route_path = route.as_deref().unwrap_or("/dashboard");
 
         // Build the full URL: origin + /route?params
         let raw = format!("{}{}", origin, route_path);

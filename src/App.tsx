@@ -3,8 +3,9 @@ import { useUser } from "@clerk/clerk-react";
 import { useEffect } from "react";
 import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { emit } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { useSyncUser } from "@/hooks/useSyncUser";
+import { isTauri } from "@/lib/utils";
 import "./App.css";
 import { AppSidebar } from "@/components/app-sidebar";
 import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
@@ -43,6 +44,7 @@ function App() {
   // needed — Rust calls win.navigate(url?openCreate=true&isFree=true) so the
   // React app loads directly at the right route with conditions in the URL.)
   useEffect(() => {
+    if (!isTauri()) return;
     if (isLoaded && !isSignedIn) {
       emit("auth:signed-out").catch(() => undefined);
     }
@@ -52,23 +54,34 @@ function App() {
   // button after OAuth, or a craftvita://oauth-callback from Clerk).
   // Rust already focuses the window; this handler covers URL routing.
   useEffect(() => {
+    if (!isTauri()) return;
     let unlisten: (() => void) | undefined;
     onOpenUrl((urls) => {
       const url = Array.isArray(urls) ? urls[0] : urls;
       if (typeof url !== "string") return;
 
-      // Always bring the window to front on any craftvita:// deep link.
       getCurrentWebviewWindow().setFocus().catch(() => undefined);
 
-      // OAuth callback: forward Clerk params to the SSO handler page.
       if (url.startsWith("craftvita://oauth-callback")) {
         const parsed = new URL(url);
         navigate(`/sso-callback${parsed.search}`);
       }
-    }).then((fn) => { unlisten = fn; }).catch(() => {
-      // Plugin not available (browser dev mode or capability not registered) — ignore
+    }).then((fn) => {
+      unlisten = fn;
     });
-    return () => { unlisten?.(); };
+
+    // Listen for cross-window navigation requests
+    const unlistenNavigate = listen("navigate", (event) => {
+      const payload = event.payload as { to: string; state?: any };
+      if (payload.to) {
+        navigate(payload.to, { state: payload.state });
+      }
+    });
+
+    return () => {
+      unlisten?.();
+      unlistenNavigate.then((fn) => fn());
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
