@@ -56,7 +56,8 @@ import "@/App.css";
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
-const FRONTEND_URL = import.meta.env.VITE_FRONTEND_URL ;
+const _rawFrontendUrl: string = import.meta.env.VITE_FRONTEND_URL ?? "https://scribeshade-01-frontend.vercel.app";
+const FRONTEND_URL = _rawFrontendUrl.startsWith("http") ? _rawFrontendUrl : `https://${_rawFrontendUrl}`;
 const WIDGET_W = 460;
 const APP_NAME = "CraftVita";
 const ZOOM_KEY = "craftvita.widget.zoom";
