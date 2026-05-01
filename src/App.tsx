@@ -1,4 +1,10 @@
-import { Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
+import {
+  Routes,
+  Route,
+  Navigate,
+  useLocation,
+  useNavigate,
+} from "react-router-dom";
 import { useUser } from "@clerk/clerk-react";
 import { useEffect } from "react";
 import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
@@ -40,7 +46,7 @@ function App() {
   const navigate = useNavigate();
   useSyncUser();
 
-  // ── Auth sync: broadcast sign-out to widget ────────────────────────────────
+  // ── Auth sync: broadcast sign-out to widget
   // Navigation from widget → dashboard is handled via URL params (no event
   // needed — Rust calls win.navigate(url?openCreate=true&isFree=true) so the
   // React app loads directly at the right route with conditions in the URL.)
@@ -61,7 +67,9 @@ function App() {
       const url = Array.isArray(urls) ? urls[0] : urls;
       if (typeof url !== "string") return;
 
-      getCurrentWebviewWindow().setFocus().catch(() => undefined);
+      getCurrentWebviewWindow()
+        .setFocus()
+        .catch(() => undefined);
 
       if (url.startsWith("craftvita://oauth-callback")) {
         const parsed = new URL(url);
@@ -83,7 +91,7 @@ function App() {
       unlisten?.();
       unlistenNavigate.then((fn) => fn());
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   if (!isLoaded) {
@@ -98,7 +106,13 @@ function App() {
   }
 
   // Define paths that don't require authentication
-  const authPaths = ["/sign-in", "/sign-up", "/sso-callback", "/sign-in/sso-callback", "/sign-up/sso-callback"];
+  const authPaths = [
+    "/sign-in",
+    "/sign-up",
+    "/sso-callback",
+    "/sign-in/sso-callback",
+    "/sign-up/sso-callback",
+  ];
   const isAuthPage = authPaths.some((path) =>
     location.pathname.startsWith(path),
   );
@@ -147,6 +161,8 @@ function App() {
       );
     }
   }
+
+  //Routes
 
   return (
     <SidebarProvider>
