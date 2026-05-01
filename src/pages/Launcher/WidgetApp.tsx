@@ -1,10 +1,11 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import { createRoot } from "react-dom/client";
-import { ClerkProvider, useUser, useAuth, useClerk } from "@clerk/clerk-react";
+import { ClerkProvider, useUser, useAuth, useClerk, useSignIn } from "@clerk/clerk-react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { emit, listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { start, cancel } from "@fabianlars/tauri-plugin-oauth";
 import { useCreditsBalance } from "@/hooks/useCreditsBalance";
 import { cn } from "@/lib/utils";
 import {
@@ -368,7 +369,111 @@ function PastSessionsTab() {
 
 // ─── AuthScreen (signed-out) ──────────────────────────────────────────────────
 
+// ─── AuthScreen ───────────────────────────────────────────────────────────────
+// Opens the SYSTEM BROWSER at the web sign-in page.
+// The web page, after sign-in, calls the backend to create a Clerk sign-in
+// ticket and redirects to craftvita://auth-callback?ticket=TOKEN.
+// Rust's on_open_url handler emits "auth:tauri-ticket" to this webview.
+// The useEffect in WidgetContent listens for that event and signs in here.
+//
+// ⚠️  BACKEND REQUIREMENT:
+//   Add endpoint  POST /api/auth/tauri-ticket  (authenticated)
+//   Backend impl: clerk.signInTokens.createSignInToken({ userId })
+//   Response:     { ticket: string }
+// Fixed port for the Tauri auth callback server.
+// This does NOT need to be whitelisted in Clerk because we are not using
+// authenticateWithRedirect — we call the backend for a sign-in ticket and
+// then navigate the browser to http://127.0.0.1:PORT directly.
+const TAURI_AUTH_PORT = 10002;
+
+// Module-level ref so the active server port survives re-renders and can be
+// cancelled before a new one is started (handles the reload-and-retry case).
+let _activeAuthPort: number | undefined;
+
+const AUTH_CALLBACK_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8" /><title>ScribeShade – Signed In</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{display:flex;align-items:center;justify-content:center;min-height:100vh;background:#0f0f12;font-family:-apple-system,sans-serif;color:#e5e7eb}.card{background:#1a1a24;border:1px solid #2d2d3a;border-radius:16px;padding:40px 48px;text-align:center;max-width:400px;width:90%}.icon{width:56px;height:56px;background:linear-gradient(135deg,#6366f1,#8b5cf6);border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 20px}.icon svg{width:28px;height:28px}h1{font-size:1.4rem;font-weight:600;color:#f9fafb;margin-bottom:8px}p{font-size:.9rem;color:#9ca3af}</style>
+</head>
+<body><div class="card"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></div><h1>You're signed in!</h1><p>Switch back to the ScribeShade app to continue.</p></div></body>
+</html>`;
+
 function AuthScreen() {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const { signIn: clerkSignIn, setActive: clerkSetActive } = useSignIn();
+
+  const handleLogin = async () => {
+    if (loading) return;
+    setLoading(true);
+    setError(null);
+
+    let port: number | undefined;
+    let unlisten: (() => void) | undefined;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    const cleanup = async () => {
+      clearTimeout(timeoutId);
+      unlisten?.();
+      if (port !== undefined) {
+        await cancel(port).catch(() => undefined);
+        _activeAuthPort = undefined;
+        port = undefined;
+      }
+    };
+
+    try {
+      // 1. Cancel any leftover server from a previous attempt (reload-and-retry)
+      if (_activeAuthPort !== undefined) {
+        await cancel(_activeAuthPort).catch(() => undefined);
+        _activeAuthPort = undefined;
+      }
+
+      // 2. Start local HTTP server on fixed port
+      port = await start({ ports: [TAURI_AUTH_PORT], response: AUTH_CALLBACK_HTML });
+      _activeAuthPort = port;
+
+      // 2. Listen for the oauth://url event that fires when the browser hits our server
+      const authPromise = new Promise<string>((resolve, reject) => {
+        timeoutId = setTimeout(
+          () => reject(new Error("Login timed out — please try again")),
+          120_000,
+        );
+        listen<string>("oauth://url", (event) => {
+          clearTimeout(timeoutId);
+          try {
+            const ticket = new URL(event.payload).searchParams.get("ticket");
+            if (ticket) resolve(ticket);
+            else reject(new Error("Auth callback missing ticket"));
+          } catch {
+            reject(new Error("Invalid callback URL"));
+          }
+        }).then((fn) => { unlisten = fn; });
+      });
+
+      // 3. Open system browser at sign-in page with port param
+      await openUrl(`${FRONTEND_URL}/sign-in?from=tauri&port=${port}`);
+
+      // 4. Wait for the ticket to come back via the local server
+      const ticket = await authPromise;
+
+      // 5. Sign in to Clerk with the ticket
+      if (!clerkSignIn || !clerkSetActive) throw new Error("Clerk not ready");
+      const result = await clerkSignIn.create({ strategy: "ticket", ticket });
+      if (result.status === "complete") {
+        await clerkSetActive({ session: result.createdSessionId });
+      } else {
+        throw new Error("Unexpected sign-in status: " + result.status);
+      }
+    } catch (err) {
+      const e = err as { message?: string };
+      setError(e?.message ?? "Login failed");
+      setLoading(false);
+    } finally {
+      await cleanup();
+    }
+  };
+
   return (
     <div className="flex flex-col items-center gap-3 px-5 pt-3 pb-5">
       <h2 className="text-lg font-bold text-zinc-900 text-center">
@@ -377,12 +482,16 @@ function AuthScreen() {
       <p className="text-sm text-zinc-500 text-center leading-snug">
         Login to your {APP_NAME} account to start your interview.
       </p>
+      {error && (
+        <p className="text-xs text-red-500 text-center">{error}</p>
+      )}
       <button
-        onClick={() => openUrl(`${FRONTEND_URL}/sign-in`).catch(console.error)}
-        className="w-full flex items-center justify-center gap-2 px-4 py-3 mt-1 rounded-2xl bg-zinc-900 text-white text-sm font-semibold hover:bg-zinc-800 transition-colors active:scale-[0.97]"
+        onClick={handleLogin}
+        disabled={loading}
+        className="w-full flex items-center justify-center gap-2 px-4 py-3 mt-1 rounded-2xl bg-zinc-900 text-white text-sm font-semibold hover:bg-zinc-800 transition-colors active:scale-[0.97] disabled:opacity-60"
       >
-        <LogIn className="w-3.5 h-3.5" />
-        Login
+        {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <LogIn className="w-3.5 h-3.5" />}
+        {loading ? "Waiting for browser…" : "Login"}
       </button>
     </div>
   );
@@ -570,13 +679,15 @@ function HeaderMenu({
         </div>
       </div> */}
 
-      {/* {isSignedIn && (
+      {isSignedIn && (
         <>
           <div className="h-px bg-zinc-100" />
           <button
             onClick={async () => {
-              await signOut().catch(console.error);
               onClose();
+              // Pass redirectUrl of the current page so Clerk does NOT navigate
+              // the webview anywhere after sign-out (no new window, no webview redirect).
+              await signOut({ redirectUrl: window.location.href }).catch(console.error);
             }}
             className="w-full flex items-center gap-2 px-3 py-2.5 hover:bg-red-50 text-red-600 transition-colors"
           >
@@ -584,7 +695,7 @@ function HeaderMenu({
             <span className="text-sm font-medium">Logout</span>
           </button>
         </>
-      )} */}
+      )}
     </div>
   );
 }
@@ -660,8 +771,14 @@ function WidgetContent() {
           entries[0]?.contentRect.width ??
           WIDGET_W,
       );
-      if (h > 0)
-        win.setSize(new LogicalSize(w || WIDGET_W, h)).catch(console.error);
+      // Ignore zero-height frames — these happen when Clerk is mid-transition
+      // (isLoaded flips false briefly), which would collapse the window.
+      if (h === 0) return;
+      // Only call setSize when dimensions actually changed (avoids jitter).
+      const last = lastKnownSizeRef.current;
+      if (last && last.w === (w || WIDGET_W) && last.h === h) return;
+      lastKnownSizeRef.current = { w: w || WIDGET_W, h };
+      win.setSize(new LogicalSize(w || WIDGET_W, h)).catch(console.error);
     });
     ro.observe(el);
     return () => ro.disconnect();
@@ -691,13 +808,9 @@ function WidgetContent() {
       setMenuOpen(false);
       setCreationStep(0);
     })
-      .then((fn) => {
-        unlisten = fn;
-      })
+      .then((fn) => { unlisten = fn; })
       .catch(console.error);
-    return () => {
-      unlisten?.();
-    };
+    return () => { unlisten?.(); };
   }, []);
 
   // Fetch resumes and documents
@@ -813,7 +926,9 @@ function WidgetContent() {
 
   const creditsOk = hasCredits(balance);
 
-  if (!isLoaded) return null;
+  // Keep a ref to the last known size so the ResizeObserver ignores
+  // zero-height flashes that happen while Clerk is loading / transitioning.
+  const lastKnownSizeRef = useRef<{ w: number; h: number } | null>(null);
 
   return (
     <div className="w-full select-none">
@@ -908,7 +1023,7 @@ function WidgetContent() {
           {!collapsed && (
             <>
               {!isLoaded && (
-                <div className="flex items-center justify-center py-8">
+                <div className="flex items-center justify-center py-10">
                   <Loader2 className="w-5 h-5 animate-spin text-zinc-300" />
                 </div>
               )}
@@ -1322,7 +1437,6 @@ function WidgetApp() {
     <ClerkProvider
       publishableKey={PUBLISHABLE_KEY}
       allowedRedirectProtocols={["tauri:", "http:", "https:"]}
-      afterSignOutUrl="/"
     >
       <WidgetContent />
     </ClerkProvider>
