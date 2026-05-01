@@ -1,4 +1,4 @@
-use tauri::{Manager, WebviewWindowBuilder, WebviewUrl, AppHandle, Window, PhysicalPosition, LogicalSize, command};
+use tauri::{Manager, Emitter, WebviewWindowBuilder, WebviewUrl, AppHandle, Window, PhysicalPosition, LogicalSize, command};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
 use screenshots::Screen;
@@ -1302,17 +1302,70 @@ pub fn run() {
                 eprintln!("[setup] show_launcher_widget failed: {e}");
             }
 
-            // ── Deep-link: open widget (or main if already open) ──────────
+            // ── Deep-link: handle auth ticket + bring widget to front ────
+            // craftvita://auth-callback?ticket=TOKEN  ← browser login flow
+            //   Extract the ticket and emit it to the launcher webview so the
+            //   widget can sign in via Clerk's "ticket" strategy without ever
+            //   showing a webview or the main window.
+            //
+            // Any other deep link (e.g. craftvita://oauth-callback) just
+            // brings the appropriate window to the front as before.
             let deep_link_handle = app.handle().clone();
-            app.handle().deep_link().on_open_url(move |_event| {
-                // If a main window exists bring it forward (OAuth callback),
-                // otherwise just ensure the widget is visible.
+            app.handle().deep_link().on_open_url(move |event| {
+                let urls = event.urls();
+                let url_str = urls.first().map(|u| u.as_str().to_owned()).unwrap_or_default();
+
+                // ── auth-callback: extract ticket, emit to launcher ────────
+                if url_str.starts_with("craftvita://auth-callback") {
+                    if let Ok(parsed) = url::Url::parse(&url_str) {
+                        let ticket = parsed
+                            .query_pairs()
+                            .find(|(k, _)| k == "ticket")
+                            .map(|(_, v)| v.into_owned());
+
+                        if let Some(ticket) = ticket {
+                            // Ticket present: widget signs in via Clerk ticket strategy
+                            eprintln!("[deep-link] auth-callback with ticket — emitting auth:tauri-ticket");
+                            let _ = deep_link_handle.emit("auth:tauri-ticket", &ticket);
+                        } else {
+                            // No ticket: widget reloads to pick up shared localStorage session
+                            eprintln!("[deep-link] auth-callback without ticket — emitting auth:reload");
+                            let _ = deep_link_handle.emit("auth:reload", ());
+                        }
+                    } else {
+                        // Parse failed but URL starts with auth-callback — still reload
+                        eprintln!("[deep-link] auth-callback URL parse failed — emitting auth:reload");
+                        let _ = deep_link_handle.emit("auth:reload", ());
+                    }
+
+                    // Bring launcher to front — do NOT open the main window
+                    if let Some(widget) = deep_link_handle.get_webview_window("launcher") {
+                        #[cfg(target_os = "macos")]
+                        {
+                            let w = widget.clone();
+                            let _ = widget.run_on_main_thread(move || {
+                                unsafe {
+                                    if let Ok(ns_win) = w.ns_window() {
+                                        let ptr = ns_win as *mut objc2::runtime::AnyObject;
+                                        let _: () = objc2::msg_send![ptr, orderFrontRegardless];
+                                    }
+                                }
+                            });
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            let _ = widget.show();
+                            let _ = widget.set_focus();
+                        }
+                    }
+                    return;
+                }
+
+                // ── All other deep links: just bring the right window front ─
                 if let Some(main) = deep_link_handle.get_webview_window("main") {
                     let _ = main.show();
                     let _ = main.set_focus();
                 } else if let Some(widget) = deep_link_handle.get_webview_window("launcher") {
-                    // macOS: orderFrontRegardless preserves NSStatusWindowLevel;
-                    // show()/set_focus() would reset it via makeKeyAndOrderFront.
                     #[cfg(target_os = "macos")]
                     {
                         let w = widget.clone();

@@ -32,6 +32,7 @@ import SSOCallbackPage from "./pages/Auth/SSOCallback/page";
 import BillingPage from "./pages/Billing/page";
 import AIProjects from "./pages/AIProjects/page";
 import ProjectRecommendations from "./pages/AIProjects/ProjectRecommendations/page";
+import { TauriReturnBanner } from "@/components/TauriReturnBanner";
 
 function App() {
   const { isSignedIn, isLoaded } = useUser();
@@ -106,8 +107,18 @@ function App() {
     return <Navigate to="/sign-in" replace state={{ from: location }} />;
   }
 
-  // If already signed in and trying to access auth pages, redirect to dashboard
+  // If already signed in and trying to access an auth page, persist any
+  // Tauri auth params into sessionStorage BEFORE redirecting so the
+  // TauriReturnBanner can pick them up on the dashboard.
   if (isSignedIn && isAuthPage) {
+    const sp = new URLSearchParams(location.search);
+    if (sp.get("from") === "tauri") {
+      sessionStorage.setItem("from_tauri", "true");
+    }
+    const port = sp.get("port");
+    if (port) {
+      sessionStorage.setItem("tauri_auth_port", port);
+    }
     return <Navigate to="/dashboard" replace />;
   }
 
@@ -141,6 +152,7 @@ function App() {
     <SidebarProvider>
       <AppSidebar />
       <SidebarInset className="bg-muted/20 flex flex-col min-h-0">
+        <TauriReturnBanner />
         <Navbar />
         <div className="flex-1 overflow-y-auto p-4 md:p-8">
           <div className="max-w-7xl mx-auto">
