@@ -352,10 +352,24 @@ const AnswerArea: React.FC<{
 // â”€â”€â”€ Main FloatingApp â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const FloatingApp: React.FC = () => {
   // â”€â”€ Session context (received from launcher via "session-init" event) â”€â”€â”€
-  const [sessionInfo, setSessionInfo] = useState<SessionInitData | null>(null);
-  const [selectedModel, setSelectedModel] = useState(
-    "google/gemma-4-26b-a4b-it",
-  );
+  const [sessionInfo, setSessionInfo] = useState<SessionInitData | null>(() => {
+    try {
+      const stored = sessionStorage.getItem("scribeshade.session-init");
+      return stored ? (JSON.parse(stored) as SessionInitData) : null;
+    } catch {
+      return null;
+    }
+  });
+  const [selectedModel, setSelectedModel] = useState(() => {
+    try {
+      const stored = sessionStorage.getItem("scribeshade.session-init");
+      if (stored) {
+        const info = JSON.parse(stored) as SessionInitData;
+        return info.aiModel || "google/gemma-4-26b-a4b-it";
+      }
+    } catch {}
+    return "google/gemma-4-26b-a4b-it";
+  });
 
   const [messages, setMessages] = useState<TranscriptMessage[]>([]);
   const [isEnding, setIsEnding] = useState(false);
@@ -423,6 +437,7 @@ const FloatingApp: React.FC = () => {
       ]);
 
       localStorage.removeItem(`aiUsage_${info.sessionId}`);
+      try { sessionStorage.removeItem("scribeshade.session-init"); } catch {}
     } catch (err) {
       console.error("Error ending session:", err);
     } finally {
@@ -596,6 +611,7 @@ const FloatingApp: React.FC = () => {
     let unlisten: (() => void) | undefined;
     listen<SessionInitData>("session-init", (event) => {
       const info = event.payload;
+      try { sessionStorage.setItem("scribeshade.session-init", JSON.stringify(info)); } catch {}
       setSessionInfo(info);
       setSelectedModel(info.aiModel || "google/gemma-4-26b-a4b-it");
       // Notify Rust that a session is now active

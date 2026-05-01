@@ -21,7 +21,12 @@ interface ModelSelectorProps {
   className?: string;
 }
 
-export function ModelSelector({ value, onChange, isFullscreen, className }: ModelSelectorProps) {
+export function ModelSelector({
+  value,
+  onChange,
+  isFullscreen,
+  className,
+}: ModelSelectorProps) {
   return (
     <Select value={value} onValueChange={onChange}>
       <SelectTrigger
@@ -30,12 +35,12 @@ export function ModelSelector({ value, onChange, isFullscreen, className }: Mode
           isFullscreen
             ? "bg-white/10 border-white/20 text-white hover:bg-white/20"
             : "bg-white/50 border-slate-200 text-slate-700 hover:bg-white",
-          className || "w-[180px]"
+          className || "w-[180px]",
         )}
       >
         <SelectValue placeholder="Select AI Model" />
       </SelectTrigger>
-      <SelectContent className="rounded-xl border-slate-200 shadow-lg">
+      <SelectContent className="rounded-xl border-slate-200 shadow-lg" container={document.getElementById("launcher-root") ?? undefined}>
         {AI_MODELS.map((model) => (
           <SelectItem
             key={model.id}

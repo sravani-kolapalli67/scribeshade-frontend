@@ -1,6 +1,12 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import { createRoot } from "react-dom/client";
-import { ClerkProvider, useUser, useAuth, useClerk, useSignIn } from "@clerk/clerk-react";
+import {
+  ClerkProvider,
+  useUser,
+  useAuth,
+  useClerk,
+  useSignIn,
+} from "@clerk/clerk-react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { emit, listen } from "@tauri-apps/api/event";
@@ -44,21 +50,18 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { ModelSelector } from "@/pages/Sessions/ActiveSession/components/ModelSelector";
+
 import "@/App.css";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
-const _rawFrontendUrl: string = import.meta.env.VITE_FRONTEND_URL ?? "https://scribeshade-01-frontend.vercel.app";
-const FRONTEND_URL = _rawFrontendUrl.startsWith("http") ? _rawFrontendUrl : `https://${_rawFrontendUrl}`;
+const _rawFrontendUrl: string =
+  import.meta.env.VITE_FRONTEND_URL ??
+  "https://scribeshade-01-frontend.vercel.app";
+const FRONTEND_URL = _rawFrontendUrl.startsWith("http")
+  ? _rawFrontendUrl
+  : `https://${_rawFrontendUrl}`;
 const WIDGET_W = 460;
 const APP_NAME = "CraftVita";
 const ZOOM_KEY = "craftvita.widget.zoom";
@@ -242,55 +245,6 @@ function SessionSelector({
           <Info className="w-3.5 h-3.5 text-zinc-400 cursor-help" />
         </HoverTooltip>
       </div>
-
-      {/* <div className="flex flex-col gap-1.5">
-        <button
-          onClick={() => onSelect("free")}
-          className={cn(
-            "flex items-center justify-between px-3 py-2.5 rounded-2xl border text-left transition-all",
-            selected === "free"
-              ? "border-zinc-800 bg-zinc-50"
-              : "border-zinc-200 bg-white hover:border-zinc-300 hover:bg-zinc-50/60",
-          )}
-        >
-          <div>
-            <div className="text-sm font-medium text-zinc-800">
-              Free session
-            </div>
-            <div className="text-xs text-zinc-400 mt-0.5">
-              10 min · no credits required
-            </div>
-          </div>
-          <RadioDot active={selected === "free"} />
-        </button>
-
-        <button
-          onClick={() => !premiumDisabled && onSelect("premium")}
-          disabled={premiumDisabled}
-          className={cn(
-            "flex items-center justify-between px-3 py-2.5 rounded-2xl border text-left transition-all",
-            selected === "premium" && !premiumDisabled
-              ? "border-zinc-800 bg-zinc-50"
-              : "border-zinc-200 bg-white hover:border-zinc-300 hover:bg-zinc-50/60",
-            premiumDisabled && "opacity-50 cursor-not-allowed",
-          )}
-        >
-          <div>
-            <div className="text-sm font-medium text-zinc-800">
-              Premium session
-            </div>
-            <div className="text-xs text-zinc-400 mt-0.5">
-              Unlimited · AI responses
-              {premiumDisabled && (
-                <span className="ml-2 text-[10px] font-semibold text-zinc-400 bg-zinc-100 px-1.5 py-0.5 rounded-full">
-                  No credits
-                </span>
-              )}
-            </div>
-          </div>
-          <RadioDot active={selected === "premium" && !premiumDisabled} />
-        </button>
-      </div> */}
     </div>
   );
 }
@@ -367,6 +321,89 @@ function PastSessionsTab() {
   );
 }
 
+// ─── WidgetSelect (inline dropdown — no portal, window auto-resizes) ────────────
+// Renders the option list inline so the ResizeObserver sees the extra height
+// and win.setSize() expands the Tauri window.  No Radix portal = no aria-hidden.
+
+const AI_MODELS_WIDGET = [
+  { value: "google/gemma-4-26b-a4b-it", label: "Gemma 4 (26B)" },
+  { value: "google/gemini-3.1-flash-lite-preview", label: "Gemini 3.1 Flash Lite" },
+  { value: "google/gemini-3.1-pro-preview", label: "Gemini 3.1 Pro" },
+  { value: "anthropic/claude-sonnet-4.6", label: "Claude 4.6 Sonnet" },
+];
+
+function WidgetSelect({
+  value,
+  onValueChange,
+  placeholder,
+  options,
+  isLoading = false,
+  emptyMessage = "Nothing uploaded yet",
+  className,
+}: {
+  value: string;
+  onValueChange: (val: string) => void;
+  placeholder: string;
+  options: { value: string; label: string }[];
+  isLoading?: boolean;
+  emptyMessage?: string;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const selected = options.find((o) => o.value === value);
+
+  return (
+    <div className={cn("flex-1 min-w-0", className)}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center justify-between gap-2 px-3 h-11 rounded-xl border border-zinc-200 bg-white text-sm text-zinc-800 hover:bg-zinc-50 transition-colors"
+      >
+        <span className={cn("truncate min-w-0 text-left", !selected && "text-zinc-400")}>
+          {selected ? selected.label : placeholder}
+        </span>
+        <ChevronDown
+          className={cn(
+            "w-4 h-4 text-zinc-400 shrink-0 transition-transform duration-150",
+            open && "rotate-180",
+          )}
+        />
+      </button>
+
+      {open && (
+        <div className="mt-1 rounded-xl border border-zinc-200 bg-white shadow-md overflow-hidden">
+          {isLoading ? (
+            <div className="flex items-center justify-center py-3">
+              <Loader2 className="w-4 h-4 animate-spin text-zinc-300" />
+            </div>
+          ) : options.length === 0 ? (
+            <p className="py-3 text-center text-xs text-zinc-400">{emptyMessage}</p>
+          ) : (
+            <div className="max-h-44 overflow-y-auto">
+              {options.map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => {
+                    onValueChange(opt.value);
+                    setOpen(false);
+                  }}
+                  className={cn(
+                    "w-full text-left px-3 py-2.5 text-sm truncate hover:bg-zinc-50 transition-colors",
+                    opt.value === value && "bg-zinc-100 font-medium text-zinc-900",
+                  )}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── AuthScreen (signed-out) ──────────────────────────────────────────────────
 
 // ─── AuthScreen ───────────────────────────────────────────────────────────────
@@ -430,7 +467,10 @@ function AuthScreen() {
       }
 
       // 2. Start local HTTP server on fixed port
-      port = await start({ ports: [TAURI_AUTH_PORT], response: AUTH_CALLBACK_HTML });
+      port = await start({
+        ports: [TAURI_AUTH_PORT],
+        response: AUTH_CALLBACK_HTML,
+      });
       _activeAuthPort = port;
 
       // 2. Listen for the oauth://url event that fires when the browser hits our server
@@ -448,7 +488,9 @@ function AuthScreen() {
           } catch {
             reject(new Error("Invalid callback URL"));
           }
-        }).then((fn) => { unlisten = fn; });
+        }).then((fn) => {
+          unlisten = fn;
+        });
       });
 
       // 3. Open system browser at sign-in page with port param
@@ -482,15 +524,17 @@ function AuthScreen() {
       <p className="text-sm text-zinc-500 text-center leading-snug">
         Login to your {APP_NAME} account to start your interview.
       </p>
-      {error && (
-        <p className="text-xs text-red-500 text-center">{error}</p>
-      )}
+      {error && <p className="text-xs text-red-500 text-center">{error}</p>}
       <button
         onClick={handleLogin}
         disabled={loading}
         className="w-full flex items-center justify-center gap-2 px-4 py-3 mt-1 rounded-2xl bg-zinc-900 text-white text-sm font-semibold hover:bg-zinc-800 transition-colors active:scale-[0.97] disabled:opacity-60"
       >
-        {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <LogIn className="w-3.5 h-3.5" />}
+        {loading ? (
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+        ) : (
+          <LogIn className="w-3.5 h-3.5" />
+        )}
         {loading ? "Waiting for browser…" : "Login"}
       </button>
     </div>
@@ -633,51 +677,6 @@ function HeaderMenu({
       </button>
 
       <div className="h-px bg-zinc-100" />
-{/* 
-      <div className="px-1 py-1">
-        <MenuToggle
-          label="Private"
-          tooltip="Hide the widget from screen recording and screen capture."
-          checked={privateMode}
-          onChange={handlePrivate}
-        />
-        <MenuToggle
-          label="Auto-detect"
-          tooltip="Auto-detect interview audio sources (coming soon)."
-          checked={autoDetect}
-          onChange={handleAutoDetect}
-          disabled
-        />
-      </div> */}
-
-      {/* <div className="h-px bg-zinc-100" /> */}
-
-      {/* <div className="flex items-center justify-between px-3 py-2">
-        <span className="text-sm font-medium text-zinc-700">Zoom</span>
-        <div className="flex items-center gap-1">
-          <button
-            onClick={() => adjustZoom(ZOOM_STEP)}
-            className="p-1.5 rounded-lg border border-zinc-200 hover:bg-zinc-50 text-zinc-600"
-            title="Zoom in"
-          >
-            <Plus className="w-3 h-3" />
-          </button>
-          <button
-            onClick={() => adjustZoom(-ZOOM_STEP)}
-            className="p-1.5 rounded-lg border border-zinc-200 hover:bg-zinc-50 text-zinc-600"
-            title="Zoom out"
-          >
-            <Minus className="w-3 h-3" />
-          </button>
-          <button
-            onClick={resetZoom}
-            className="p-1.5 rounded-lg border border-zinc-200 hover:bg-zinc-50 text-zinc-600"
-            title="Reset zoom"
-          >
-            <RotateCcw className="w-3 h-3" />
-          </button>
-        </div>
-      </div> */}
 
       {isSignedIn && (
         <>
@@ -687,7 +686,9 @@ function HeaderMenu({
               onClose();
               // Pass redirectUrl of the current page so Clerk does NOT navigate
               // the webview anywhere after sign-out (no new window, no webview redirect).
-              await signOut({ redirectUrl: window.location.href }).catch(console.error);
+              await signOut({ redirectUrl: window.location.href }).catch(
+                console.error,
+              );
             }}
             className="w-full flex items-center gap-2 px-3 py-2.5 hover:bg-red-50 text-red-600 transition-colors"
           >
@@ -704,6 +705,7 @@ function HeaderMenu({
 
 function WidgetContent() {
   const { isLoaded, isSignedIn, user } = useUser();
+  const { getToken } = useAuth();
   const [tab, setTab] = useState<Tab>("create");
   const [collapsed, setCollapsed] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -808,43 +810,85 @@ function WidgetContent() {
       setMenuOpen(false);
       setCreationStep(0);
     })
-      .then((fn) => { unlisten = fn; })
+      .then((fn) => {
+        unlisten = fn;
+      })
       .catch(console.error);
-    return () => { unlisten?.(); };
+    return () => {
+      unlisten?.();
+    };
   }, []);
 
   // Fetch resumes and documents
   useEffect(() => {
-    if (isSignedIn && user?.id) {
+    if (!isSignedIn || !user?.id) return;
+
+    let cancelled = false;
+
+    const fetchData = async () => {
       setIsLoadingResumes(true);
       setIsLoadingDocs(true);
-      const userId = localStorage.getItem("userId") || user.id;
 
-      // Resumes
-      fetch(
-        `${import.meta.env.VITE_BACKEND_URL}/api/resume/list?userId=${userId}`,
-      )
-        .then((res) => res.json())
-        .then((data) => {
-          const list = Array.isArray(data) ? data : data.data || [];
-          setResumes(list);
-        })
-        .catch(console.error)
-        .finally(() => setIsLoadingResumes(false));
+      try {
+        // Resolve the backend internal userId — the Clerk user.id is NOT the same.
+        // On a fresh client machine localStorage may be empty, so we call /api/auth/me
+        // with the Clerk Bearer token to get and cache the correct DB userId.
+        let userId = localStorage.getItem("userId");
+        if (!userId) {
+          const token = await getToken();
+          if (token) {
+            const meRes = await fetch(
+              `${import.meta.env.VITE_BACKEND_URL}/api/auth/me`,
+              { headers: { Authorization: `Bearer ${token}` } },
+            );
+            if (meRes.ok) {
+              const meData = await meRes.json();
+              if (meData?.id) {
+                userId = meData.id as string;
+                localStorage.setItem("userId", userId);
+              }
+            }
+          }
+        }
 
-      // Documents
-      fetch(
-        `${import.meta.env.VITE_BACKEND_URL}/api/document/list?userId=${userId}`,
-      )
-        .then((res) => res.json())
-        .then((data) => {
-          const list = Array.isArray(data) ? data : data.data || [];
-          setDocuments(list);
-        })
-        .catch(console.error)
-        .finally(() => setIsLoadingDocs(false));
-    }
-  }, [isSignedIn, user?.id]);
+        if (!userId || cancelled) return;
+
+        const token = await getToken();
+        const authHeaders: HeadersInit = token
+          ? { Authorization: `Bearer ${token}` }
+          : {};
+
+        const [resumeRes, docRes] = await Promise.all([
+          fetch(
+            `${import.meta.env.VITE_BACKEND_URL}/api/resume/list?userId=${userId}`,
+            { headers: authHeaders },
+          ),
+          fetch(
+            `${import.meta.env.VITE_BACKEND_URL}/api/document/list?userId=${userId}`,
+            { headers: authHeaders },
+          ),
+        ]);
+
+        if (!cancelled) {
+          const resumeData = resumeRes.ok ? await resumeRes.json() : [];
+          setResumes(Array.isArray(resumeData) ? resumeData : resumeData.data || []);
+
+          const docData = docRes.ok ? await docRes.json() : [];
+          setDocuments(Array.isArray(docData) ? docData : docData.data || []);
+        }
+      } catch (err) {
+        console.error("[WidgetApp] Failed to fetch resumes/documents:", err);
+      } finally {
+        if (!cancelled) {
+          setIsLoadingResumes(false);
+          setIsLoadingDocs(false);
+        }
+      }
+    };
+
+    fetchData();
+    return () => { cancelled = true; };
+  }, [isSignedIn, user?.id, getToken]);
 
   const handleStartFlow = (isFree: boolean) => {
     setSessionInfo((prev) => ({ ...prev, isFree }));
@@ -855,6 +899,7 @@ function WidgetContent() {
     if (isCreating) return;
     setIsCreating(true);
 
+    // Always use the cached backend userId; it was resolved during the resume fetch.
     const userId = localStorage.getItem("userId") || user?.id;
     if (!userId) {
       console.error("No user ID found");
@@ -1114,7 +1159,7 @@ function WidgetContent() {
                                     </HoverTooltip>
                                   </div>
                                   <div className="flex items-center gap-2">
-                                    <Select
+                                    <WidgetSelect
                                       value={sessionInfo.resumeId}
                                       onValueChange={(val) =>
                                         setSessionInfo((p) => ({
@@ -1122,22 +1167,11 @@ function WidgetContent() {
                                           resumeId: val,
                                         }))
                                       }
-                                    >
-                                      <SelectTrigger className="flex-1 min-w-0 rounded-xl border-zinc-200 h-11 bg-white [&>span:first-child]:truncate [&>span:first-child]:min-w-0">
-                                        <SelectValue placeholder="Select resume" />
-                                      </SelectTrigger>
-                                      <SelectContent className="rounded-xl">
-                                        {resumes.map((r) => (
-                                          <SelectItem
-                                            key={r.id}
-                                            value={r.id}
-                                            className="cursor-pointer max-w-85 truncate"
-                                          >
-                                            {r.filename}
-                                          </SelectItem>
-                                        ))}
-                                      </SelectContent>
-                                    </Select>
+                                      placeholder="Select resume"
+                                      options={resumes.map((r) => ({ value: r.id, label: r.filename }))}
+                                      isLoading={isLoadingResumes}
+                                      emptyMessage="No resumes uploaded yet"
+                                    />
                                     {sessionInfo.resumeId && (
                                       <button
                                         onClick={() =>
@@ -1165,7 +1199,7 @@ function WidgetContent() {
                                     </HoverTooltip>
                                   </div>
                                   <div className="flex items-center gap-2">
-                                    <Select
+                                    <WidgetSelect
                                       value={sessionInfo.documentId}
                                       onValueChange={(val) =>
                                         setSessionInfo((p) => ({
@@ -1173,22 +1207,11 @@ function WidgetContent() {
                                           documentId: val,
                                         }))
                                       }
-                                    >
-                                      <SelectTrigger className="flex-1 min-w-0 rounded-xl border-zinc-200 h-11 bg-white [&>span:first-child]:truncate [&>span:first-child]:min-w-0">
-                                        <SelectValue placeholder="Select documents" />
-                                      </SelectTrigger>
-                                      <SelectContent className="rounded-xl">
-                                        {documents.map((d) => (
-                                          <SelectItem
-                                            key={d.id}
-                                            value={d.id}
-                                            className="cursor-pointer max-w-85 truncate"
-                                          >
-                                            {d.filename}
-                                          </SelectItem>
-                                        ))}
-                                      </SelectContent>
-                                    </Select>
+                                      placeholder="Select documents"
+                                      options={documents.map((d) => ({ value: d.id, label: d.filename }))}
+                                      isLoading={isLoadingDocs}
+                                      emptyMessage="No documents uploaded yet"
+                                    />
                                     {sessionInfo.documentId && (
                                       <button
                                         onClick={() =>
@@ -1217,12 +1240,16 @@ function WidgetContent() {
                                   onClick={() => setCreationStep(2)}
                                   disabled={
                                     !sessionInfo.companyName.trim() ||
-                                    !JOB_DESCRIPTION_REGEX.test(sessionInfo.jobDescription.trim())
+                                    !JOB_DESCRIPTION_REGEX.test(
+                                      sessionInfo.jobDescription.trim(),
+                                    )
                                   }
                                   className={cn(
                                     "py-2.5 rounded-2xl text-white text-sm font-bold transition-all active:scale-[0.98]",
                                     sessionInfo.companyName.trim() &&
-                                    JOB_DESCRIPTION_REGEX.test(sessionInfo.jobDescription.trim())
+                                      JOB_DESCRIPTION_REGEX.test(
+                                        sessionInfo.jobDescription.trim(),
+                                      )
                                       ? "bg-zinc-900 hover:bg-zinc-800 shadow-lg shadow-black/10"
                                       : "bg-zinc-300 text-zinc-400 cursor-not-allowed",
                                   )}
@@ -1247,7 +1274,7 @@ function WidgetContent() {
                                         <Info className="w-3 h-3 text-zinc-400 cursor-help" />
                                       </HoverTooltip>
                                     </div>
-                                    <Select
+                                    <WidgetSelect
                                       value={sessionInfo.language}
                                       onValueChange={(val) =>
                                         setSessionInfo((p) => ({
@@ -1255,22 +1282,13 @@ function WidgetContent() {
                                           language: val,
                                         }))
                                       }
-                                    >
-                                      <SelectTrigger className="rounded-xl border-zinc-200 h-10">
-                                        <SelectValue />
-                                      </SelectTrigger>
-                                      <SelectContent className="rounded-xl">
-                                        <SelectItem value="English">
-                                          English
-                                        </SelectItem>
-                                        <SelectItem value="Spanish">
-                                          Spanish
-                                        </SelectItem>
-                                        <SelectItem value="French">
-                                          French
-                                        </SelectItem>
-                                      </SelectContent>
-                                    </Select>
+                                      placeholder="Language"
+                                      options={[
+                                        { value: "English", label: "English" },
+                                        { value: "Spanish", label: "Spanish" },
+                                        { value: "French", label: "French" },
+                                      ]}
+                                    />
                                   </div>
 
                                   <div className="space-y-1.5">
@@ -1329,16 +1347,17 @@ function WidgetContent() {
                                       <Info className="w-3 h-3 text-zinc-400 cursor-help" />
                                     </HoverTooltip>
                                   </div>
-                                  <ModelSelector
+                                  <WidgetSelect
                                     value={sessionInfo.aiModel}
-                                    onChange={(val) =>
+                                    onValueChange={(val) =>
                                       setSessionInfo((p) => ({
                                         ...p,
                                         aiModel: val,
                                       }))
                                     }
-                                    isFullscreen={false}
-                                    className="w-full h-11 bg-white border-zinc-200 text-zinc-800"
+                                    placeholder="Select AI model"
+                                    options={AI_MODELS_WIDGET}
+                                    className="w-full"
                                   />
                                 </div>
 

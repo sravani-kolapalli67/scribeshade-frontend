@@ -64,7 +64,7 @@ export function useFreeSessionTimer({
         
         const start = session.startedAt ? new Date(session.startedAt).getTime() : new Date().getTime();
         const now = new Date().getTime();
-        const elapsed = Math.floor((now - start) / 1000);
+        const elapsed = Math.max(0, Math.floor((now - start) / 1000));
 
         if (isFree) {
           const remaining = Math.max(0, FREE_SESSION_DURATION - elapsed);
@@ -74,13 +74,8 @@ export function useFreeSessionTimer({
             hasEndedRef.current = true;
             setTimeout(() => onTimeUpRef.current(), 0);
           }
-        } else if (maxAllowedMinutes) {
-          // Paid session with a cap: count down remaining seconds
-          const totalAllowedSeconds = maxAllowedMinutes * 60;
-          const remaining = Math.max(0, totalAllowedSeconds - elapsed);
-          setSeconds(remaining);
         } else {
-          // Paid session without cap: count up from elapsed
+          // Paid/full session: always count up from elapsed time
           setSeconds(elapsed);
         }
       } catch (err) {
@@ -112,11 +107,8 @@ export function useFreeSessionTimer({
             return 0;
           }
           return prev - 1;
-        } else if (maxAllowedMinutes) {
-          // Paid with cap: count down
-          return Math.max(0, prev - 1);
         } else {
-          // Paid without cap: count up
+          // Paid/full session: always count up
           return prev + 1;
         }
       });
@@ -149,8 +141,6 @@ export function useFreeSessionTimer({
     formattedTime: seconds !== null ? formatTime(seconds) : null,
     progress: isFreeSession && seconds !== null
       ? seconds / FREE_SESSION_DURATION
-      : maxAllowedMinutes && seconds !== null
-        ? seconds / (maxAllowedMinutes * 60)
-        : 1,
+      : 1,
   };
 }

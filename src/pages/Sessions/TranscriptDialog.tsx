@@ -36,6 +36,16 @@ interface Interaction {
   timestamp: string;
 }
 
+interface SessionNotes {
+  id: string;
+  sessionId: string;
+  companyName: string;
+  jobDescription: string;
+  summary: string;
+  questions: string[];
+  updatedAt: string;
+}
+
 interface TranscriptDialogProps {
   isOpen: boolean;
   onClose: () => void;
@@ -51,22 +61,36 @@ export function TranscriptDialog({
 }: TranscriptDialogProps) {
   const [activeTab, setActiveTab] = useState("transcript");
   const [messages, setMessages] = useState<Message[]>([]);
+  const [notes, setNotes] = useState<SessionNotes | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Fetch session details from backend
+  // Fetch session details and notes from backend
   useEffect(() => {
     if (isOpen && sessionId) {
       const fetchDetails = async () => {
         setIsLoading(true);
         try {
+          // Fetch Transcript
           const res = await fetch(
             `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionId}`,
           );
           if (res.ok) {
             const data = await res.json();
             setMessages(data.messages || []);
+          }
+
+          // Fetch Existing Notes
+          const notesRes = await fetch(
+            `${import.meta.env.VITE_BACKEND_URL}/api/session-notes/${sessionId}`,
+          );
+          if (notesRes.ok) {
+            const notesData = await notesRes.json();
+            setNotes(notesData.data);
+          } else {
+            setNotes(null);
           }
         } catch (error) {
           console.error("Error fetching session details:", error);
@@ -77,6 +101,28 @@ export function TranscriptDialog({
       fetchDetails();
     }
   }, [isOpen, sessionId]);
+
+  const generateNotes = async () => {
+    if (!sessionId) return;
+    setIsGenerating(true);
+    try {
+      const res = await fetch(
+        `${import.meta.env.VITE_BACKEND_URL}/api/session-notes/${sessionId}/generate`,
+        {
+          method: "POST",
+        },
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setNotes(data.data);
+        setActiveTab("ai-notes");
+      }
+    } catch (error) {
+      console.error("Error generating notes:", error);
+    } finally {
+      setIsGenerating(false);
+    }
+  };
 
   // Removed unused interactions memo
 
@@ -472,14 +518,100 @@ export function TranscriptDialog({
               )}
 
               {/* Place-holder for inactive tabs to match dashboard look */}
-              <TabsContent
-                value="ai-notes"
-                className="py-20 flex flex-col items-center justify-center opacity-30"
-              >
-                <FileText className="size-16 mb-4 text-slate-300" />
-                <p className="font-black uppercase tracking-widest text-slate-500 text-sm">
-                  Notes generating...
-                </p>
+              <TabsContent value="ai-notes" className="mt-0 outline-none">
+                {isGenerating ? (
+                  <div className="py-32 flex flex-col items-center justify-center gap-6">
+                    <div className="relative">
+                      <div className="size-16 border-[3px] border-slate-100 border-t-brand rounded-full animate-spin" />
+                      <Sparkles className="size-6 text-brand absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" />
+                    </div>
+                    <div className="text-center">
+                      <p className="text-sm font-black text-slate-400 uppercase tracking-[0.2em] mb-2">
+                        Analyzing Session...
+                      </p>
+                      <p className="text-xs text-slate-400">
+                        Crafting your summary and extracting questions
+                      </p>
+                    </div>
+                  </div>
+                ) : !notes ? (
+                  <div className="py-20 flex flex-col items-center justify-center border-2 border-dashed border-slate-100 rounded-[2.5rem] bg-slate-50/50">
+                    <div className="size-20 bg-white rounded-3xl shadow-xl shadow-slate-200/50 flex items-center justify-center mb-6">
+                      <Sparkles className="size-10 text-brand" />
+                    </div>
+                    <h3 className="text-xl font-bold text-slate-800 mb-2">
+                      Generate AI Notes
+                    </h3>
+                    <p className="text-slate-500 text-center max-w-xs mb-8">
+                      Get a professional summary and a list of all questions
+                      asked during this session.
+                    </p>
+                    <Button
+                      onClick={generateNotes}
+                      className="h-14 px-10 rounded-2xl bg-brand hover:bg-brand/90 text-white font-bold gap-3 shadow-lg shadow-brand/20 transition-all hover:scale-[1.02] active:scale-95"
+                    >
+                      <Sparkles className="size-5" />
+                      Generate Now
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="max-w-4xl mx-auto px-4 pb-10">
+                    <div className="space-y-10">
+                      {/* Details Section */}
+                      <section>
+                        <h2 className="text-xl font-bold text-slate-800 mb-4">
+                          Details
+                        </h2>
+                        <ul className="space-y-2">
+                          <li className="flex items-start gap-2 text-slate-700">
+                            <span className="font-bold text-slate-900">
+                              • Company:
+                            </span>
+                            <span>{notes.companyName}</span>
+                          </li>
+                          {notes.jobDescription &&
+                            notes.jobDescription.trim() !== "" && (
+                              <li className="flex items-start gap-2 text-slate-700">
+                                <span className="font-bold text-slate-900">
+                                  • Position:
+                                </span>
+                                <span>{notes.jobDescription}</span>
+                              </li>
+                            )}
+                        </ul>
+                        <div className="h-px bg-slate-100 w-full mt-8" />
+                      </section>
+
+                      {/* Summary Section */}
+                      <section>
+                        <h2 className="text-xl font-bold text-slate-800 mb-4">
+                          Summary
+                        </h2>
+                        <p className="text-[15px] leading-relaxed text-slate-700 font-medium">
+                          {notes.summary}
+                        </p>
+                        <div className="h-px bg-slate-100 w-full mt-8" />
+                      </section>
+
+                      {/* Questions Section */}
+                      <section>
+                        <h2 className="text-xl font-bold text-slate-800 mb-4">
+                          Questions
+                        </h2>
+                        <ul className="space-y-4">
+                          {notes.questions.map((q, idx) => (
+                            <li key={idx} className="flex gap-4 group">
+                              <span className="shrink-0 size-2 rounded-full bg-indigo-400 mt-2.5 transition-all group-hover:scale-125 shadow-[0_0_8px_rgba(129,140,248,0.5)]" />
+                              <span className="text-[15px] text-slate-700 font-medium leading-relaxed">
+                                {q}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </section>
+                    </div>
+                  </div>
+                )}
               </TabsContent>
 
               <TabsContent
