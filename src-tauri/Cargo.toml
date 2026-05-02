@@ -1,6 +1,6 @@
-[package]
+﻿[package]
 name = "scribeshade-frontend"
-version = "0.1.0"
+version = "0.1.1"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -24,6 +24,8 @@ tauri-plugin-oauth = "2"
 tauri-plugin-deep-link = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
@@ -32,7 +34,7 @@ base64 = "0.22.1"
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["ws"] }
 [target.'cfg(target_os = "macos")'.dependencies]
-# cpal captures the default input device (mic) — kept for user mic transcription.
+# cpal captures the default input device (mic) â€” kept for user mic transcription.
 cpal = "0.15"
 # screencapturekit captures system/display audio without a virtual audio device.
 # requires macOS 13.0+ for audio capture APIs.

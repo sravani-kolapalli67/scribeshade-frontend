@@ -20,6 +20,7 @@
 
 import { useState, useRef, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { isTauri } from "@/lib/utils";
 
 interface Props {
   apiKey: string;
@@ -45,21 +46,137 @@ export function useNativeTabTranscription({
 
   const rustWsRef = useRef<WebSocket | null>(null);
   const dgWsRef = useRef<WebSocket | null>(null);
-  // Keep latest callback ref so the WS handler never stales
+
+  // Keep latest props in refs so WS closures never go stale
   const onTranscriptRef = useRef(onTranscript);
+  const apiKeyRef = useRef(apiKey);
+  const modelRef = useRef(model);
+  const languageRef = useRef(language);
   useEffect(() => { onTranscriptRef.current = onTranscript; }, [onTranscript]);
+  useEffect(() => { apiKeyRef.current = apiKey; }, [apiKey]);
+  useEffect(() => { modelRef.current = model; }, [model]);
+  useEffect(() => { languageRef.current = language; }, [language]);
+
+  // Last audio metadata received from Rust — needed for DG reconnect
+  const audioMetaRef = useRef<{ sampleRate: number; channels: number } | null>(null);
+  // Deepgram keepalive interval (prevents 12 s inactivity timeout during silence)
+  const dgKeepaliveRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Reconnect back-off timer
+  const dgReconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearDgTimers = useCallback(() => {
+    if (dgKeepaliveRef.current) { clearInterval(dgKeepaliveRef.current); dgKeepaliveRef.current = null; }
+    if (dgReconnectRef.current) { clearTimeout(dgReconnectRef.current); dgReconnectRef.current = null; }
+  }, []);
+
+  // Stable ref so openDeepgramWs can call itself recursively for reconnects
+  const openDeepgramWsRef = useRef<((meta: { sampleRate: number; channels: number }) => void) | null>(null);
+
+  // openDeepgramWs is redefined each render but always stored in the ref so
+  // closures inside WS handlers get the freshest version.
+  const openDeepgramWs = useCallback((meta: { sampleRate: number; channels: number }) => {
+    clearDgTimers();
+    // Close any existing DG connection before opening a fresh one
+    dgWsRef.current?.close();
+    dgWsRef.current = null;
+
+    const dgUrl =
+      `wss://api.deepgram.com/v1/listen` +
+      `?model=${modelRef.current}` +
+      `&punctuate=true` +
+      `&interim_results=true` +
+      `&language=${languageRef.current}` +
+      `&smart_format=true` +
+      `&endpointing=1500` +
+      `&utterance_end_ms=2000` +
+      `&vad_events=true` +
+      `&encoding=linear16` +
+      `&sample_rate=${meta.sampleRate}` +
+      `&channels=${meta.channels}` +
+      `&tag=craftvita-display`;
+
+    const dgWs = new WebSocket(dgUrl, ["token", apiKeyRef.current]);
+    dgWsRef.current = dgWs;
+
+    dgWs.onopen = () => {
+      setIsTranscribing(true);
+      setIsConnecting(false);
+      // Send KeepAlive every 8 s so Deepgram doesn't close during silence
+      // (Deepgram's default inactivity timeout is ~12 s)
+      dgKeepaliveRef.current = setInterval(() => {
+        if (dgWsRef.current?.readyState === WebSocket.OPEN) {
+          dgWsRef.current.send(JSON.stringify({ type: "KeepAlive" }));
+        }
+      }, 8_000);
+    };
+
+    dgWs.onmessage = (dgEvt) => {
+      try {
+        const data = JSON.parse(dgEvt.data as string);
+        if (data.type === "Results" && data.channel?.alternatives?.[0]) {
+          const alt = data.channel.alternatives[0];
+          const text: string = alt.transcript;
+          const isFinal: boolean = data.is_final;
+
+          if (isFinal) {
+            if (text.trim()) {
+              setTranscript((p) => (p + " " + text).trim());
+            }
+            setInterimTranscript("");
+          } else if (text) {
+            setInterimTranscript(text);
+          }
+
+          if (onTranscriptRef.current && (text.trim() || !isFinal)) {
+            onTranscriptRef.current(text, isFinal);
+          }
+        }
+      } catch {
+        // Ignore malformed Deepgram frames
+      }
+    };
+
+    dgWs.onerror = () => {
+      setError("Deepgram connection error");
+    };
+
+    dgWs.onclose = () => {
+      clearDgTimers();
+      // If the Rust stream is still alive, transparently reconnect Deepgram.
+      // This handles Deepgram's inactivity close that occurs during long pauses
+      // (e.g. the remote user is silent while the local user answers for 1-2 min).
+      if (rustWsRef.current?.readyState === WebSocket.OPEN && audioMetaRef.current) {
+        dgReconnectRef.current = setTimeout(() => {
+          if (rustWsRef.current?.readyState === WebSocket.OPEN && audioMetaRef.current) {
+            openDeepgramWsRef.current?.(audioMetaRef.current);
+          }
+        }, 1_500);
+      } else {
+        setIsTranscribing(false);
+      }
+    };
+  }, [clearDgTimers]);
+
+  // Keep the ref current on every render
+  openDeepgramWsRef.current = openDeepgramWs;
 
   const stopTranscription = useCallback(async () => {
+    clearDgTimers();
     rustWsRef.current?.close();
     rustWsRef.current = null;
     dgWsRef.current?.close();
     dgWsRef.current = null;
+    audioMetaRef.current = null;
     setIsTranscribing(false);
     setIsConnecting(false);
-    try { await invoke("stop_display_audio_stream"); } catch (_) { /* best-effort */ }
-  }, []);
+    if (isTauri()) {
+      try { await invoke("stop_display_audio_stream"); } catch (_) { /* best-effort */ }
+    }
+  }, [clearDgTimers]);
 
   const startTranscription = useCallback(async () => {
+    // Native Tauri audio path only — silently no-op in web browser
+    if (!isTauri()) return;
     // Idempotent — don't start twice
     if (isConnecting || isTranscribing) return;
     await stopTranscription();
@@ -85,66 +202,10 @@ export function useNativeTabTranscription({
             return;
           }
 
-          const { sampleRate, channels } = meta;
-
-          // Open Deepgram WS for raw linear16 PCM at the native cpal rate.
-          // No AudioContext, no MediaRecorder — just binary forwarding.
-          const dgUrl =
-            `wss://api.deepgram.com/v1/listen` +
-            `?model=${model}` +
-            `&punctuate=true` +
-            `&interim_results=true` +
-            `&language=${language}` +
-            `&smart_format=true` +
-            `&endpointing=500` +
-            `&utterance_end_ms=1000` +
-            `&vad_events=true` +
-            `&encoding=linear16` +
-            `&sample_rate=${sampleRate}` +
-            `&channels=${channels}` +
-            `&tag=craftvita-display`;
-
-          const dgWs = new WebSocket(dgUrl, ["token", apiKey]);
-          dgWsRef.current = dgWs;
-
-          dgWs.onopen = () => {
-            setIsTranscribing(true);
-            setIsConnecting(false);
-          };
-
-          dgWs.onmessage = (dgEvt) => {
-            try {
-              const data = JSON.parse(dgEvt.data);
-              if (data.type === "Results" && data.channel?.alternatives?.[0]) {
-                const alt = data.channel.alternatives[0];
-                const text: string = alt.transcript;
-                const isFinal: boolean = data.is_final;
-
-                if (isFinal) {
-                  if (text.trim()) {
-                    setTranscript((p) => (p + " " + text).trim());
-                  }
-                  setInterimTranscript("");
-                } else if (text) {
-                  setInterimTranscript(text);
-                }
-
-                if (onTranscriptRef.current && (text.trim() || !isFinal)) {
-                  onTranscriptRef.current(text, isFinal);
-                }
-              }
-            } catch {
-              // Ignore malformed Deepgram frames
-            }
-          };
-
-          dgWs.onerror = () => {
-            setError("Deepgram connection error");
-          };
-
-          dgWs.onclose = () => {
-            setIsTranscribing(false);
-          };
+          // Store for reconnects
+          audioMetaRef.current = meta;
+          // Open (or reopen) Deepgram with the received audio format
+          openDeepgramWsRef.current?.(meta);
           return;
         }
 
@@ -164,6 +225,7 @@ export function useNativeTabTranscription({
       };
 
       rustWs.onclose = () => {
+        clearDgTimers();
         setIsTranscribing(false);
         setIsConnecting(false);
       };
@@ -171,7 +233,7 @@ export function useNativeTabTranscription({
       setError(e?.message ?? String(e));
       setIsConnecting(false);
     }
-  }, [apiKey, model, language, stopTranscription, isConnecting, isTranscribing]);
+  }, [stopTranscription, clearDgTimers, isConnecting, isTranscribing]);
 
   // React to `enabled` changes
   useEffect(() => {
@@ -186,9 +248,13 @@ export function useNativeTabTranscription({
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      if (dgKeepaliveRef.current) clearInterval(dgKeepaliveRef.current);
+      if (dgReconnectRef.current) clearTimeout(dgReconnectRef.current);
       rustWsRef.current?.close();
       dgWsRef.current?.close();
-      invoke("stop_display_audio_stream").catch(() => {});
+      if (isTauri()) {
+        invoke("stop_display_audio_stream").catch(() => {});
+      }
     };
   }, []);
 

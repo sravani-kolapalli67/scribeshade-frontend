@@ -1,0 +1,91 @@
+name: Release CraftVita
+
+# Trigger: push to the `release` branch.
+# Workflow:
+#   1. Build macOS (universal: arm64 + x86_64) on macos-latest
+#   2. Build Windows x64 on windows-latest
+#   3. tauri-action signs all artifacts, generates latest.json, creates the
+#      GitHub Release, and uploads every artifact — fully automatic.
+#
+# Prerequisites (set once in repo Settings → Secrets → Actions):
+#   TAURI_SIGNING_PRIVATE_KEY         raw text of ~/.tauri/craftvita.key
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  your key password (or empty string)
+
+on:
+  push:
+    branches:
+      - release
+
+jobs:
+  publish-tauri:
+    permissions:
+      contents: write   # required to create GitHub Releases
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ── macOS universal binary (runs on both Intel and Apple Silicon) ──
+          - platform: macos-latest
+            args: --target universal-apple-darwin
+          # ── Windows x64 ──────────────────────────────────────────────────
+          - platform: windows-latest
+            args: ""
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 10   # keep in sync with existing build.yml
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20   # keep in sync with existing build.yml
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Both targets are required for universal-apple-darwin on macOS;
+          # empty string is fine for Windows.
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2   # same action + casing as existing build.yml
+        with:
+          workspaces: ./src-tauri -> target
+          cache-on-failure: true
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      # tauri-action runs pnpm tauri build internally.  Our tauri-wrapper.cjs
+      # detects CI=true and skips the local version-bump, so the version
+      # committed by bump-version.sh is used as-is.
+      - name: Build and publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          # __VERSION__ is replaced by tauri-action with the version from tauri.conf.json
+          tagName: v__VERSION__
+          releaseName: CraftVita v__VERSION__
+          releaseBody: |
+            ## CraftVita v__VERSION__
+
+            Download the installer for your platform below.
+
+            **macOS** — universal binary (Intel + Apple Silicon)
+            **Windows** — x64 installer
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}

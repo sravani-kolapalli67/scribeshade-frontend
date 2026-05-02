@@ -18,7 +18,7 @@ static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 // Deepgram directly.
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-static AUDIO_RUNNING: AtomicBool = AtomicBool::new(false);
+static AUDIO_RUNNING: AtomicBool = AtomicBool::new(true);
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 static AUDIO_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
@@ -28,7 +28,7 @@ static AUDIO_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::
 /// virtual audio device (BlackHole/Loopback).  Requires macOS 13.0+ and the
 /// user to have granted Screen Recording permission.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-static DISPLAY_AUDIO_RUNNING: AtomicBool = AtomicBool::new(false);
+static DISPLAY_AUDIO_RUNNING: AtomicBool = AtomicBool::new(true);
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 static DISPLAY_AUDIO_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
@@ -1247,6 +1247,8 @@ fn show_launcher_widget(app: AppHandle) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_oauth::init())
         .plugin(tauri_plugin_deep_link::init())

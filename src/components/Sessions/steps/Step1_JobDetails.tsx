@@ -12,7 +12,7 @@ interface Step1Props {
   onChange: (field: string, value: any) => void;
 }
 
-export const JOB_DESCRIPTION_REGEX = /^.{2,}$/i;
+export const JOB_DESCRIPTION_REGEX = /^.{2,}/im;
 
 export function Step1_JobDetails({ data, onChange }: Step1Props) {
   return (
@@ -69,7 +69,7 @@ export function Step1_JobDetails({ data, onChange }: Step1Props) {
             id="jobDescription"
             placeholder="Full Stack Developer, Data Science, or detailed description..."
             className={cn(
-              "min-h-40 max-h-80 overflow-y-auto rounded-xl bg-background border-border/80 focus:ring-primary/20 transition-all p-4 resize-none font-medium text-sm leading-relaxed scrollbar-gutter-stable",
+              "min-h-24 max-h-36 overflow-y-auto rounded-xl bg-background border-border/80 focus:ring-primary/20 transition-all p-4 resize-none font-medium text-sm leading-relaxed",
               data.jobDescription &&
                 !JOB_DESCRIPTION_REGEX.test(data.jobDescription) &&
                 "border-amber-500/50 focus:border-amber-500/50 focus:ring-amber-500/10",

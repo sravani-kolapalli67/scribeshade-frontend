@@ -187,7 +187,7 @@ const SignInPage = () => {
       <div className="w-full max-w-md rounded-2xl shadow-xl border border-slate-100 bg-white">
         {/* Header */}
         <div className="px-8 pt-8 pb-6 text-center">
-          <h1 className="text-xl font-semibold text-slate-900">Sign in to ScribeShade</h1>
+          <h1 className="text-xl font-semibold text-slate-900">Sign in to CraftVita</h1>
           {fromTauri && (
             <p className="mt-1.5 text-xs font-medium text-blue-600 bg-blue-50 rounded-full px-3 py-1 inline-block">
               Signing in for CraftVita desktop app

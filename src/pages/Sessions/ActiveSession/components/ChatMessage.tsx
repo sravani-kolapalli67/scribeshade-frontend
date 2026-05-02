@@ -167,7 +167,10 @@ export const ChatMessage = ({
         </div>
         <div className="flex-1">
           <div className="group/ansheader relative flex items-center justify-between mb-3">
-            <div className="text-[14.5px] font-bold text-slate-900">
+            <div className={cn(
+              "text-[14.5px] font-bold",
+              isFullscreen ? "text-white" : "text-slate-900"
+            )}>
               Answer:
             </div>
             <CopyButton
@@ -190,7 +193,10 @@ export const ChatMessage = ({
                 p: ({ children }) => {
                   const textContent = String(children);
                   return (
-                    <div className="group/p relative flex items-start gap-3 mb-4 last:mb-0 -ml-8 px-2 rounded-md hover:bg-slate-50/50 transition-colors">
+                    <div className={cn(
+                      "group/p relative flex items-start gap-3 mb-4 last:mb-0 -ml-8 px-2 rounded-md transition-colors",
+                      isFullscreen ? "hover:bg-white/5" : "hover:bg-slate-50/50"
+                    )}>
                       <div className="w-8 shrink-0 flex items-center justify-center h-6 relative">
                         <CopyButton
                           text={textContent}
@@ -226,28 +232,42 @@ export const ChatMessage = ({
                   };
 
                   return (
-                    <li className="group/li flex items-start gap-2 py-1 relative -ml-8 px-2 rounded-md hover:bg-slate-50/50 transition-colors">
+                    <li className={cn(
+                      "group/li flex items-start gap-2 py-1 relative -ml-8 px-2 rounded-md transition-colors",
+                      isFullscreen ? "hover:bg-white/5" : "hover:bg-slate-50/50"
+                    )}>
                       <div className="w-8 shrink-0 flex items-center justify-center h-6 relative">
                         <div className="h-1.5 w-1.5 rounded-full bg-slate-300 group-hover/li:opacity-0 transition-opacity" />
                         <button
                           onClick={handleCopy}
-                          className="absolute inset-0 m-auto flex items-center justify-center h-6 w-6 bg-white border border-slate-200 rounded-md shadow-sm opacity-0 group-hover/li:opacity-100 hover:bg-slate-50 transition-all"
+                          className={cn(
+                            "absolute inset-0 m-auto flex items-center justify-center h-6 w-6 border rounded-md shadow-sm opacity-0 group-hover/li:opacity-100 transition-all",
+                            isFullscreen
+                              ? "bg-white/10 border-white/20 hover:bg-white/20"
+                              : "bg-white border-slate-200 hover:bg-slate-50"
+                          )}
                         >
                           {copied ? (
                             <Check className="h-3 w-3 text-emerald-500" />
                           ) : (
-                            <Copy className="h-3 w-3 text-slate-400" />
+                            <Copy className={cn("h-3 w-3", isFullscreen ? "text-white/60" : "text-slate-400")} />
                           )}
                         </button>
                       </div>
-                      <div className="flex-1 text-slate-700 leading-relaxed pt-0.5">
+                      <div className={cn(
+                        "flex-1 leading-relaxed pt-0.5",
+                        isFullscreen ? "text-slate-100" : "text-slate-700"
+                      )}>
                         {children}
                       </div>
                     </li>
                   );
                 },
                 strong: ({ children }) => (
-                  <strong className="font-bold text-slate-900 dark:text-white">
+                  <strong className={cn(
+                    "font-bold",
+                    isFullscreen ? "text-white" : "text-slate-900"
+                  )}>
                     {children}
                   </strong>
                 ),

@@ -1,23 +1,28 @@
-import { useEffect } from "react";
-import { useAuth } from "@clerk/clerk-react";
+import { useEffect, useRef } from "react";
+import { useClerk } from "@clerk/clerk-react";
 import { useNavigate } from "react-router-dom";
 
-// Safety-net page. In normal OAuth flow this is never rendered because
-// GoogleOAuthButton calls handleRedirectCallback directly and navigates
-// to /dashboard before React Router ever transitions here.
-// This only activates if the user somehow lands on /sso-callback manually.
+// Handles the OAuth redirect for both existing users (sign-in) and new users
+// (sign-up). Clerk's handleRedirectCallback processes the handshake params,
+// creates the session if needed, and then navigates to the appropriate URL.
 const SSOCallbackPage = () => {
-  const { isSignedIn, isLoaded } = useAuth();
+  const { handleRedirectCallback } = useClerk();
   const navigate = useNavigate();
+  const didRun = useRef(false);
 
   useEffect(() => {
-    if (!isLoaded) return;
-    if (isSignedIn) {
-      navigate("/dashboard", { replace: true });
-    } else {
+    if (didRun.current) return;
+    didRun.current = true;
+
+    handleRedirectCallback({
+      signInForceRedirectUrl: "/dashboard",
+      signUpForceRedirectUrl: "/dashboard",
+    }).catch(() => {
+      // Callback processing failed — fall back to sign-in
       navigate("/sign-in", { replace: true });
-    }
-  }, [isLoaded, isSignedIn, navigate]);
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div className="min-h-screen bg-white flex items-center justify-center">

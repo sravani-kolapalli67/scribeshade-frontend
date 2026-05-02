@@ -71,7 +71,7 @@ const ZOOM_STEP = 0.1;
 const ZOOM_MIN = 0.7;
 const ZOOM_MAX = 1.6;
 
-const JOB_DESCRIPTION_REGEX = /^.{2,}$/i;
+const JOB_DESCRIPTION_REGEX = /^.{2,}/im;
 
 type SessionKind = "free" | "premium";
 type Tab = "create" | "past";
@@ -95,7 +95,8 @@ function formatCredits(raw: string | null | undefined): string {
   const n = parseFloat(raw);
   if (isNaN(n)) return "0";
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
-  return n.toFixed(0);
+  // Show up to 1 decimal place, strip trailing zero only for whole numbers
+  return n % 1 === 0 ? n.toFixed(0) : n.toFixed(1);
 }
 
 function hasCredits(
@@ -1144,7 +1145,7 @@ function WidgetContent() {
                                         jobDescription: e.target.value,
                                       }))
                                     }
-                                    className="rounded-xl border-zinc-200 focus:ring-zinc-500 min-h-[80px] resize-none"
+                                    className="rounded-xl border-zinc-200 focus:ring-zinc-500 min-h-25 max-h-45 resize-none overflow-y-auto"
                                   />
                                 </div>
 
@@ -1168,7 +1169,10 @@ function WidgetContent() {
                                         }))
                                       }
                                       placeholder="Select resume"
-                                      options={resumes.map((r) => ({ value: r.id, label: r.filename }))}
+                                      options={resumes.map((r) => ({
+                                        value: r.id,
+                                        label: r.filename,
+                                      }))}
                                       isLoading={isLoadingResumes}
                                       emptyMessage="No resumes uploaded yet"
                                     />
@@ -1208,7 +1212,10 @@ function WidgetContent() {
                                         }))
                                       }
                                       placeholder="Select documents"
-                                      options={documents.map((d) => ({ value: d.id, label: d.filename }))}
+                                      options={documents.map((d) => ({
+                                        value: d.id,
+                                        label: d.filename,
+                                      }))}
                                       isLoading={isLoadingDocs}
                                       emptyMessage="No documents uploaded yet"
                                     />
@@ -1240,16 +1247,19 @@ function WidgetContent() {
                                   onClick={() => setCreationStep(2)}
                                   disabled={
                                     !sessionInfo.companyName.trim() ||
-                                    !JOB_DESCRIPTION_REGEX.test(
-                                      sessionInfo.jobDescription.trim(),
-                                    )
+                                    !sessionInfo.resumeId ||
+                                    (!!sessionInfo.jobDescription.trim() &&
+                                      !JOB_DESCRIPTION_REGEX.test(
+                                        sessionInfo.jobDescription.trim(),
+                                      ))
                                   }
                                   className={cn(
                                     "py-2.5 rounded-2xl text-white text-sm font-bold transition-all active:scale-[0.98]",
                                     sessionInfo.companyName.trim() &&
-                                      JOB_DESCRIPTION_REGEX.test(
-                                        sessionInfo.jobDescription.trim(),
-                                      )
+                                      (!sessionInfo.jobDescription.trim() ||
+                                        JOB_DESCRIPTION_REGEX.test(
+                                          sessionInfo.jobDescription.trim(),
+                                        ))
                                       ? "bg-zinc-900 hover:bg-zinc-800 shadow-lg shadow-black/10"
                                       : "bg-zinc-300 text-zinc-400 cursor-not-allowed",
                                   )}

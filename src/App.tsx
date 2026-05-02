@@ -39,12 +39,19 @@ import BillingPage from "./pages/Billing/page";
 import AIProjects from "./pages/AIProjects/page";
 import ProjectRecommendations from "./pages/AIProjects/ProjectRecommendations/page";
 import { TauriReturnBanner } from "@/components/TauriReturnBanner";
+import { checkForUpdates } from "@/lib/updater";
 
 function App() {
   const { isSignedIn, isLoaded } = useUser();
   const location = useLocation();
   const navigate = useNavigate();
   useSyncUser();
+
+  // ── Auto-update check on launch (Tauri only) ─────────────────────────
+  useEffect(() => {
+    checkForUpdates();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Auth sync: broadcast sign-out to widget
   // Navigation from widget → dashboard is handled via URL params (no event

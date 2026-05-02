@@ -24,8 +24,6 @@ import {
   Star,
   LogOut,
   Loader2,
-  Headphones,
-  HeadphoneOff,
   AlignJustify,
 } from "lucide-react";
 import { ChatActionButtons } from "./components/ChatActionButtons";
@@ -105,7 +103,7 @@ const getLanguageCode = (lang: string): string => {
 const DEEPGRAM_KEY = import.meta.env.VITE_DEEPGRAM_API_KEY || "";
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "";
 
-// â”€â”€â”€ CodeBlock (for markdown rendering)
+//  CodeBlock (for markdown rendering)
 const CodeBlock = ({
   children,
   language,
@@ -190,7 +188,7 @@ const CodeBlock = ({
   );
 };
 
-// â”€â”€â”€ Response Parser â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Response Parser 
 // Splits an AI response into optional question + answer sections so we can
 // render them with ParakeetAI-style iconic headers.
 interface ParsedSection {
@@ -222,7 +220,7 @@ const parseAIResponse = (raw: string): ParsedSection => {
   return { answer: text };
 };
 
-// â”€â”€â”€ Answer Area â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Answer Area
 const AnswerArea: React.FC<{
   responses: AIDisplayResponse[];
   isStreaming: boolean;
@@ -349,7 +347,7 @@ const AnswerArea: React.FC<{
   );
 };
 
-// â”€â”€â”€ Main FloatingApp â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â”€â”€â”€ Main FloatingApp 
 const FloatingApp: React.FC = () => {
   // â”€â”€ Session context (received from launcher via "session-init" event) â”€â”€â”€
   const [sessionInfo, setSessionInfo] = useState<SessionInitData | null>(() => {
@@ -425,12 +423,18 @@ const FloatingApp: React.FC = () => {
         localStorage.getItem(`aiUsage_${info.sessionId}`) || "0",
       );
 
+      // Calculate elapsed minutes so the backend can apply the free-zone rule
+      const FREE_ZONE_MINUTES = 5;
+      const durationMinutes = info.startedAt
+        ? Math.ceil((Date.now() - new Date(info.startedAt).getTime()) / 60_000)
+        : null;
+
       // Parallelize cleanup operations: call backend, reset Rust state, and notify main window
       await Promise.all([
         fetch(`${BACKEND_URL}/api/session/${info.sessionId}/deactivate`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ transcript, aiUsage }),
+          body: JSON.stringify({ transcript, aiUsage, durationMinutes }),
         }).catch((err) => console.error("Deactivate fetch failed:", err)),
         invoke("set_session_active", { active: false }).catch(() => {}),
         emit("overlay-end-session-direct").catch(() => {}),
@@ -438,6 +442,11 @@ const FloatingApp: React.FC = () => {
 
       localStorage.removeItem(`aiUsage_${info.sessionId}`);
       try { sessionStorage.removeItem("scribeshade.session-init"); } catch {}
+
+      // Show free-zone toast if applicable (mini window ends quickly)
+      if (durationMinutes !== null && durationMinutes <= FREE_ZONE_MINUTES) {
+        toast.success("Session ended — no credits charged (under 5 min)");
+      }
     } catch (err) {
       console.error("Error ending session:", err);
     } finally {
@@ -1107,7 +1116,7 @@ const FloatingApp: React.FC = () => {
             </Tooltip>
 
             {/* Remote (interviewer) audio toggle */}
-            <Tooltip delayDuration={300}>
+            {/* <Tooltip delayDuration={300}>
               <TooltipTrigger asChild>
                 <button
                   onClick={handleToggleTab}
@@ -1135,7 +1144,7 @@ const FloatingApp: React.FC = () => {
               >
                 {isTabEnabled ? "Disable Remote Audio" : "Enable Remote Audio"}
               </TooltipContent>
-            </Tooltip>
+            </Tooltip> */}
 
             {/* Clear transcript */}
             <Tooltip delayDuration={300}>

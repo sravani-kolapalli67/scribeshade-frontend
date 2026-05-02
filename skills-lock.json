@@ -1,6 +1,12 @@
 {
   "version": 1,
   "skills": {
+    "clerk-react-patterns": {
+      "source": "clerk/skills",
+      "sourceType": "github",
+      "skillPath": "skills/frameworks/clerk-react-patterns/SKILL.md",
+      "computedHash": "9bbc28d1825bda0f31a33660b3e339719bc0ad2a30696dfde14ef6b9493371b0"
+    },
     "redux-toolkit": {
       "source": "mindrally/skills",
       "sourceType": "github",
@@ -21,6 +27,11 @@
       "source": "wshobson/agents",
       "sourceType": "github",
       "computedHash": "988d80e52c67c3692d43cc963b6a048a239895e88b272b061de55370d0f8efc3"
+    },
+    "tauri-v2": {
+      "source": "smithery.ai",
+      "sourceType": "well-known",
+      "computedHash": "1088623decc448200bfefb0ee1d9c4477dba450f184b4bee3dacda2720de6248"
     },
     "vercel-react-best-practices": {
       "source": "vercel-labs/agent-skills",

@@ -105,9 +105,20 @@ export default function ActiveSession() {
   }, [navigate]);
 
   const stopHeartbeatRef = useRef<(() => void) | null>(null);
+  const isEndingRef = useRef(false);
+  const sessionStartedAtRef = useRef<string | null>(null);
+
+  // Keep ref in sync with state so endSessionNow always reads the latest value
+  sessionStartedAtRef.current = sessionStartedAt;
+
+  const FREE_ZONE_MINUTES = 5;
+  const CREDITS_PER_MINUTE = 0.5;
 
   const endSessionNow = useCallback(async () => {
     if (!id) return;
+    // Guard against double-invocation (both heartbeat and SSE can fire simultaneously)
+    if (isEndingRef.current) return;
+    isEndingRef.current = true;
 
     toast.info("Ending session...", {
       duration: 3000,
@@ -115,6 +126,16 @@ export default function ActiveSession() {
 
     // Stop heartbeat immediately so no new ticks fire during cleanup
     stopHeartbeatRef.current?.();
+
+    // Calculate exact elapsed duration so the backend can apply the free-zone rule
+    // Use ref to get the latest value (avoids stale closure — sessionStartedAt not in deps)
+    const startedAt = sessionStartedAtRef.current;
+    const durationMinutes = startedAt
+      ? Math.ceil((Date.now() - new Date(startedAt).getTime()) / 60_000)
+      : null;
+
+    // Client-side free-zone determination (≤5 min → no charge)
+    const isFreeZone = durationMinutes !== null && durationMinutes <= FREE_ZONE_MINUTES;
 
     try {
       const transcript = messages
@@ -128,14 +149,19 @@ export default function ActiveSession() {
           headers: {
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ transcript, aiUsage }),
+          body: JSON.stringify({ transcript, aiUsage, durationMinutes }),
         },
       );
       localStorage.removeItem(`aiUsage_${id}`);
 
+      // Free-zone: no credits charged — no need to poll
+      if (isFreeZone) {
+        toast.success("Session ended — no credits charged (under 5 min)");
+      }
+
       // For paid sessions, wait up to 8 seconds for the BullMQ job to mark
       // the session COMPLETED before navigating away.
-      if (res.ok && maxAllowedMinutes !== null) {
+      if (res.ok && maxAllowedMinutes !== null && !isFreeZone) {
         const data = await res.json();
         if (data.status === "COMPLETING") {
           let attempts = 0;
@@ -162,9 +188,11 @@ export default function ActiveSession() {
             attempts++;
           }
           if (deductedReason === "FREE_ZONE") {
-            toast.success("Session ended — no credits charged (free zone)");
+            toast.success("Session ended — no credits charged (under 5 min)");
           } else if (deductedCredits) {
-            toast.info(`Session ended — ${deductedCredits} credits deducted`);
+            const mins = durationMinutes ?? 0;
+            const expected = (mins * CREDITS_PER_MINUTE).toFixed(1);
+            toast.info(`Session ended — ${deductedCredits} credits deducted (${mins} min × ${CREDITS_PER_MINUTE} credits/min = ${expected})`);
           }
         }
       }
