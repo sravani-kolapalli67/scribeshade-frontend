@@ -34,4 +34,4 @@ D:\ScribeShade\scribeshade-01-frontend>
 
 # 2. Commit + push to release branch
 git add . && git commit -m "release: v$(node -p \"require('./package.json').version\")"
-git push origin release       # ← triggers the action
+git push origin release   
