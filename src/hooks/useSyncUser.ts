@@ -6,19 +6,25 @@ export function useSyncUser() {
 
   useEffect(() => {
     async function sync() {
-      if (!isSignedIn) return;
+      if (!isSignedIn) {
+        localStorage.removeItem("userId");
+        return;
+      }
 
       try {
         const token = await getToken();
         if (!token) return;
 
-        const response = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/auth/me`, {
-          method: "GET",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
+        const response = await fetch(
+          `${import.meta.env.VITE_BACKEND_URL}/api/auth/me`,
+          {
+            method: "GET",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${token}`,
+            },
           },
-        });
+        );
 
         if (response.ok) {
           const data = await response.json();

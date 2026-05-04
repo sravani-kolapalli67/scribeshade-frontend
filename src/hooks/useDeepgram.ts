@@ -26,10 +26,46 @@ export const useDeepgram = ({
   const streamRef = useRef<MediaStream | null>(null);
   const isStartingRef = useRef(false);
   const ownsStreamRef = useRef(false);
+  // Ref mirror of isTranscribing — avoids stale-closure bugs in retry callbacks.
+  // When `startTranscription` is referenced inside an `onclose` handler, the
+  // React state value is frozen at the time the useCallback was created.
+  // Reading `isTranscribingRef.current` always reflects the live value.
+  const isTranscribingRef = useRef(false);
+  // KeepAlive interval — sends a heartbeat every 8 s to prevent Deepgram from
+  // closing the WS after 12 s of microphone silence.
+  const keepAliveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Tracks intentional stop so auto-retry doesn't restart after stopTranscription().
+  const intentionalStopRef = useRef(false);
+  // Retry timer handle — cleared on intentional stop.
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryCountRef = useRef(0);
+  const MAX_RETRIES = 5;
+
+  // Keep the ref in sync with React state so closures always read current value.
+  isTranscribingRef.current = isTranscribing;
 
   const startTranscription = useCallback(async () => {
-    if (isTranscribing || isStartingRef.current || socketRef.current) return;
+    // Use the ref (not the closure-captured state) so retries always get the
+    // live value even when called from a stale setTimeout closure.
+    if (isTranscribingRef.current || isStartingRef.current || socketRef.current) return;
 
+    // Guard: missing API key produces an unhelpful WebSocket protocol error;
+    // surface a clear message instead.
+    if (!apiKey) {
+      setError("Deepgram API key is not configured");
+      return;
+    }
+
+    // Only reset intentional-stop and retry-count on an EXPLICIT start call
+    // (i.e., when no retries are in progress). Retries must NOT reset retryCount
+    // or the back-off / MAX_RETRIES guard never takes effect.
+    if (retryCountRef.current === 0) {
+      intentionalStopRef.current = false;
+    }
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
     try {
       isStartingRef.current = true;
       setIsConnecting(true);
@@ -77,7 +113,7 @@ export const useDeepgram = ({
       });
       mediaRecorderRef.current = mediaRecorder;
 
-      const url = `wss://api.deepgram.com/v1/listen?model=${model}&punctuate=true&interim_results=true&language=${language}&smart_format=true&endpointing=1000&utterance_end_ms=1000&vad_events=true&diarize=false&tag=craftvita`;
+      const url = `wss://api.deepgram.com/v1/listen?model=${model}&punctuate=true&interim_results=true&language=${language}&smart_format=true&endpointing=300&utterance_end_ms=500&vad_events=true&diarize=false&tag=craftvita`;
 
       const socket = new WebSocket(url, ["token", apiKey]);
       socketRef.current = socket;
@@ -92,9 +128,24 @@ export const useDeepgram = ({
             socket.send(event.data);
           }
         };
-        // Send audio chunks every 100ms for near real-time streaming
-        mediaRecorder.start(100);
+        // Send audio chunks every 50ms for near real-time streaming
+        mediaRecorder.start(50);
+
+        // Successfully connected — reset retry counter so next failure gets
+        // the full back-off budget again.
+        retryCountRef.current = 0;
+        intentionalStopRef.current = false;
+
+        // KeepAlive: prevent Deepgram from closing the WS after 12 s of silence.
+        if (keepAliveTimerRef.current) clearInterval(keepAliveTimerRef.current);
+        keepAliveTimerRef.current = setInterval(() => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: "KeepAlive" }));
+          }
+        }, 8_000);
+
         setIsTranscribing(true);
+        isTranscribingRef.current = true;
         setIsConnecting(false);
         isStartingRef.current = false;
         setError(null);
@@ -124,22 +175,73 @@ export const useDeepgram = ({
         }
       };
 
-      socket.onerror = (err) => {
+      socket.onerror = () => {
+        // onerror is ALWAYS followed by onclose — do NOT touch socketRef here.
+        // If we null socketRef.current here, the subsequent onclose fires with
+        // `socket !== null` (socketRef is null), trips the identity guard and
+        // returns early — completely skipping the retry logic.
+        // Just log; onclose owns all cleanup and retry decisions.
         if (socket !== socketRef.current) return;
-        console.error("Deepgram Socket Error:", err);
-        setError("Connection error occurred");
-        setIsConnecting(false);
-        isStartingRef.current = false;
-        setIsTranscribing(false);
+        console.error("Deepgram WebSocket error (onclose will handle retry)");
       };
 
-      socket.onclose = () => {
+      socket.onclose = (evt: CloseEvent) => {
+        // Only handle if this is still the active socket (guards against stale
+        // closures when a new socket is created mid-flight).
         if (socket !== socketRef.current) return;
+
+        // Clear KeepAlive before anything else.
+        if (keepAliveTimerRef.current) {
+          clearInterval(keepAliveTimerRef.current);
+          keepAliveTimerRef.current = null;
+        }
+
+        // Clear the ref — this socket is gone regardless of close reason.
+        socketRef.current = null;
         setIsTranscribing(false);
+        isTranscribingRef.current = false;
         setIsConnecting(false);
         isStartingRef.current = false;
+
         if (mediaRecorder.state === "recording") {
           mediaRecorder.stop();
+        }
+        mediaRecorderRef.current = null;
+
+        // Intentional stop — do not retry.
+        if (intentionalStopRef.current) return;
+
+        // 1000 = normal closure (we sent CloseStream) — do not retry.
+        if (evt.code === 1000) return;
+
+        // 1008 = Policy Violation: invalid/expired API key — no point retrying.
+        if (evt.code === 1008) {
+          setError("Deepgram auth failed — check your API key");
+          return;
+        }
+
+        // Abnormal closure (network error, server rejected, etc.) — show error
+        // and schedule a retry with exponential back-off.
+        // NOTE: retryTimerRef passes `startTranscription` by reference via the
+        // module-level closure — not the stale `useCallback` instance captured
+        // at socket creation time. isTranscribingRef.current is always live so
+        // the guard inside startTranscription always reads the correct value.
+        setError("Connection error — retrying...");
+
+        if (retryCountRef.current < MAX_RETRIES) {
+          const delay = Math.min(1000 * 2 ** retryCountRef.current, 15_000);
+          retryCountRef.current += 1;
+          retryTimerRef.current = setTimeout(() => {
+            if (!intentionalStopRef.current) {
+              setError(null);
+              // Read startTranscriptionRef so we always invoke the latest
+              // (non-stale) version of the function.
+              startTranscriptionRef.current();
+            }
+          }, delay);
+        } else {
+          retryCountRef.current = 0; // reset so manual restart works
+          setError("Mic connection failed — please reload or check your internet");
         }
       };
     } catch (err) {
@@ -151,9 +253,27 @@ export const useDeepgram = ({
         setIsTranscribing(false);
       }
     }
-  }, [apiKey, model, language, isTranscribing, onTranscript, inputStream]);
+  // isTranscribing intentionally removed from deps — use isTranscribingRef.current
+  // for the guard so retry closures always read the live value, not a stale snapshot.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiKey, model, language, onTranscript, inputStream]);
+
+  // Keep a stable ref to the latest startTranscription so retry timers created
+  // inside stale onclose closures always call the current version.
+  const startTranscriptionRef = useRef(startTranscription);
+  useEffect(() => { startTranscriptionRef.current = startTranscription; }, [startTranscription]);
 
   const stopTranscription = useCallback(() => {
+    intentionalStopRef.current = true;
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+    if (keepAliveTimerRef.current) {
+      clearInterval(keepAliveTimerRef.current);
+      keepAliveTimerRef.current = null;
+    }
+    retryCountRef.current = 0;
     isStartingRef.current = false;
     if (socketRef.current) {
       if (socketRef.current.readyState === WebSocket.OPEN) {

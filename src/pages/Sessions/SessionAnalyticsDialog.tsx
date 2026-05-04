@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
+import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
   Card,
@@ -67,16 +68,18 @@ export function SessionAnalyticsDialog({
   const [messages, setMessages] = useState<Message[]>([]);
   const [feedback, setFeedback] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [isAnalyticsLoading, setIsAnalyticsLoading] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
   const [isFeedbackOpen, setIsFeedbackOpen] = useState(true);
 
   useEffect(() => {
     if (isOpen && session?.id) {
-      const fetchData = async () => {
+      // Pre-fill feedback from session data if analytics already exist
+      setFeedback(session.feedback ?? null);
+
+      // Fetch session messages for the interaction chart
+      const fetchMessages = async () => {
         setIsLoading(true);
-        setIsAnalyticsLoading(true);
         try {
-          // Fetch session details (for messages/chart)
           const sessionRes = await fetch(
             `${import.meta.env.VITE_BACKEND_URL}/api/session/${session.id}`,
           );
@@ -84,25 +87,37 @@ export function SessionAnalyticsDialog({
             const data = await sessionRes.json();
             setMessages(data.messages || []);
           }
-
-          // Fetch real analytics data
-          const analyticsRes = await fetch(
-            `${import.meta.env.VITE_BACKEND_URL}/api/session/${session.id}/analytics`,
-          );
-          if (analyticsRes.ok) {
-            const data = await analyticsRes.json();
-            setFeedback(data);
-          }
         } catch (error) {
-          console.error("Error fetching session analytics:", error);
+          console.error("Error fetching session data:", error);
         } finally {
           setIsLoading(false);
-          setIsAnalyticsLoading(false);
         }
       };
-      fetchData();
+      fetchMessages();
+    }
+    if (!isOpen) {
+      setMessages([]);
+      setFeedback(null);
     }
   }, [isOpen, session?.id]);
+
+  const handleGenerateAnalytics = async () => {
+    if (!session?.id) return;
+    setIsGenerating(true);
+    try {
+      const analyticsRes = await fetch(
+        `${import.meta.env.VITE_BACKEND_URL}/api/session/${session.id}/analytics`,
+      );
+      if (analyticsRes.ok) {
+        const data = await analyticsRes.json();
+        setFeedback(data);
+      }
+    } catch (error) {
+      console.error("Error generating analytics:", error);
+    } finally {
+      setIsGenerating(false);
+    }
+  };
 
   const analytics = useMemo(() => {
     if (!messages.length) return null;
@@ -220,7 +235,7 @@ export function SessionAnalyticsDialog({
                 Analyzing session data...
               </p>
             </div>
-          ) : (
+          ) : feedback ? (
             <div className="space-y-6">
               {/* Top Stats Grid */}
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -461,6 +476,32 @@ export function SessionAnalyticsDialog({
                   </div>
                 </CardContent>
               </Card>
+            </div>
+          ) : isGenerating ? (
+            <div className="py-16 flex flex-col items-center justify-center gap-4">
+              <div className="size-12 border-4 border-border border-t-primary rounded-full animate-spin" />
+              <p className="text-sm font-bold text-muted-foreground uppercase tracking-widest">
+                Generating analytics...
+              </p>
+            </div>
+          ) : (
+            <div className="py-16 flex flex-col items-center justify-center gap-6 rounded-2xl border border-dashed border-border bg-muted/30">
+              <div className="p-4 bg-primary/10 rounded-2xl">
+                <TrendingUp className="size-8 text-primary" />
+              </div>
+              <div className="text-center space-y-2">
+                <h3 className="text-lg font-semibold text-foreground">
+                  No Analytics Generated
+                </h3>
+                <p className="text-sm text-muted-foreground max-w-sm">
+                  Generate AI-powered analytics for this session to view
+                  performance insights, strengths, and areas for improvement.
+                </p>
+              </div>
+              <Button onClick={handleGenerateAnalytics} className="gap-2">
+                <TrendingUp className="size-4" />
+                Generate Analytics
+              </Button>
             </div>
           )}
         </div>

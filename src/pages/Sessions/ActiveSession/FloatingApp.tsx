@@ -30,7 +30,7 @@ import { ChatActionButtons } from "./components/ChatActionButtons";
 import { ModelSelector } from "./components/ModelSelector";
 import { useFreeSessionTimer } from "@/hooks/useFreeSessionTimer";
 import { useDeepgram } from "@/hooks/useDeepgram";
-import { useNativeTabTranscription } from "@/hooks/useNativeTabTranscription";
+import { MiniRemoteAudio, MiniRemoteAudioStatus } from "@/services/MiniRemoteAudio";
 import { useAIChat } from "@/hooks/useAIChat";
 import { useSessionHeartbeat } from "@/hooks/useSessionHeartbeat";
 import { useSessionEvents } from "@/hooks/useSessionEvents";
@@ -377,8 +377,6 @@ const FloatingApp: React.FC = () => {
   const [currentResponseIndex, setCurrentResponseIndex] = useState(0);
   const [inputValue, setInputValue] = useState("");
   const [creditWarning, setCreditWarning] = useState<number | null>(null);
-  // Controls whether remote (interviewer/tab) audio transcription is active
-  const [isTabEnabled, setIsTabEnabled] = useState(true);
 
   const rootRef = useRef<HTMLDivElement>(null);
   const lastSentHeightRef = useRef<number>(185);
@@ -507,8 +505,11 @@ const FloatingApp: React.FC = () => {
       setMessages((prev) => {
         const now = Date.now();
         const normalized = text.toLowerCase().trim().replace(/[.!?]/g, "");
+        // Deduplicate against existing User messages only — prevents double-add
+        // when both the native mic path and overlay-transcript event both fire
+        // for the same utterance.
         const isDupe = prev.some((m) => {
-          if (m.sender === "User") return false;
+          if (m.sender !== "User") return false;
           if (now - m.timestamp > 2000) return false;
           const existing = m.text.toLowerCase().trim().replace(/[.!?]/g, "");
           return (
@@ -554,8 +555,9 @@ const FloatingApp: React.FC = () => {
       setMessages((prev) => {
         const now = Date.now();
         const normalized = text.toLowerCase().trim().replace(/[.!?]/g, "");
+        // Deduplicate against existing Interviewer messages only
         const isDupe = prev.some((m) => {
-          if (m.sender === "Interviewer") return false;
+          if (m.sender !== "Interviewer") return false;
           if (now - m.timestamp > 2000) return false;
           const existing = m.text.toLowerCase().trim().replace(/[.!?]/g, "");
           return (
@@ -605,18 +607,66 @@ const FloatingApp: React.FC = () => {
   const startMicRef = useRef(micTranscription.startTranscription);
   startMicRef.current = micTranscription.startTranscription;
 
-  // â”€â”€ Tab / system audio transcription (Interviewer) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  const tabTranscription = useNativeTabTranscription({
-    apiKey: DEEPGRAM_KEY,
-    model: "nova-3",
-    language: getLanguageCode(sessionInfo?.language ?? "English"),
-    onTranscript: handleInterviewerTranscript,
-    // enabled only when session is active AND user hasn't manually disabled remote audio
-    enabled: !!sessionInfo && isTabEnabled,
-  });
-
-  // â”€â”€ Listen for session-init from launcher â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Auto-start mic when sessionInfo is first available.
+  // Covers two cases:
+  //   1. session-init event fires AFTER this component mounts (normal flow)
+  //   2. sessionInfo is pre-loaded from sessionStorage (mini window reload /
+  //      window already open) — session-init was already processed, won't fire again.
+  // The session-init listener also calls startMicRef after 500 ms; the idempotency
+  // guard inside useDeepgram.startTranscription prevents a double-start.
+  const micAutoStartedRef = useRef(false);
   useEffect(() => {
+    if (!sessionInfo || micAutoStartedRef.current) return;
+    micAutoStartedRef.current = true;
+    const t = setTimeout(() => startMicRef.current(), 300);
+    return () => clearTimeout(t);
+  // Re-run only when the sessionId changes (new session)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionInfo?.sessionId]);
+
+  // Surface mic errors as toasts
+  useEffect(() => {
+    if (micTranscription.error) {
+      toast.error(`Mic: ${micTranscription.error}`, { duration: 6000 });
+    }
+  }, [micTranscription.error]);
+
+  // Remote audio transcription (Interviewer) via MiniRemoteAudio service.
+  const remoteAudioRef = useRef<MiniRemoteAudio | null>(null);
+  const [tabStatus, setTabStatus] = useState<MiniRemoteAudioStatus>("idle");
+  const [tabInterimTranscript, setTabInterimTranscript] = useState("");
+
+  const handleInterviewerTranscriptRef = useRef(handleInterviewerTranscript);
+  handleInterviewerTranscriptRef.current = handleInterviewerTranscript;
+
+  useEffect(() => {
+    if (!sessionInfo) return;
+
+    const svc = new MiniRemoteAudio({
+      apiKey: DEEPGRAM_KEY,
+      model: "nova-3",
+      language: getLanguageCode(sessionInfo.language ?? "English"),
+      onTranscript: (text, isFinal) => {
+        if (isFinal) {
+          setTabInterimTranscript("");
+          handleInterviewerTranscriptRef.current(text, true);
+        } else {
+          setTabInterimTranscript(text);
+        }
+      },
+      onStatusChange: setTabStatus,
+      onError: (msg) => toast.error(`Remote audio: ${msg}`, { duration: 6000 }),
+    });
+
+    remoteAudioRef.current = svc;
+    svc.start();
+
+    return () => {
+      svc.stop();
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionInfo?.sessionId]);
+useEffect(() => {
     let unlisten: (() => void) | undefined;
     listen<SessionInitData>("session-init", (event) => {
       const info = event.payload;
@@ -752,7 +802,7 @@ const FloatingApp: React.FC = () => {
 
     const msgs = messagesRef.current;
     const interimMic = micTranscription.interimTranscript;
-    const interimTab = tabTranscription.interimTranscript;
+    const interimTab = tabInterimTranscript;
     const combined = msgs
       .map((m) => `[${m.sender === "User" ? "YOU" : "Interviewer"}]: ${m.text}`)
       .join("\n");
@@ -779,7 +829,7 @@ const FloatingApp: React.FC = () => {
     isAnswering,
     handleAiAnswer,
     micTranscription.interimTranscript,
-    tabTranscription.interimTranscript,
+    tabInterimTranscript,
   ]);
 
   const handleAnalyzeScreenClick = useCallback(async () => {
@@ -834,13 +884,9 @@ const FloatingApp: React.FC = () => {
 
   const handleClearTranscript = useCallback(() => {
     micTranscription.clearTranscript();
-    tabTranscription.clearTranscript();
+    setTabInterimTranscript("");
     setMessages([]);
-  }, [micTranscription, tabTranscription]);
-
-  const handleToggleTab = useCallback(() => {
-    setIsTabEnabled((v) => !v);
-  }, []);
+  }, [micTranscription]);
 
   const handleExit = useCallback(() => {
     endSessionNowRef.current();
@@ -850,11 +896,11 @@ const FloatingApp: React.FC = () => {
   const lastTranscriptLine = lastMessage?.text ?? "";
   const lastTranscriptSender = lastMessage?.sender ?? null;
   const interimTranscript =
-    micTranscription.interimTranscript || tabTranscription.interimTranscript;
+    micTranscription.interimTranscript || tabInterimTranscript;
   const isMicActive = micTranscription.isTranscribing;
   const isMicConnecting = micTranscription.isConnecting;
-  const isTabActive = tabTranscription.isTranscribing;
-  const isTabConnecting = tabTranscription.isConnecting;
+  const isTabActive = tabStatus === "transcribing";
+  const isTabConnecting = tabStatus === "connecting";
 
   if (isWindowCollapsed) {
     return (
@@ -1002,18 +1048,16 @@ const FloatingApp: React.FC = () => {
                       : "bg-white/20",
                 )}
               />
-              {isTabEnabled && (
-                <div
-                  className={cn(
-                    "w-1.5 h-1.5 rounded-full transition-all duration-300",
-                    isTabConnecting
-                      ? "bg-amber-500 animate-pulse shadow-[0_0_8px_rgba(245,158,11,0.5)]"
-                      : isTabActive
-                        ? "bg-purple-500 animate-pulse shadow-[0_0_8px_rgba(168,85,247,0.5)]"
-                        : "bg-white/20",
-                  )}
-                />
-              )}
+              <div
+                className={cn(
+                  "w-1.5 h-1.5 rounded-full transition-all duration-300",
+                  isTabConnecting
+                    ? "bg-amber-500 animate-pulse shadow-[0_0_8px_rgba(245,158,11,0.5)]"
+                    : isTabActive
+                      ? "bg-purple-500 animate-pulse shadow-[0_0_8px_rgba(168,85,247,0.5)]"
+                      : "bg-white/20",
+                )}
+              />
             </div>
 
             <div className="flex-1 truncate text-[12px] font-medium text-white italic">
@@ -1210,8 +1254,7 @@ const FloatingApp: React.FC = () => {
               ))
             )}
             {/* Live interim bubble */}
-            {(micTranscription.interimTranscript ||
-              tabTranscription.interimTranscript) && (
+            {(micTranscription.interimTranscript || tabInterimTranscript) && (
               <div
                 className={cn(
                   "flex gap-2 items-start opacity-50",
@@ -1238,8 +1281,7 @@ const FloatingApp: React.FC = () => {
                       : "bg-purple-500/10 text-purple-100 rounded-tr-none",
                   )}
                 >
-                  {micTranscription.interimTranscript ||
-                    tabTranscription.interimTranscript}
+                  {micTranscription.interimTranscript || tabInterimTranscript}
                 </span>
               </div>
             )}
