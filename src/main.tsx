@@ -1,9 +1,11 @@
 import { BrowserRouter, useNavigate } from "react-router-dom";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { Provider } from "react-redux";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ClerkProvider } from "@clerk/clerk-react";
 import App from "./App";
+import { store } from "./store/store";
 
 const PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 
@@ -33,12 +35,14 @@ function ClerkProviderWithNavigate({
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <BrowserRouter>
-      <ClerkProviderWithNavigate>
-        <TooltipProvider>
-          <App />
-        </TooltipProvider>
-      </ClerkProviderWithNavigate>
-    </BrowserRouter>
+    <Provider store={store}>
+      <BrowserRouter>
+        <ClerkProviderWithNavigate>
+          <TooltipProvider>
+            <App />
+          </TooltipProvider>
+        </ClerkProviderWithNavigate>
+      </BrowserRouter>
+    </Provider>
   </StrictMode>,
 );
