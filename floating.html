@@ -4,6 +4,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Allow microphone access inside the Tauri WebView2 (Windows) and WKWebView (macOS).
+         Without this, getUserMedia({ audio: true }) is silently denied by the webview's
+         Permissions-Policy, which surfaces as a WebSocket "Connection error" because
+         the MediaRecorder is never created and the socket handshake never completes. -->
+    <meta http-equiv="Permissions-Policy" content="microphone=*, camera=()">
     <title>Floating Mini-Screen</title>
     <style>
         html, body {

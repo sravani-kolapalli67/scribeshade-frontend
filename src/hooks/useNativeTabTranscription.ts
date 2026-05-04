@@ -47,6 +47,12 @@ export function useNativeTabTranscription({
   const rustWsRef = useRef<WebSocket | null>(null);
   const dgWsRef = useRef<WebSocket | null>(null);
 
+  // Ref-based guards — mirrors isConnecting/isTranscribing state but is always
+  // the latest value without waiting for a React re-render cycle. This avoids
+  // the stale-closure bug where useCallback deps capture an old state snapshot.
+  const isConnectingRef = useRef(false);
+  const isTranscribingRef = useRef(false);
+
   // Keep latest props in refs so WS closures never go stale
   const onTranscriptRef = useRef(onTranscript);
   const apiKeyRef = useRef(apiKey);
@@ -57,28 +63,64 @@ export function useNativeTabTranscription({
   useEffect(() => { modelRef.current = model; }, [model]);
   useEffect(() => { languageRef.current = language; }, [language]);
 
+  // Track latest `enabled` value so reconnect closures can read it without stale captures
+  const enabledRef = useRef(enabled);
+  useEffect(() => { enabledRef.current = enabled; }, [enabled]);
+
   // Last audio metadata received from Rust — needed for DG reconnect
   const audioMetaRef = useRef<{ sampleRate: number; channels: number } | null>(null);
   // Deepgram keepalive interval (prevents 12 s inactivity timeout during silence)
   const dgKeepaliveRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // Reconnect back-off timer
+  // Reconnect back-off timers — one for the Deepgram WS, one for the Rust capture WS
   const dgReconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const rustReconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearDgTimers = useCallback(() => {
     if (dgKeepaliveRef.current) { clearInterval(dgKeepaliveRef.current); dgKeepaliveRef.current = null; }
     if (dgReconnectRef.current) { clearTimeout(dgReconnectRef.current); dgReconnectRef.current = null; }
+    if (rustReconnectRef.current) { clearTimeout(rustReconnectRef.current); rustReconnectRef.current = null; }
   }, []);
 
-  // Stable ref so openDeepgramWs can call itself recursively for reconnects
+  // Stable refs for cross-closure function references
   const openDeepgramWsRef = useRef<((meta: { sampleRate: number; channels: number }) => void) | null>(null);
+  const startTranscriptionRef = useRef<() => Promise<void>>(async () => {});
+
+  // ── Close local WS connections WITHOUT stopping the Rust stream ──────────
+  // Used when reconnecting — start_display_audio_stream is idempotent so we
+  // never need stop+restart just to reconnect the JS-side WebSocket clients.
+  // Nulling onclose/onerror before close() prevents spurious reconnect loops.
+  const teardownLocalConnections = useCallback(() => {
+    clearDgTimers();
+    if (rustWsRef.current) {
+      rustWsRef.current.onclose = null;
+      rustWsRef.current.onerror = null;
+      rustWsRef.current.close();
+      rustWsRef.current = null;
+    }
+    if (dgWsRef.current) {
+      dgWsRef.current.onclose = null;
+      dgWsRef.current.onerror = null;
+      dgWsRef.current.close();
+      dgWsRef.current = null;
+    }
+    audioMetaRef.current = null;
+    isConnectingRef.current = false;
+    isTranscribingRef.current = false;
+    setIsConnecting(false);
+    setIsTranscribing(false);
+  }, [clearDgTimers]);
 
   // openDeepgramWs is redefined each render but always stored in the ref so
   // closures inside WS handlers get the freshest version.
   const openDeepgramWs = useCallback((meta: { sampleRate: number; channels: number }) => {
     clearDgTimers();
-    // Close any existing DG connection before opening a fresh one
-    dgWsRef.current?.close();
-    dgWsRef.current = null;
+    // Null handlers BEFORE close so the existing onclose doesn't trigger a reconnect
+    if (dgWsRef.current) {
+      dgWsRef.current.onclose = null;
+      dgWsRef.current.onerror = null;
+      dgWsRef.current.close();
+      dgWsRef.current = null;
+    }
 
     const dgUrl =
       `wss://api.deepgram.com/v1/listen` +
@@ -93,12 +135,17 @@ export function useNativeTabTranscription({
       `&encoding=linear16` +
       `&sample_rate=${meta.sampleRate}` +
       `&channels=${meta.channels}` +
+      // multichannel=true lets Deepgram transcribe all channels independently;
+      // without it stereo loopback audio often returns empty results.
+      (meta.channels > 1 ? `&multichannel=true` : ``) +
       `&tag=craftvita-display`;
 
     const dgWs = new WebSocket(dgUrl, ["token", apiKeyRef.current]);
     dgWsRef.current = dgWs;
 
     dgWs.onopen = () => {
+      isTranscribingRef.current = true;
+      isConnectingRef.current = false;
       setIsTranscribing(true);
       setIsConnecting(false);
       // Send KeepAlive every 8 s so Deepgram doesn't close during silence
@@ -127,7 +174,9 @@ export function useNativeTabTranscription({
             setInterimTranscript(text);
           }
 
-          if (onTranscriptRef.current && (text.trim() || !isFinal)) {
+          // Only fire callback when there is actual text — empty interim
+          // frames are noise and the handler guards against them anyway.
+          if (onTranscriptRef.current && text.trim()) {
             onTranscriptRef.current(text, isFinal);
           }
         }
@@ -142,9 +191,8 @@ export function useNativeTabTranscription({
 
     dgWs.onclose = () => {
       clearDgTimers();
-      // If the Rust stream is still alive, transparently reconnect Deepgram.
-      // This handles Deepgram's inactivity close that occurs during long pauses
-      // (e.g. the remote user is silent while the local user answers for 1-2 min).
+      // Rust stream still alive → transparently reconnect Deepgram.
+      // Covers Deepgram's 12 s inactivity close during long silence.
       if (rustWsRef.current?.readyState === WebSocket.OPEN && audioMetaRef.current) {
         dgReconnectRef.current = setTimeout(() => {
           if (rustWsRef.current?.readyState === WebSocket.OPEN && audioMetaRef.current) {
@@ -152,35 +200,38 @@ export function useNativeTabTranscription({
           }
         }, 1_500);
       } else {
+        isTranscribingRef.current = false;
         setIsTranscribing(false);
       }
     };
   }, [clearDgTimers]);
 
-  // Keep the ref current on every render
+  // Keep refs current on every render
   openDeepgramWsRef.current = openDeepgramWs;
 
   const stopTranscription = useCallback(async () => {
-    clearDgTimers();
-    rustWsRef.current?.close();
-    rustWsRef.current = null;
-    dgWsRef.current?.close();
-    dgWsRef.current = null;
-    audioMetaRef.current = null;
-    setIsTranscribing(false);
-    setIsConnecting(false);
+    // teardownLocalConnections handles closing WS and resetting state
+    teardownLocalConnections();
+    // Explicitly stop the Rust capture stream when the session ends
     if (isTauri()) {
       try { await invoke("stop_display_audio_stream"); } catch (_) { /* best-effort */ }
     }
-  }, [clearDgTimers]);
+  }, [teardownLocalConnections]);
 
   const startTranscription = useCallback(async () => {
     // Native Tauri audio path only — silently no-op in web browser
     if (!isTauri()) return;
-    // Idempotent — don't start twice
-    if (isConnecting || isTranscribing) return;
-    await stopTranscription();
+    // Ref-based guard — avoids stale-closure false positives from state deps
+    if (isConnectingRef.current || isTranscribingRef.current) return;
+
+    // Close local WS connections WITHOUT stopping the Rust stream.
+    // start_display_audio_stream is idempotent — returns existing port if running.
+    // Calling stop_display_audio_stream here would kill the stream that page.tsx
+    // (running in the main window) already started, since both windows share the
+    // same Rust process statics (DISPLAY_AUDIO_RUNNING / DISPLAY_AUDIO_PORT).
+    teardownLocalConnections();
     setError(null);
+    isConnectingRef.current = true;
     setIsConnecting(true);
 
     try {
@@ -198,13 +249,11 @@ export function useNativeTabTranscription({
             meta = JSON.parse(evt.data);
           } catch {
             setError("Bad metadata from audio server");
+            isConnectingRef.current = false;
             setIsConnecting(false);
             return;
           }
-
-          // Store for reconnects
           audioMetaRef.current = meta;
-          // Open (or reopen) Deepgram with the received audio format
           openDeepgramWsRef.current?.(meta);
           return;
         }
@@ -221,19 +270,32 @@ export function useNativeTabTranscription({
 
       rustWs.onerror = () => {
         setError("Audio capture WebSocket error");
+        isConnectingRef.current = false;
         setIsConnecting(false);
       };
 
       rustWs.onclose = () => {
         clearDgTimers();
+        isTranscribingRef.current = false;
+        isConnectingRef.current = false;
         setIsTranscribing(false);
         setIsConnecting(false);
+        // Auto-restart the full pipeline if the session is still active
+        if (enabledRef.current) {
+          rustReconnectRef.current = setTimeout(() => {
+            if (enabledRef.current) startTranscriptionRef.current();
+          }, 2_000);
+        }
       };
     } catch (e: any) {
       setError(e?.message ?? String(e));
+      isConnectingRef.current = false;
       setIsConnecting(false);
     }
-  }, [stopTranscription, clearDgTimers, isConnecting, isTranscribing]);
+  }, [teardownLocalConnections, clearDgTimers]);
+
+  // Keep refs current on every render
+  startTranscriptionRef.current = startTranscription;
 
   // React to `enabled` changes
   useEffect(() => {
@@ -248,14 +310,13 @@ export function useNativeTabTranscription({
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (dgKeepaliveRef.current) clearInterval(dgKeepaliveRef.current);
-      if (dgReconnectRef.current) clearTimeout(dgReconnectRef.current);
-      rustWsRef.current?.close();
-      dgWsRef.current?.close();
+      teardownLocalConnections();
       if (isTauri()) {
         invoke("stop_display_audio_stream").catch(() => {});
       }
     };
+  // teardownLocalConnections is stable (depends only on clearDgTimers which is also stable)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const clearTranscript = useCallback(() => {

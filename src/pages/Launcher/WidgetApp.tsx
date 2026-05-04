@@ -52,6 +52,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 
 import "@/App.css";
+import { toast } from "sonner";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -328,7 +329,10 @@ function PastSessionsTab() {
 
 const AI_MODELS_WIDGET = [
   { value: "google/gemma-4-26b-a4b-it", label: "Gemma 4 (26B)" },
-  { value: "google/gemini-3.1-flash-lite-preview", label: "Gemini 3.1 Flash Lite" },
+  {
+    value: "google/gemini-3.1-flash-lite-preview",
+    label: "Gemini 3.1 Flash Lite",
+  },
   { value: "google/gemini-3.1-pro-preview", label: "Gemini 3.1 Pro" },
   { value: "anthropic/claude-sonnet-4.6", label: "Claude 4.6 Sonnet" },
 ];
@@ -341,6 +345,7 @@ function WidgetSelect({
   isLoading = false,
   emptyMessage = "Nothing uploaded yet",
   className,
+  listClassName,
 }: {
   value: string;
   onValueChange: (val: string) => void;
@@ -349,6 +354,7 @@ function WidgetSelect({
   isLoading?: boolean;
   emptyMessage?: string;
   className?: string;
+  listClassName?: string;
 }) {
   const [open, setOpen] = useState(false);
   const selected = options.find((o) => o.value === value);
@@ -360,7 +366,12 @@ function WidgetSelect({
         onClick={() => setOpen((o) => !o)}
         className="w-full flex items-center justify-between gap-2 px-3 h-11 rounded-xl border border-zinc-200 bg-white text-sm text-zinc-800 hover:bg-zinc-50 transition-colors"
       >
-        <span className={cn("truncate min-w-0 text-left", !selected && "text-zinc-400")}>
+        <span
+          className={cn(
+            "truncate min-w-0 text-left",
+            !selected && "text-zinc-400",
+          )}
+        >
           {selected ? selected.label : placeholder}
         </span>
         <ChevronDown
@@ -378,9 +389,11 @@ function WidgetSelect({
               <Loader2 className="w-4 h-4 animate-spin text-zinc-300" />
             </div>
           ) : options.length === 0 ? (
-            <p className="py-3 text-center text-xs text-zinc-400">{emptyMessage}</p>
+            <p className="py-3 text-center text-xs text-zinc-400">
+              {emptyMessage}
+            </p>
           ) : (
-            <div className="max-h-44 overflow-y-auto">
+            <div className={cn("max-h-44 overflow-y-auto", listClassName)}>
               {options.map((opt) => (
                 <button
                   key={opt.value}
@@ -391,7 +404,8 @@ function WidgetSelect({
                   }}
                   className={cn(
                     "w-full text-left px-3 py-2.5 text-sm truncate hover:bg-zinc-50 transition-colors",
-                    opt.value === value && "bg-zinc-100 font-medium text-zinc-900",
+                    opt.value === value &&
+                      "bg-zinc-100 font-medium text-zinc-900",
                   )}
                 >
                   {opt.label}
@@ -687,9 +701,11 @@ function HeaderMenu({
               onClose();
               // Pass redirectUrl of the current page so Clerk does NOT navigate
               // the webview anywhere after sign-out (no new window, no webview redirect).
+              localStorage.removeItem("userId");
               await signOut({ redirectUrl: window.location.href }).catch(
                 console.error,
               );
+            //   localStorage.removeItem(`scribeshade-launcher-${user?.id}`);
             }}
             className="w-full flex items-center gap-2 px-3 py-2.5 hover:bg-red-50 text-red-600 transition-colors"
           >
@@ -872,7 +888,9 @@ function WidgetContent() {
 
         if (!cancelled) {
           const resumeData = resumeRes.ok ? await resumeRes.json() : [];
-          setResumes(Array.isArray(resumeData) ? resumeData : resumeData.data || []);
+          setResumes(
+            Array.isArray(resumeData) ? resumeData : resumeData.data || [],
+          );
 
           const docData = docRes.ok ? await docRes.json() : [];
           setDocuments(Array.isArray(docData) ? docData : docData.data || []);
@@ -888,7 +906,9 @@ function WidgetContent() {
     };
 
     fetchData();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [isSignedIn, user?.id, getToken]);
 
   const handleStartFlow = (isFree: boolean) => {
@@ -901,9 +921,11 @@ function WidgetContent() {
     setIsCreating(true);
 
     // Always use the cached backend userId; it was resolved during the resume fetch.
-    const userId = localStorage.getItem("userId") || user?.id;
+    const userId = localStorage.getItem("userId");
     if (!userId) {
-      console.error("No user ID found");
+       toast.error(
+         "User session not initialized. Please try logging in again.",
+       );
       setIsCreating(false);
       return;
     }
@@ -1175,6 +1197,7 @@ function WidgetContent() {
                                       }))}
                                       isLoading={isLoadingResumes}
                                       emptyMessage="No resumes uploaded yet"
+                                      listClassName="max-h-[80px]"
                                     />
                                     {sessionInfo.resumeId && (
                                       <button
@@ -1218,6 +1241,7 @@ function WidgetContent() {
                                       }))}
                                       isLoading={isLoadingDocs}
                                       emptyMessage="No documents uploaded yet"
+                                      listClassName="max-h-[80px]"
                                     />
                                     {sessionInfo.documentId && (
                                       <button

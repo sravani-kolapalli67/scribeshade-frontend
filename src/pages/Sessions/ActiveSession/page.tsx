@@ -289,7 +289,7 @@ export default function ActiveSession() {
           // Deduplication: Check if this message was already captured by the OTHER source
           // within a small time window (2 seconds).
           const isEcho = prev.some((m) => {
-            if (m.sender === sender) return false;
+            // if (m.sender === sender) return false;
             if (!m.timestamp || now - m.timestamp > 2000) return false;
 
             const normalizedExisting = m.text
