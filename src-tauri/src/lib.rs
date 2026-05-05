@@ -6,6 +6,12 @@ use base64::{Engine as _, engine::general_purpose};
 use std::sync::{Arc, atomic::{AtomicU64, AtomicBool, Ordering}};
 use url::Url as NavUrl;
 
+// Deepgram realtime transport (macOS + Windows only).
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod deepgram;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use deepgram::{DeepgramConfig, SttChannel};
+
 /// Monotonic version counter — every new animation request bumps this.
 static ANIM_VERSION: AtomicU64 = AtomicU64::new(0);
 static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -32,6 +38,23 @@ static DISPLAY_AUDIO_RUNNING: AtomicBool = AtomicBool::new(false);
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 static DISPLAY_AUDIO_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
+/// Monotonic generation counter — incremented on every stop so a previous
+/// zombie thread knows to exit even if DISPLAY_AUDIO_RUNNING was re-set to
+/// true by a rapid stop→start sequence.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+static DISPLAY_AUDIO_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Rust-native Parakeet-style STT — Deepgram WS lives in Rust, the webview
+/// only receives emitted transcript events (no raw audio in JS at all).
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+static SYSTEM_STT_RUNNING: AtomicBool = AtomicBool::new(false);
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+static SYSTEM_STT_GENERATION: AtomicU64 = AtomicU64::new(0);
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+static MIC_STT_RUNNING: AtomicBool = AtomicBool::new(false);
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+static MIC_STT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -546,6 +569,16 @@ async fn start_display_audio_stream() -> Result<u16, String> {
     let tx_arc = Arc::new(tx);
     let tx_capture = tx_arc.clone();
 
+    // Startup result channel: SCKit thread signals success or failure back to
+    // this async fn BEFORE it returns Ok(port). Previously the function returned
+    // immediately after spawning the thread, meaning a permission-denied error
+    // in SCKit was invisible: the axum WS stayed open, JS showed "transcribing",
+    // but zero PCM ever flowed.
+    let (init_tx, init_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+
+    // Bump generation so any previous zombie thread (from a rapid stop→start)
+    // exits on its next 50 ms tick even if DISPLAY_AUDIO_RUNNING was re-set true.
+    let my_gen = DISPLAY_AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     DISPLAY_AUDIO_RUNNING.store(true, Ordering::SeqCst);
 
     // SCKit must be set up and kept alive on a dedicated OS thread.
@@ -558,8 +591,11 @@ async fn start_display_audio_stream() -> Result<u16, String> {
         let content = match SCShareableContent::get() {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("[sckit] SCShareableContent::get() failed: {e:?}");
                 DISPLAY_AUDIO_RUNNING.store(false, Ordering::SeqCst);
+                let _ = init_tx.send(Err(format!(
+                    "Screen Recording permission denied or SCKit unavailable: {e:?}. \
+                     Grant access in System Settings → Privacy & Security → Screen Recording."
+                )));
                 return;
             }
         };
@@ -568,8 +604,8 @@ async fn start_display_audio_stream() -> Result<u16, String> {
         let display = match displays.into_iter().next() {
             Some(d) => d,
             None => {
-                eprintln!("[sckit] no display found");
                 DISPLAY_AUDIO_RUNNING.store(false, Ordering::SeqCst);
+                let _ = init_tx.send(Err("No display found for system audio capture.".to_string()));
                 return;
             }
         };
@@ -607,27 +643,33 @@ async fn start_display_audio_stream() -> Result<u16, String> {
                 let num_bufs = abl.num_buffers();
                 if num_bufs == 0 { return; }
 
-                // Convert f32 LE PCM → i16 LE PCM for Deepgram linear16 encoding.
-                // SCKit delivers float32; interleave non-interleaved buffers.
+                // Convert f32 stereo → mono i16 LE PCM for Deepgram (linear16, channels=1).
+                // SCKit always delivers float32 at 48 kHz with 2 channels.
+                // Downmixing to mono here means Deepgram receives a clean single-channel
+                // stream — no multichannel mode needed, works reliably with nova-3.
                 let mut pcm: Vec<u8> = Vec::new();
 
                 if num_bufs == 1 {
-                    // Single buffer = interleaved (all channels, e.g. stereo i2)
+                    // Interleaved stereo: layout is [L0_f32][R0_f32][L1_f32][R1_f32]...
+                    // Read 8 bytes per frame (2 × f32), average L+R → mono.
                     if let Some(buf) = abl.get(0) {
-                        for chunk in buf.data().chunks_exact(4) {
-                            let f = f32::from_le_bytes([
-                                chunk[0], chunk[1], chunk[2], chunk[3]
-                            ]);
-                            let v = (f.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                        for frame in buf.data().chunks_exact(8) {
+                            let l = f32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]);
+                            let r = f32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
+                            let mono = ((l + r) * 0.5).clamp(-1.0, 1.0);
+                            let v = (mono * i16::MAX as f32) as i16;
                             pcm.extend_from_slice(&v.to_le_bytes());
                         }
                     }
                 } else {
-                    // Multiple buffers = non-interleaved (one buffer per channel)
+                    // Non-interleaved: one buffer per channel.
+                    // Average all channels per sample position → mono.
                     let samples_per_ch = abl.get(0)
                         .map(|b| b.data().len() / 4)
                         .unwrap_or(0);
                     for i in 0..samples_per_ch {
+                        let mut sum = 0.0f32;
+                        let mut count = 0u32;
                         for b in 0..num_bufs {
                             if let Some(buf) = abl.get(b) {
                                 let raw = buf.data();
@@ -636,10 +678,15 @@ async fn start_display_audio_stream() -> Result<u16, String> {
                                     let f = f32::from_le_bytes([
                                         raw[off], raw[off+1], raw[off+2], raw[off+3]
                                     ]);
-                                    let v = (f.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-                                    pcm.extend_from_slice(&v.to_le_bytes());
+                                    sum += f;
+                                    count += 1;
                                 }
                             }
+                        }
+                        if count > 0 {
+                            let mono = (sum / count as f32).clamp(-1.0, 1.0);
+                            let v = (mono * i16::MAX as f32) as i16;
+                            pcm.extend_from_slice(&v.to_le_bytes());
                         }
                     }
                 }
@@ -652,18 +699,50 @@ async fn start_display_audio_stream() -> Result<u16, String> {
         );
 
         if let Err(e) = stream.start_capture() {
-            eprintln!("[sckit] start_capture failed: {e:?}");
             DISPLAY_AUDIO_RUNNING.store(false, Ordering::SeqCst);
+            let _ = init_tx.send(Err(format!(
+                "System audio capture failed to start: {e:?}. \
+                 Ensure Screen Recording permission is granted in System Settings → Privacy & Security → Screen Recording."
+            )));
             return;
         }
 
-        while DISPLAY_AUDIO_RUNNING.load(Ordering::Relaxed) {
+        // Signal successful startup — the async caller is waiting on init_rx.
+        let _ = init_tx.send(Ok(()));
+
+        // Keep SCKit stream alive, checking both the running flag AND the
+        // generation so a rapid stop→start sequence doesn't leave this thread
+        // looping after a new stream has been spawned.
+        while DISPLAY_AUDIO_RUNNING.load(Ordering::Relaxed)
+            && DISPLAY_AUDIO_GENERATION.load(Ordering::Relaxed) == my_gen
+        {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
 
         let _ = stream.stop_capture();
         // stream, content, display, filter dropped here (on this thread)
     });
+
+    // Wait up to 10 s for SCKit to confirm it started.  10 s gives the user
+    // time to grant Screen Recording permission on first run; a denied or
+    // missing permission still fails fast (SCShareableContent::get errors).
+    match tokio::time::timeout(std::time::Duration::from_secs(10), init_rx).await {
+        Ok(Ok(Ok(()))) => {} // SCKit started — proceed to bind axum server
+        Ok(Ok(Err(e))) => {
+            DISPLAY_AUDIO_RUNNING.store(false, Ordering::SeqCst);
+            DISPLAY_AUDIO_PORT.store(0, Ordering::SeqCst);
+            return Err(e);
+        }
+        _ => {
+            DISPLAY_AUDIO_RUNNING.store(false, Ordering::SeqCst);
+            DISPLAY_AUDIO_PORT.store(0, Ordering::SeqCst);
+            return Err(
+                "System audio capture timed out — check Screen Recording permission \
+                 in System Settings → Privacy & Security → Screen Recording."
+                    .to_string(),
+            );
+        }
+    }
 
     // Bind axum WebSocket server on a random localhost port
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -672,9 +751,11 @@ async fn start_display_audio_stream() -> Result<u16, String> {
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     DISPLAY_AUDIO_PORT.store(port, Ordering::SeqCst);
 
-    // First WS message is JSON metadata so the frontend can configure Deepgram
+    // First WS message is JSON metadata so the frontend can configure Deepgram.
+    // We always output mono (channels=1) regardless of SCKit's native stereo
+    // capture — the downmix happens in the callback above.
     let sample_rate: u32 = 48000;
-    let channels: u32 = 2;
+    let channels: u32 = 1;
     let meta = format!("{{\"sampleRate\":{sample_rate},\"channels\":{channels}}}");
     let meta_bytes = Arc::new(meta.into_bytes());
 
@@ -715,6 +796,10 @@ async fn start_display_audio_stream() -> Result<u16, String> {
 #[cfg(target_os = "macos")]
 #[tauri::command]
 fn stop_display_audio_stream() {
+    // Increment generation FIRST so the SCKit thread exits on its next tick
+    // even if start_display_audio_stream is called immediately after this
+    // (which would re-set DISPLAY_AUDIO_RUNNING to true).
+    DISPLAY_AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst);
     DISPLAY_AUDIO_RUNNING.store(false, Ordering::SeqCst);
     DISPLAY_AUDIO_PORT.store(0, Ordering::SeqCst);
 }
@@ -869,6 +954,11 @@ async fn start_display_audio_stream() -> Result<u16, String> {
     let tx_arc = Arc::new(tx);
     let tx_capture = tx_arc.clone();
 
+    // Bump generation so any previous zombie thread exits on its next 50 ms tick.
+    let my_gen = DISPLAY_AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    // Capture the channel count now so the downmix callbacks below can use it
+    // without borrowing `config` after it is moved into the stream builder.
+    let ch_count = channels as usize;
     DISPLAY_AUDIO_RUNNING.store(true, Ordering::SeqCst);
     std::thread::spawn(move || {
         let tx = tx_capture;
@@ -878,8 +968,11 @@ async fn start_display_audio_stream() -> Result<u16, String> {
                 &config.into(),
                 move |data: &[f32], _| {
                     if !DISPLAY_AUDIO_RUNNING.load(Ordering::Relaxed) { return; }
-                    let pcm: Vec<u8> = data.iter().flat_map(|&s| {
-                        let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                    // Downmix multi-channel frames to mono: average each frame.
+                    let pcm: Vec<u8> = data.chunks(ch_count).flat_map(|frame| {
+                        let sum: f32 = frame.iter().copied().sum();
+                        let mono = (sum / frame.len() as f32).clamp(-1.0, 1.0);
+                        let v = (mono * i16::MAX as f32) as i16;
                         v.to_le_bytes()
                     }).collect();
                     let _ = tx.send(Arc::new(pcm));
@@ -889,7 +982,12 @@ async fn start_display_audio_stream() -> Result<u16, String> {
                 &config.into(),
                 move |data: &[i16], _| {
                     if !DISPLAY_AUDIO_RUNNING.load(Ordering::Relaxed) { return; }
-                    let pcm: Vec<u8> = data.iter().flat_map(|s| s.to_le_bytes()).collect();
+                    let pcm: Vec<u8> = data.chunks(ch_count).flat_map(|frame| {
+                        let sum: i32 = frame.iter().map(|&s| s as i32).sum();
+                        let mono = (sum / frame.len() as i32)
+                            .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                        mono.to_le_bytes()
+                    }).collect();
                     let _ = tx.send(Arc::new(pcm));
                 }, err_fn, None,
             ),
@@ -897,7 +995,9 @@ async fn start_display_audio_stream() -> Result<u16, String> {
         };
         if let Ok(s) = stream {
             let _ = s.play();
-            while DISPLAY_AUDIO_RUNNING.load(Ordering::Relaxed) {
+            while DISPLAY_AUDIO_RUNNING.load(Ordering::Relaxed)
+                && DISPLAY_AUDIO_GENERATION.load(Ordering::Relaxed) == my_gen
+            {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
         }
@@ -907,7 +1007,8 @@ async fn start_display_audio_stream() -> Result<u16, String> {
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     DISPLAY_AUDIO_PORT.store(port, Ordering::SeqCst);
 
-    let meta = format!("{{\"sampleRate\":{sample_rate},\"channels\":{channels}}}");
+    // Always report channels=1 — the WASAPI callback downmixes to mono above.
+    let meta = format!("{{\"sampleRate\":{sample_rate},\"channels\":1}}");
     let meta_bytes = Arc::new(meta.into_bytes());
 
     let router = Router::new().route("/", axum::routing::get(
@@ -936,6 +1037,7 @@ async fn start_display_audio_stream() -> Result<u16, String> {
 #[cfg(target_os = "windows")]
 #[tauri::command]
 fn stop_display_audio_stream() {
+    DISPLAY_AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst);
     DISPLAY_AUDIO_RUNNING.store(false, Ordering::SeqCst);
     DISPLAY_AUDIO_PORT.store(0, Ordering::SeqCst);
 }
@@ -964,6 +1066,561 @@ async fn start_display_audio_stream() -> Result<u16, String> {
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[tauri::command]
 fn stop_display_audio_stream() {}
+
+// ── Parakeet-style Rust-native STT ───────────────────────────────────────────
+// The mini overlay never touches raw audio or connects to Deepgram directly.
+// Rust captures PCM, owns the Deepgram WS, and emits Tauri events:
+//   "stt:system-audio"  → TranscriptPayload  (Interviewer — system audio)
+//   "stt:mic"           → TranscriptPayload  (User — microphone)
+//   "stt:status:system" → SttStatusPayload
+//   "stt:status:mic"    → SttStatusPayload
+//
+// All Deepgram WebSocket plumbing lives in `crate::deepgram` — these commands
+// are responsible only for OS-level audio capture and feeding PCM into a
+// broadcast channel that `deepgram::run_session` consumes.
+
+// Deepgram API key loaded from VITE_DEEPGRAM_API_KEY in .env at startup.
+// Stored as managed state so commands never receive the key from the frontend.
+struct DeepgramKey(String);
+
+// ── macOS: SCKit system audio → Deepgram ─────────────────────────────────────
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn start_system_audio_transcription(
+    app: tauri::AppHandle,
+    dg_key: tauri::State<'_, DeepgramKey>,
+    language: String,
+    model: String,
+) -> Result<(), String> {
+    let api_key = dg_key.0.clone();
+    use screencapturekit::prelude::*;
+    use tokio::sync::broadcast;
+
+    if SYSTEM_STT_RUNNING.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    let (init_tx, init_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+    let (pcm_tx, _) = broadcast::channel::<Arc<Vec<u8>>>(256);
+    let tx_arc = Arc::new(pcm_tx);
+    let tx_capture = tx_arc.clone();
+    let my_gen = SYSTEM_STT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    SYSTEM_STT_RUNNING.store(true, Ordering::SeqCst);
+
+    // but PCM goes straight into the broadcast channel — no axum WS server.
+    std::thread::spawn(move || {
+        let tx = tx_capture;
+        let content = match SCShareableContent::get() {
+            Ok(c) => c,
+            Err(e) => {
+                SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
+                let _ = init_tx.send(Err(format!(
+                    "Screen Recording permission denied: {e:?}. \
+                     Grant in System Settings → Privacy & Security → Screen Recording."
+                )));
+                return;
+            }
+        };
+        let display = match content.displays().into_iter().next() {
+            Some(d) => d,
+            None => {
+                SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
+                let _ = init_tx.send(Err("No display found for system audio.".into()));
+                return;
+            }
+        };
+        let filter = SCContentFilter::create()
+            .with_display(&display)
+            .with_excluding_windows(&[])
+            .build();
+        let cfg = SCStreamConfiguration::new()
+            .with_width(2).with_height(2)
+            .with_captures_audio(true)
+            .with_sample_rate(48000)
+            .with_channel_count(2);
+        let mut stream = SCStream::new(&filter, &cfg);
+        stream.add_output_handler(
+            move |sample: CMSampleBuffer, of_type: SCStreamOutputType| {
+                match of_type { SCStreamOutputType::Audio => {} _ => return }
+                let abl = match sample.audio_buffer_list() { Some(a) => a, None => return };
+                let num_bufs = abl.num_buffers();
+                if num_bufs == 0 { return; }
+                let mut pcm: Vec<u8> = Vec::new();
+                if num_bufs == 1 {
+                    if let Some(buf) = abl.get(0) {
+                        for frame in buf.data().chunks_exact(8) {
+                            let l = f32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]);
+                            let r = f32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
+                            let v = (((l + r) * 0.5).clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                            pcm.extend_from_slice(&v.to_le_bytes());
+                        }
+                    }
+                } else {
+                    let n = abl.get(0).map(|b| b.data().len() / 4).unwrap_or(0);
+                    for i in 0..n {
+                        let mut sum = 0.0f32; let mut cnt = 0u32;
+                        for b in 0..num_bufs {
+                            if let Some(buf) = abl.get(b) {
+                                let raw = buf.data(); let off = i * 4;
+                                if off + 4 <= raw.len() {
+                                    sum += f32::from_le_bytes([raw[off],raw[off+1],raw[off+2],raw[off+3]]);
+                                    cnt += 1;
+                                }
+                            }
+                        }
+                        if cnt > 0 {
+                            let v = ((sum / cnt as f32).clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                            pcm.extend_from_slice(&v.to_le_bytes());
+                        }
+                    }
+                }
+                if !pcm.is_empty() { let _ = tx.send(Arc::new(pcm)); }
+            },
+            SCStreamOutputType::Audio,
+        );
+        if let Err(e) = stream.start_capture() {
+            SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
+            let _ = init_tx.send(Err(format!(
+                "System audio capture failed: {e:?}. Check Screen Recording permission."
+            )));
+            return;
+        }
+        let _ = init_tx.send(Ok(()));
+        while SYSTEM_STT_RUNNING.load(Ordering::Relaxed)
+            && SYSTEM_STT_GENERATION.load(Ordering::Relaxed) == my_gen
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let _ = stream.stop_capture();
+    });
+
+    match tokio::time::timeout(std::time::Duration::from_secs(10), init_rx).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => {
+            eprintln!("[stt:system macos] SCKit init FAILED: {e}");
+            SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst); return Err(e);
+        }
+        _ => {
+            let msg = "System audio capture timed out — check Screen Recording permission.".to_string();
+            eprintln!("[stt:system macos] SCKit init TIMEOUT");
+            SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
+            return Err(msg);
+        }
+    }
+    let app_c = app.clone();
+    tokio::spawn(async move {
+        let pcm_rx = tx_arc.subscribe();
+        deepgram::run_session(
+            app_c,
+            DeepgramConfig {
+                api_key,
+                model,
+                language,
+                sample_rate: 48000,
+                channels: 1,
+                tag: "craftvita-rust",
+            },
+            SttChannel::System,
+            pcm_rx,
+            &SYSTEM_STT_RUNNING,
+            &SYSTEM_STT_GENERATION,
+            my_gen,
+        )
+        .await;
+    });
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn stop_system_audio_transcription() {
+    SYSTEM_STT_GENERATION.fetch_add(1, Ordering::SeqCst);
+    SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
+}
+
+// ── macOS: cpal mic → Deepgram ────────────────────────────────────────────────
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn start_mic_transcription(
+    app: tauri::AppHandle,
+    dg_key: tauri::State<'_, DeepgramKey>,
+    language: String,
+    model: String,
+) -> Result<(), String> {
+    let api_key = dg_key.0.clone();
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    use tokio::sync::broadcast;
+
+    if MIC_STT_RUNNING.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    let host = cpal::default_host();
+    let device = host.default_input_device().ok_or("No microphone found")?;
+    let config = device.default_input_config().map_err(|e| e.to_string())?;
+    let sample_rate = config.sample_rate().0;
+    let ch = config.channels() as usize;
+
+    let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(64);
+    let tx_arc = Arc::new(tx);
+    let tx_capture = tx_arc.clone();
+    let my_gen = MIC_STT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    MIC_STT_RUNNING.store(true, Ordering::SeqCst);
+
+    std::thread::spawn(move || {
+        let tx = tx_capture;
+        let err_fn = |e| eprintln!("[mic-stt] cpal error: {e}");
+        let stream = match config.sample_format() {
+            cpal::SampleFormat::F32 => device.build_input_stream(
+                &config.into(),
+                move |data: &[f32], _| {
+                    if !MIC_STT_RUNNING.load(Ordering::Relaxed) { return; }
+                    let pcm: Vec<u8> = data.chunks(ch).flat_map(|frame| {
+                        let sum: f32 = frame.iter().copied().sum();
+                        let mono = (sum / frame.len() as f32).clamp(-1.0, 1.0);
+                        let v = (mono * i16::MAX as f32) as i16;
+                        v.to_le_bytes()
+                    }).collect();
+                    let _ = tx.send(Arc::new(pcm));
+                }, err_fn, None,
+            ),
+            cpal::SampleFormat::I16 => device.build_input_stream(
+                &config.into(),
+                move |data: &[i16], _| {
+                    if !MIC_STT_RUNNING.load(Ordering::Relaxed) { return; }
+                    let pcm: Vec<u8> = data.chunks(ch).flat_map(|frame| {
+                        let sum: i32 = frame.iter().map(|&s| s as i32).sum();
+                        let mono = (sum / frame.len() as i32)
+                            .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                        mono.to_le_bytes()
+                    }).collect();
+                    let _ = tx.send(Arc::new(pcm));
+                }, err_fn, None,
+            ),
+            _ => return,
+        };
+        if let Ok(s) = stream {
+            let _ = s.play();
+            while MIC_STT_RUNNING.load(Ordering::Relaxed)
+                && MIC_STT_GENERATION.load(Ordering::Relaxed) == my_gen
+            {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    });
+
+    let app_c = app.clone();
+    tokio::spawn(async move {
+        let pcm_rx = tx_arc.subscribe();
+        deepgram::run_session(
+            app_c,
+            DeepgramConfig {
+                api_key,
+                model,
+                language,
+                sample_rate,
+                channels: 1,
+                tag: "craftvita-mic",
+            },
+            SttChannel::Mic,
+            pcm_rx,
+            &MIC_STT_RUNNING,
+            &MIC_STT_GENERATION,
+            my_gen,
+        )
+        .await;
+    });
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn stop_mic_transcription() {
+    MIC_STT_GENERATION.fetch_add(1, Ordering::SeqCst);
+    MIC_STT_RUNNING.store(false, Ordering::SeqCst);
+}
+
+// ── Windows: WASAPI loopback → Deepgram (system audio) ───────────────────────
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn start_system_audio_transcription(
+    app: tauri::AppHandle,
+    dg_key: tauri::State<'_, DeepgramKey>,
+    language: String,
+    model: String,
+) -> Result<(), String> {
+    let api_key = dg_key.0.clone();
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    use tokio::sync::broadcast;
+
+    if SYSTEM_STT_RUNNING.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    let host = cpal::default_host();
+    let device = host.default_output_device().ok_or("No output device for loopback")?;;
+    let config = device.default_output_config().map_err(|e| e.to_string())?;
+    let sample_rate = config.sample_rate().0;
+    let ch = config.channels() as usize;
+
+    let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(128);
+    let tx_arc = Arc::new(tx);
+    let tx_capture = tx_arc.clone();
+    let my_gen = SYSTEM_STT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    SYSTEM_STT_RUNNING.store(true, Ordering::SeqCst);
+
+    std::thread::spawn(move || {
+        let tx = tx_capture;
+        let err_fn = |e| eprintln!("[wasapi-stt] stream error: {e}");
+        let stream = match config.sample_format() {
+            cpal::SampleFormat::F32 => device.build_input_stream(
+                &config.into(),
+                move |data: &[f32], _| {
+                    if !SYSTEM_STT_RUNNING.load(Ordering::Relaxed) { return; }
+                    let pcm: Vec<u8> = data.chunks(ch).flat_map(|frame| {
+                        let sum: f32 = frame.iter().copied().sum();
+                        let mono = (sum / frame.len() as f32).clamp(-1.0, 1.0);
+                        let v = (mono * i16::MAX as f32) as i16;
+                        v.to_le_bytes()
+                    }).collect();
+                    let _ = tx.send(Arc::new(pcm));
+                }, err_fn, None,
+            ),
+            cpal::SampleFormat::I16 => device.build_input_stream(
+                &config.into(),
+                move |data: &[i16], _| {
+                    if !SYSTEM_STT_RUNNING.load(Ordering::Relaxed) { return; }
+                    let pcm: Vec<u8> = data.chunks(ch).flat_map(|frame| {
+                        let sum: i32 = frame.iter().map(|&s| s as i32).sum();
+                        let mono = (sum / frame.len() as i32)
+                            .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                        mono.to_le_bytes()
+                    }).collect();
+                    let _ = tx.send(Arc::new(pcm));
+                }, err_fn, None,
+            ),
+            _ => return,
+        };
+        if let Ok(s) = stream {
+            let _ = s.play();
+            while SYSTEM_STT_RUNNING.load(Ordering::Relaxed)
+                && SYSTEM_STT_GENERATION.load(Ordering::Relaxed) == my_gen
+            {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    });
+
+    let app_c = app.clone();
+    tokio::spawn(async move {
+        let pcm_rx = tx_arc.subscribe();
+        deepgram::run_session(
+            app_c,
+            DeepgramConfig {
+                api_key,
+                model,
+                language,
+                sample_rate,
+                channels: 1,
+                tag: "craftvita-rust",
+            },
+            SttChannel::System,
+            pcm_rx,
+            &SYSTEM_STT_RUNNING,
+            &SYSTEM_STT_GENERATION,
+            my_gen,
+        )
+        .await;
+    });
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn stop_system_audio_transcription() {
+    SYSTEM_STT_GENERATION.fetch_add(1, Ordering::SeqCst);
+    SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
+}
+
+// ── Windows: cpal mic input → Deepgram ───────────────────────────────────────
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn start_mic_transcription(
+    app: tauri::AppHandle,
+    dg_key: tauri::State<'_, DeepgramKey>,
+    language: String,
+    model: String,
+) -> Result<(), String> {
+    let api_key = dg_key.0.clone();
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    use tokio::sync::broadcast;
+
+    if MIC_STT_RUNNING.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    let host = cpal::default_host();
+    let device = host.default_input_device().ok_or("No microphone found")?;
+    let config = device.default_input_config().map_err(|e| e.to_string())?;
+    let sample_rate = config.sample_rate().0;
+    let ch = config.channels() as usize;
+
+    let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(64);
+    let tx_arc = Arc::new(tx);
+    let tx_capture = tx_arc.clone();
+    let my_gen = MIC_STT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    MIC_STT_RUNNING.store(true, Ordering::SeqCst);
+
+    std::thread::spawn(move || {
+        let tx = tx_capture;
+        let err_fn = |e| eprintln!("[mic-stt-win] cpal error: {e}");
+        let stream = match config.sample_format() {
+            cpal::SampleFormat::F32 => device.build_input_stream(
+                &config.into(),
+                move |data: &[f32], _| {
+                    if !MIC_STT_RUNNING.load(Ordering::Relaxed) { return; }
+                    let pcm: Vec<u8> = data.chunks(ch).flat_map(|frame| {
+                        let sum: f32 = frame.iter().copied().sum();
+                        let mono = (sum / frame.len() as f32).clamp(-1.0, 1.0);
+                        let v = (mono * i16::MAX as f32) as i16;
+                        v.to_le_bytes()
+                    }).collect();
+                    let _ = tx.send(Arc::new(pcm));
+                }, err_fn, None,
+            ),
+            cpal::SampleFormat::I16 => device.build_input_stream(
+                &config.into(),
+                move |data: &[i16], _| {
+                    if !MIC_STT_RUNNING.load(Ordering::Relaxed) { return; }
+                    let pcm: Vec<u8> = data.chunks(ch).flat_map(|frame| {
+                        let sum: i32 = frame.iter().map(|&s| s as i32).sum();
+                        let mono = (sum / frame.len() as i32)
+                            .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                        mono.to_le_bytes()
+                    }).collect();
+                    let _ = tx.send(Arc::new(pcm));
+                }, err_fn, None,
+            ),
+            _ => return,
+        };
+        if let Ok(s) = stream {
+            let _ = s.play();
+            while MIC_STT_RUNNING.load(Ordering::Relaxed)
+                && MIC_STT_GENERATION.load(Ordering::Relaxed) == my_gen
+            {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    });
+
+    let app_c = app.clone();
+    tokio::spawn(async move {
+        let pcm_rx = tx_arc.subscribe();
+        deepgram::run_session(
+            app_c,
+            DeepgramConfig {
+                api_key,
+                model,
+                language,
+                sample_rate,
+                channels: 1,
+                tag: "craftvita-mic",
+            },
+            SttChannel::Mic,
+            pcm_rx,
+            &MIC_STT_RUNNING,
+            &MIC_STT_GENERATION,
+            my_gen,
+        )
+        .await;
+    });
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn stop_mic_transcription() {
+    MIC_STT_GENERATION.fetch_add(1, Ordering::SeqCst);
+    MIC_STT_RUNNING.store(false, Ordering::SeqCst);
+}
+
+// ── Linux stubs for new STT commands ─────────────────────────────────────────
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[tauri::command]
+async fn start_system_audio_transcription(
+    _app: tauri::AppHandle, _dg_key: tauri::State<'_, DeepgramKey>, _language: String, _model: String,
+) -> Result<(), String> { Err("STT is macOS/Windows-only".into()) }
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[tauri::command]
+fn stop_system_audio_transcription() {}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[tauri::command]
+async fn start_mic_transcription(
+    _app: tauri::AppHandle, _dg_key: tauri::State<'_, DeepgramKey>, _language: String, _model: String,
+) -> Result<(), String> { Err("STT is macOS/Windows-only".into()) }
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[tauri::command]
+fn stop_mic_transcription() {}
+
+// ── OS-level permission settings deep-links ──────────────────────────────────
+// Lazy permission flow: when system audio / mic capture fails because the user
+// denied the OS permission, the JS layer surfaces a "Open Settings" button that
+// invokes one of these commands to deep-link to the right Privacy pane.
+
+#[tauri::command]
+fn open_screen_recording_settings(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let url = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
+        app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Windows has no system-audio permission; loopback works without consent.
+        // Open the Sound mixer so the user can verify the default output device.
+        let _ = app;
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "ms-settings:sound"])
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = app;
+        Err("Not supported on this OS".into())
+    }
+}
+
+#[tauri::command]
+fn open_microphone_settings(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let url = "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone";
+        app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = app;
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "ms-settings:privacy-microphone"])
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = app;
+        Err("Not supported on this OS".into())
+    }
+}
 
 #[command]
 fn set_session_active(active: bool) {
@@ -1246,6 +1903,17 @@ fn show_launcher_widget(app: AppHandle) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Load .env so VITE_DEEPGRAM_API_KEY is available via std::env::var.
+    // ok() is intentional — missing .env in production (bundled app) is fine.
+    dotenvy::dotenv().ok();
+    let deepgram_key = std::env::var("VITE_DEEPGRAM_API_KEY")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if deepgram_key.is_empty() {
+        eprintln!("[startup] VITE_DEEPGRAM_API_KEY is EMPTY — check .env file. STT will fail.");
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -1254,6 +1922,7 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .manage(DeepgramKey(deepgram_key))
         .setup(|app| {
             // ── macOS: switch to Accessory activation policy ───────────────
             //
@@ -1327,16 +1996,13 @@ pub fn run() {
 
                         if let Some(ticket) = ticket {
                             // Ticket present: widget signs in via Clerk ticket strategy
-                            eprintln!("[deep-link] auth-callback with ticket — emitting auth:tauri-ticket");
                             let _ = deep_link_handle.emit("auth:tauri-ticket", &ticket);
                         } else {
                             // No ticket: widget reloads to pick up shared localStorage session
-                            eprintln!("[deep-link] auth-callback without ticket — emitting auth:reload");
                             let _ = deep_link_handle.emit("auth:reload", ());
                         }
                     } else {
                         // Parse failed but URL starts with auth-callback — still reload
-                        eprintln!("[deep-link] auth-callback URL parse failed — emitting auth:reload");
                         let _ = deep_link_handle.emit("auth:reload", ());
                     }
 
@@ -1506,6 +2172,9 @@ pub fn run() {
             toggle_floating, capture_screen, show_mini_top_center, set_mini_state,
             start_audio_stream, stop_audio_stream, list_audio_devices,
             start_display_audio_stream, stop_display_audio_stream,
+            start_system_audio_transcription, stop_system_audio_transcription,
+            start_mic_transcription, stop_mic_transcription,
+            open_screen_recording_settings, open_microphone_settings,
             set_session_active, handle_launcher_click,
             open_main_dashboard, show_launcher_widget,
         ])

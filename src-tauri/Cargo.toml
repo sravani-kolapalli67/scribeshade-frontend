@@ -1,6 +1,6 @@
 [package]
 name = "scribeshade-frontend"
-version = "0.1.1"
+version = "0.1.2"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -33,6 +33,9 @@ screenshots = "0.8.10"
 base64 = "0.22.1"
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["ws"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
+dotenvy = "0.15"
 [target.'cfg(target_os = "macos")'.dependencies]
 # cpal captures the default input device (mic) â€” kept for user mic transcription.
 cpal = "0.15"

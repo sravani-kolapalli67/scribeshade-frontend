@@ -63,6 +63,7 @@ export const ENDPOINTS = {
   resumeBuilderGenerate:       () => `${api()}/api/resume/builder/generate`,
   resumeBuilderExtractFields:  () => `${api()}/api/resume/builder/extract-fields`,
   resumeBuilderEnhanceSection: () => `${api()}/api/resume/builder/enhance-section`,
+  resumeBuilderValidateSection: () => `${api()}/api/resume/builder/validate-section`,
   resumeBuilderTailor:         () => `${api()}/api/resume/builder/tailor`,
   resumeBuilderExportPdf:      () => `${api()}/api/resume/builder/export-pdf`,
 

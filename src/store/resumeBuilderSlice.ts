@@ -10,7 +10,8 @@ export type SectionId =
   | "projects"
   | "education"
   | "certifications"
-  | "publications";
+  | "publications"
+  | (string & {}); // allows custom section IDs like "volunteer", "languages", etc.
 
 export interface SectionDef {
   id: SectionId;
@@ -44,11 +45,38 @@ export interface ResumeFields {
   // Optional sections
   certifications: string;
   publications: string;
+  /**
+   * Freeform custom sections detected from uploaded resumes.
+   * Stored as a JSON-serialised Record<sectionId, text>.
+   * We keep it as a flat string so it serialises cleanly into the
+   * existing `fields` Prisma column without schema changes.
+   */
+  _customSections: string;
 }
 
 export type AutoSaveStatus = "idle" | "saving" | "saved" | "error";
 export type BottomTab = "editor" | "ats" | "jdtailor" | "coverletter";
 export type TemplateId = "classic" | "modern" | "minimal";
+
+// ─── Section Quality / Validation ─────────────────────────────────────────────
+
+export interface SectionConstraints {
+  minWords: number;
+  maxWords: number;
+  minBullets: number | null;
+  maxBullets: number | null;
+  reason: string;
+}
+
+export interface SectionQuality {
+  score: number;
+  status: "excellent" | "good" | "needs_improvement" | "poor";
+  issues: string[];
+  suggestions: string[];
+  constraints: SectionConstraints;
+  wordCount: number;
+  isValidating: boolean;
+}
 
 export interface ResumeBuilderState {
   resumeTitle: string;
@@ -56,6 +84,8 @@ export interface ResumeBuilderState {
   zoom: number;
   activeSection: SectionId;
   sections: SectionDef[];
+  /** Extra section definitions added at runtime (from detected resume data). */
+  customSectionDefs: SectionDef[];
   fields: ResumeFields;
   /** Fields that are read-only (rendered with a lock icon + disabled input). */
   lockedFields: Partial<Record<keyof ResumeFields, boolean>>;
@@ -63,6 +93,8 @@ export interface ResumeBuilderState {
   aiSuggestion: string | null;
   aiSectionId: SectionId | null;
   isEnhancing: boolean;
+  /** Sections whose current content was produced by AI Enhance. */
+  aiEnhancedSections: string[];
   // Undo / Redo history (stores snapshots of `fields`)
   past: ResumeFields[];
   future: ResumeFields[];
@@ -78,6 +110,8 @@ export interface ResumeBuilderState {
   jobDescription: string;
   jobTitle: string;
   company: string;
+  /** Per-section quality data returned by the validate-section API. */
+  sectionValidation: Record<string, SectionQuality>;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -112,6 +146,7 @@ export const EMPTY_FIELDS: ResumeFields = {
   education: "",
   certifications: "",
   publications: "",
+  _customSections: "{}",
 };
 
 const initialState: ResumeBuilderState = {
@@ -120,11 +155,13 @@ const initialState: ResumeBuilderState = {
   zoom: 1,
   activeSection: "personalInfo",
   sections: DEFAULT_SECTIONS,
+  customSectionDefs: [],
   fields: EMPTY_FIELDS,
   lockedFields: { name: true, email: true },
   aiSuggestion: null,
   aiSectionId: null,
   isEnhancing: false,
+  aiEnhancedSections: [],
   past: [],
   future: [],
   autoSaveStatus: "idle",
@@ -139,6 +176,7 @@ const initialState: ResumeBuilderState = {
   jobDescription: "",
   jobTitle: "",
   company: "",
+  sectionValidation: {},
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -242,6 +280,33 @@ const resumeBuilderSlice = createSlice({
       state.isEnhancing = action.payload;
     },
 
+    /** Mark a section as currently being validated (spinner). */
+    setSectionValidating(
+      state,
+      action: PayloadAction<{ sectionId: string; isValidating: boolean }>,
+    ) {
+      const { sectionId, isValidating } = action.payload;
+      if (!state.sectionValidation[sectionId]) {
+        state.sectionValidation[sectionId] = {
+          score: 0, status: "needs_improvement",
+          issues: [], suggestions: [],
+          constraints: { minWords: 30, maxWords: 300, minBullets: null, maxBullets: null, reason: "" },
+          wordCount: 0, isValidating,
+        };
+      } else {
+        state.sectionValidation[sectionId].isValidating = isValidating;
+      }
+    },
+
+    /** Store the validated quality result for a section. */
+    setSectionQuality(
+      state,
+      action: PayloadAction<{ sectionId: string; quality: Omit<SectionQuality, "isValidating"> }>,
+    ) {
+      const { sectionId, quality } = action.payload;
+      state.sectionValidation[sectionId] = { ...quality, isValidating: false };
+    },
+
     /** Apply the current AI suggestion to the fields. */
     applyAiSuggestion(state) {
       if (!state.aiSuggestion || !state.aiSectionId) return;
@@ -273,6 +338,9 @@ const resumeBuilderSlice = createSlice({
           break;
         default:
           break;
+      }
+      if (state.aiSectionId && !state.aiEnhancedSections.includes(state.aiSectionId)) {
+        state.aiEnhancedSections.push(state.aiSectionId);
       }
       state.aiSuggestion = null;
       state.aiSectionId = null;
@@ -326,6 +394,68 @@ const resumeBuilderSlice = createSlice({
     },
 
     /**
+     * Add a custom section (e.g. detected from uploaded resume).
+     * Skips if the sectionId already exists in sections or customSectionDefs.
+     */
+    addCustomSection(
+      state,
+      action: PayloadAction<{ id: string; label: string; content?: string }>,
+    ) {
+      const { id, label, content = "" } = action.payload;
+      const alreadyInCore   = state.sections.some((s) => s.id === id);
+      const alreadyInCustom = state.customSectionDefs.some((s) => s.id === id);
+      if (alreadyInCore || alreadyInCustom) return;
+      state.customSectionDefs.push({ id, label, required: false, enabled: true });
+      // Store content in _customSections JSON blob
+      try {
+        const map = JSON.parse(state.fields._customSections || "{}") as Record<string, string>;
+        if (!map[id]) map[id] = content;
+        state.fields._customSections = JSON.stringify(map);
+      } catch { /* ignore */ }
+      state.isDirty = true;
+    },
+
+    /** Remove a custom section entirely. */
+    removeCustomSection(state, action: PayloadAction<string>) {
+      const id = action.payload;
+      state.customSectionDefs = state.customSectionDefs.filter((s) => s.id !== id);
+      try {
+        const map = JSON.parse(state.fields._customSections || "{}") as Record<string, string>;
+        delete map[id];
+        state.fields._customSections = JSON.stringify(map);
+      } catch { /* ignore */ }
+      if (state.activeSection === id) {
+        const first = state.sections.find((s) => s.enabled) ?? state.customSectionDefs[0];
+        if (first) state.activeSection = first.id;
+      }
+      state.isDirty = true;
+    },
+
+    /** Toggle a custom section's enabled state. */
+    toggleCustomSection(state, action: PayloadAction<string>) {
+      const id = action.payload;
+      const sec = state.customSectionDefs.find((s) => s.id === id);
+      if (!sec) return;
+      sec.enabled = !sec.enabled;
+      if (!sec.enabled && state.activeSection === id) {
+        const first = state.sections.find((s) => s.enabled) ?? state.customSectionDefs.find((s) => s.enabled);
+        if (first) state.activeSection = first.id;
+      }
+      state.isDirty = true;
+    },
+
+    /** Update the text content of a custom section. */
+    updateCustomField(state, action: PayloadAction<{ id: string; value: string }>) {
+      const { id, value } = action.payload;
+      try {
+        const map = JSON.parse(state.fields._customSections || "{}") as Record<string, string>;
+        map[id] = value;
+        state.fields._customSections = JSON.stringify(map);
+      } catch { /* ignore */ }
+      state.isDirty = true;
+    },
+
+    /**
      * Initialise (or reset) the editor from a parsed resume config.
      * Called when the page mounts with location.state.config.
      */
@@ -339,9 +469,10 @@ const resumeBuilderSlice = createSlice({
         jobDescription?: string;
         jobTitle?: string;
         company?: string;
+        customSectionDefs?: SectionDef[];
       }>,
     ) {
-      const { title, fields, templateId, lockedFields, jobDescription, jobTitle, company } = action.payload;
+      const { title, fields, templateId, lockedFields, jobDescription, jobTitle, company, customSectionDefs } = action.payload;
       if (title) state.resumeTitle = title;
       if (templateId) state.templateId = templateId;
       state.fields = { ...EMPTY_FIELDS, ...(fields ?? {}) };
@@ -359,6 +490,7 @@ const resumeBuilderSlice = createSlice({
       state.jobDescription = jobDescription ?? "";
       state.jobTitle = jobTitle ?? "";
       state.company = company ?? "";
+      state.customSectionDefs = customSectionDefs ?? [];
     },
   },
 });
@@ -383,6 +515,12 @@ export const {
   setSavedResumeId,
   setActiveBottomTab,
   initFromConfig,
+  addCustomSection,
+  removeCustomSection,
+  toggleCustomSection,
+  updateCustomField,
+  setSectionValidating,
+  setSectionQuality,
 } = resumeBuilderSlice.actions;
 
 export default resumeBuilderSlice.reducer;

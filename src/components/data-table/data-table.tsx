@@ -1750,6 +1750,10 @@ export function DataTable<TData extends ExportableData, TValue>({
           totalSelectedItems={totalSelectedItems}
           pageSizeOptions={pageSizeOptions || [10, 20, 30, 40, 50]}
           size={tableConfig.size}
+          onPageSizeChange={(newSize) => {
+            setPageSize(newSize);
+            setPage(1);
+          }}
         />
       )}
     </div>

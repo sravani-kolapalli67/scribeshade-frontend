@@ -30,12 +30,19 @@ import {
   setSavedResumeId,
   setActiveBottomTab,
   initFromConfig,
+  addCustomSection,
+  removeCustomSection,
+  toggleCustomSection,
+  updateCustomField,
+  setSectionValidating,
+  setSectionQuality,
 } from "@/store/resumeBuilderSlice";
 import type {
   SectionId,
   ResumeFields,
   TemplateId,
   BottomTab,
+  SectionQuality,
 } from "@/store/resumeBuilderSlice";
 import {
   ChevronLeft,
@@ -74,6 +81,8 @@ import {
   Wand2,
   Cloud,
   CloudOff,
+  TrendingUp,
+  ChevronRight,
 } from "lucide-react";
 
 // ─── Legacy ResumeData type (required by populateTemplate) ────────────────────
@@ -89,14 +98,24 @@ interface ResumeData {
   frameworks: string;
   database: string;
   tools: string;
+  /** Work experience entries — maps to data-list="experiences" in templates */
+  experiences: Array<{ company: string; title: string; dates: string; points: string[] }>;
   projects: Array<{ title: string; points: string[] }>;
   education: Array<{ degree: string; institute: string; year: string }>;
   publication: string;
 }
 
+/** Available template fetched from the API — cached at editor mount. */
+interface TemplateItem {
+  id: string;
+  name: string;
+  category: string;
+  code: string;
+}
+
 // ─── Section icon map ─────────────────────────────────────────────────────────
 
-const SECTION_ICONS: Record<SectionId, React.ElementType> = {
+const SECTION_ICONS: Record<string, React.ElementType> = {
   personalInfo:   User,
   summary:        FileText,
   experience:     Briefcase,
@@ -107,8 +126,11 @@ const SECTION_ICONS: Record<SectionId, React.ElementType> = {
   publications:   BookOpen,
 };
 
-const TEMPLATES: { id: TemplateId; label: string }[] = [
-  { id: "classic", label: "Classic" },
+function getSectionIcon(id: string): React.ElementType {
+  return SECTION_ICONS[id] ?? FileText;
+}
+
+const TEMPLATES: { id: TemplateId; label: string }[] = [  { id: "classic", label: "Classic" },
   { id: "modern",  label: "Modern"  },
   { id: "minimal", label: "Minimal" },
 ];
@@ -120,7 +142,7 @@ const AI_ENHANCEABLE: SectionId[] = [
 
 // ─── Pure helpers ─────────────────────────────────────────────────────────────
 
-function sectionHasContent(id: SectionId, fields: ResumeFields): boolean {
+function sectionHasContent(id: string, fields: ResumeFields): boolean {
   switch (id) {
     case "personalInfo":    return !!(fields.name || fields.email);
     case "summary":         return !!fields.summary;
@@ -130,10 +152,11 @@ function sectionHasContent(id: SectionId, fields: ResumeFields): boolean {
     case "education":       return !!fields.education;
     case "certifications":  return !!fields.certifications;
     case "publications":    return !!fields.publications;
+    default:                return false;
   }
 }
 
-function sectionAIText(id: SectionId, fields: ResumeFields): string {
+function sectionAIText(id: string, fields: ResumeFields): string {
   switch (id) {
     case "summary":    return fields.summary;
     case "experience": return fields.experience;
@@ -177,6 +200,19 @@ function parseEducationText(text: string): Array<{ degree: string; institute: st
   });
 }
 
+function parseExperienceForTemplate(
+  raw: string,
+): Array<{ company: string; title: string; dates: string; points: string[] }> {
+  const blocks = raw.split(/\n\n+/).map((b) => b.trim()).filter(Boolean);
+  return blocks.map((block) => {
+    const lines = block.split("\n").map((l) => l.trim()).filter(Boolean);
+    const header = lines[0] ?? "";
+    const parts  = header.split("|").map((p) => p.trim());
+    const points = lines.slice(1).map((l) => l.replace(/^[•\-*]\s*/, "")).filter(Boolean);
+    return { company: parts[0] ?? "", title: parts[1] ?? "", dates: parts[2] ?? "", points };
+  });
+}
+
 function fieldsToResumeData(fields: ResumeFields): ResumeData {
   return {
     name: fields.name || "Your Name",
@@ -189,6 +225,7 @@ function fieldsToResumeData(fields: ResumeFields): ResumeData {
     frameworks: fields.skillsFrameworks || "",
     database: fields.skillsDatabases || "",
     tools: fields.skillsTools || "",
+    experiences: parseExperienceForTemplate(fields.experience),
     projects: parseProjectsText(fields.projects),
     education: parseEducationText(fields.education),
     publication: fields.publications || "",
@@ -203,7 +240,7 @@ function parseRawResume(text: string): ResumeData {
     name: lines[0] || "Your Name", role: "Professional Role",
     email: "", phone: "", links: "", summary: "",
     languages: "", frameworks: "", database: "", tools: "",
-    projects: [], education: [], publication: "",
+    experiences: [], projects: [], education: [], publication: "",
   };
   const HEADERS = ["PROFILE", "PROJECTS", "TECHNICAL SKILLS", "EDUCATION", "PUBLICATION"];
   const firstIdx = lines.findIndex((l) => HEADERS.includes(l.toUpperCase()));
@@ -285,7 +322,7 @@ function configToFields(config: any): { fields: Partial<ResumeFields>; title: st
       email: "email@example.com", phone: "", links: "",
       summary: config.manualData?.summary || "",
       languages: "", frameworks: "", database: "", tools: "",
-      projects: [], education: [], publication: "",
+      experiences: [], projects: [], education: [], publication: "",
     };
   }
   return {
@@ -372,8 +409,6 @@ function TopBar() {
   const jobDescription = useSelector((s: RootState) => s.resumeBuilder.jobDescription);
   const jobTitle       = useSelector((s: RootState) => s.resumeBuilder.jobTitle);
   const company        = useSelector((s: RootState) => s.resumeBuilder.company);
-  const { balance }    = useCreditsBalance();
-  const credits        = balance ? parseFloat(balance.totalAvailable ?? "0") : null;
   const { getToken }   = useAuth();
   const handleSave = useCallback(async () => {
     dispatch(setAutoSaveStatus("saving"));
@@ -523,14 +558,6 @@ function TopBar() {
 
       <div className="flex-1" />
 
-      {/* Credits */}
-      {credits !== null && (
-        <div className="flex items-center gap-1.5 px-3 h-8 rounded-full bg-amber-50 border border-amber-200/70 text-xs font-semibold text-amber-700 shrink-0">
-          <Coins className="h-3 w-3 text-amber-500" />
-          {isNaN(credits) ? "—" : credits.toFixed(0)} credits
-        </div>
-      )}
-
       <button
         onClick={handleExportPdf}
         disabled={!savedResumeId}
@@ -559,12 +586,16 @@ function TopBar() {
 function LeftPanel() {
   const dispatch      = useDispatch<AppDispatch>();
   const sections      = useSelector((s: RootState) => s.resumeBuilder.sections);
+  const customDefs    = useSelector((s: RootState) => s.resumeBuilder.customSectionDefs);
   const activeSection = useSelector((s: RootState) => s.resumeBuilder.activeSection);
   const fields        = useSelector((s: RootState) => s.resumeBuilder.fields);
-  const [hovered, setHovered] = useState<SectionId | null>(null);
+  const [hovered, setHovered] = useState<string | null>(null);
 
-  const enabled  = sections.filter((s) => s.enabled);
-  const disabled = sections.filter((s) => !s.enabled && !s.required);
+  // Merge standard + custom enabled sections in display order
+  const allSections   = [...sections, ...customDefs];
+  const enabled       = allSections.filter((s) => s.enabled);
+  const disabledCore  = sections.filter((s) => !s.enabled && !s.required);
+  const disabledCustom = customDefs.filter((s) => !s.enabled);
 
   return (
     <aside className="w-[220px] shrink-0 border-r border-border bg-background flex flex-col overflow-y-auto">
@@ -574,10 +605,13 @@ function LeftPanel() {
 
       <nav className="flex-1 px-3 pb-4 space-y-px">
         {enabled.map((sec, idx) => {
-          const Icon     = SECTION_ICONS[sec.id];
+          const Icon     = getSectionIcon(sec.id);
           const isActive = activeSection === sec.id;
-          const hasCont  = sectionHasContent(sec.id, fields);
+          const hasCont  = sec.id in SECTION_ICONS ? sectionHasContent(sec.id as any, fields) : (() => {
+            try { const m = JSON.parse(fields._customSections || "{}"); return !!(m[sec.id]?.trim()); } catch { return false; }
+          })();
           const isHov    = hovered === sec.id;
+          const isCustom = !sections.find((s) => s.id === sec.id);
 
           return (
             <div key={sec.id} className="relative" onMouseEnter={() => setHovered(sec.id)} onMouseLeave={() => setHovered(null)}>
@@ -613,7 +647,14 @@ function LeftPanel() {
                     <ChevronDown className="h-3 w-3" />
                   </button>
                   {!sec.required && (
-                    <button onClick={(e) => { e.stopPropagation(); dispatch(toggleSection(sec.id)); }} className="h-5 w-5 rounded flex items-center justify-center hover:bg-red-50 text-red-400" title="Remove">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (isCustom) dispatch(toggleCustomSection(sec.id));
+                        else dispatch(toggleSection(sec.id));
+                      }}
+                      className="h-5 w-5 rounded flex items-center justify-center hover:bg-red-50 text-red-400" title="Remove"
+                    >
                       <X className="h-3 w-3" />
                     </button>
                   )}
@@ -625,10 +666,10 @@ function LeftPanel() {
       </nav>
 
       {/* Add optional sections */}
-      {disabled.length > 0 && (
+      {(disabledCore.length > 0 || disabledCustom.length > 0) && (
         <div className="px-3 pb-5 border-t border-border pt-3">
           <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/40 px-1 mb-2">Add Section</p>
-          {disabled.map((sec) => (
+          {disabledCore.map((sec) => (
             <button
               key={sec.id}
               onClick={() => dispatch(toggleSection(sec.id))}
@@ -638,11 +679,405 @@ function LeftPanel() {
               {sec.label}
             </button>
           ))}
+          {disabledCustom.map((sec) => (
+            <button
+              key={sec.id}
+              onClick={() => dispatch(toggleCustomSection(sec.id))}
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-[13px] text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
+            >
+              <Plus className="h-3.5 w-3.5 shrink-0" />
+              {sec.label}
+              <span className="ml-auto text-[10px] text-muted-foreground/40 bg-muted px-1.5 rounded">detected</span>
+            </button>
+          ))}
         </div>
       )}
     </aside>
   );
 }
+
+// ─── Multi-entry section helpers ─────────────────────────────────────────────
+//
+// Work Experience, Education, and Projects each support multiple independent
+// entries.  We parse the raw text string (double-newline separated blocks)
+// into structured objects, render them as individual cards, and re-join on
+// every change so the Redux field value always stays in sync.
+
+interface ExperienceEntry {
+  _id: string;
+  company: string;
+  title: string;
+  dates: string;
+  bullets: string; // newline-separated bullet points
+}
+
+interface EducationEntry {
+  _id: string;
+  degree: string;
+  institution: string;
+  dates: string;
+  extra: string; // GPA, awards, etc.
+}
+
+interface ProjectEntry {
+  _id: string;
+  title: string;
+  bullets: string;
+}
+
+let _entrySeq = 0;
+function uid() { return `e_${++_entrySeq}_${Math.random().toString(36).slice(2, 7)}`; }
+
+// ── Experience parsers / serialisers ─────────────────────────────────────────
+
+function parseExperienceEntries(raw: string): ExperienceEntry[] {
+  const blocks = raw.split(/\n\n+/).map((b) => b.trim()).filter(Boolean);
+  if (!blocks.length) return [blankExperience()];
+  return blocks.map((block) => {
+    const lines = block.split("\n").map((l) => l.trim()).filter(Boolean);
+    // First line: "Company | Title | Dates"  or  "Company | Title"  or just "Company"
+    const headerLine = lines[0] ?? "";
+    const parts = headerLine.split("|").map((p) => p.trim());
+    const bullets = lines.slice(1).map((l) => l.replace(/^[•\-*]\s*/, "")).join("\n");
+    return {
+      _id: uid(),
+      company: parts[0] ?? "",
+      title:   parts[1] ?? "",
+      dates:   parts[2] ?? "",
+      bullets,
+    };
+  });
+}
+
+function serialiseExperienceEntries(entries: ExperienceEntry[]): string {
+  return entries
+    .map((e) => {
+      const header = [e.company, e.title, e.dates].filter(Boolean).join(" | ");
+      const pts    = e.bullets.split("\n").filter(Boolean).map((l) => `• ${l.replace(/^[•\-*]\s*/, "")}`).join("\n");
+      return pts ? `${header}\n${pts}` : header;
+    })
+    .join("\n\n");
+}
+
+function blankExperience(): ExperienceEntry {
+  return { _id: uid(), company: "", title: "", dates: "", bullets: "" };
+}
+
+// ── Education parsers / serialisers ──────────────────────────────────────────
+
+function parseEducationEntries(raw: string): EducationEntry[] {
+  const blocks = raw.split(/\n\n+/).map((b) => b.trim()).filter(Boolean);
+  if (!blocks.length) return [blankEducation()];
+  return blocks.map((block) => {
+    const lines = block.split("\n").map((l) => l.trim()).filter(Boolean);
+    return {
+      _id:         uid(),
+      degree:      lines[0] ?? "",
+      institution: lines[1] ?? "",
+      dates:       lines[2] ?? "",
+      extra:       lines.slice(3).join("\n"),
+    };
+  });
+}
+
+function serialiseEducationEntries(entries: EducationEntry[]): string {
+  return entries
+    .map((e) => [e.degree, e.institution, e.dates, e.extra].filter(Boolean).join("\n"))
+    .join("\n\n");
+}
+
+function blankEducation(): EducationEntry {
+  return { _id: uid(), degree: "", institution: "", dates: "", extra: "" };
+}
+
+// ── Project parsers / serialisers ─────────────────────────────────────────────
+
+function parseProjectEntries(raw: string): ProjectEntry[] {
+  const blocks = raw.split(/\n\n+/).map((b) => b.trim()).filter(Boolean);
+  if (!blocks.length) return [blankProject()];
+  return blocks.map((block) => {
+    const lines  = block.split("\n").map((l) => l.trim()).filter(Boolean);
+    const title  = lines[0] ?? "";
+    const bullets = lines.slice(1).map((l) => l.replace(/^[•\-*]\s*/, "")).join("\n");
+    return { _id: uid(), title, bullets };
+  });
+}
+
+function serialiseProjectEntries(entries: ProjectEntry[]): string {
+  return entries
+    .map((e) => {
+      const pts = e.bullets.split("\n").filter(Boolean).map((l) => `• ${l.replace(/^[•\-*]\s*/, "")}`).join("\n");
+      return pts ? `${e.title}\n${pts}` : e.title;
+    })
+    .join("\n\n");
+}
+
+function blankProject(): ProjectEntry {
+  return { _id: uid(), title: "", bullets: "" };
+}
+
+// ── Shared card chrome ────────────────────────────────────────────────────────
+
+function EntryCard({
+  index, total, label, onMoveUp, onMoveDown, onRemove, defaultOpen = true, children,
+}: {
+  index: number; total: number; label: string;
+  onMoveUp: () => void; onMoveDown: () => void; onRemove: () => void;
+  defaultOpen?: boolean; children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="rounded-xl border border-border bg-background overflow-hidden shadow-sm">
+      {/* Card header */}
+      <div className="flex items-center gap-2 px-4 py-2.5 bg-muted/30 border-b border-border/50">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="flex-1 flex items-center gap-2 text-left text-sm font-semibold text-foreground min-w-0"
+        >
+          <ChevronDown className={cn("h-4 w-4 text-muted-foreground shrink-0 transition-transform", !open && "-rotate-90")} />
+          <span className="truncate">{label || `Entry ${index + 1}`}</span>
+        </button>
+        <div className="flex items-center gap-0.5 shrink-0">
+          <button type="button" disabled={index === 0} onClick={onMoveUp} className="h-6 w-6 rounded flex items-center justify-center hover:bg-muted disabled:opacity-25 text-muted-foreground" title="Move up">
+            <ChevronUp className="h-3.5 w-3.5" />
+          </button>
+          <button type="button" disabled={index === total - 1} onClick={onMoveDown} className="h-6 w-6 rounded flex items-center justify-center hover:bg-muted disabled:opacity-25 text-muted-foreground" title="Move down">
+            <ChevronDown className="h-3.5 w-3.5" />
+          </button>
+          {total > 1 && (
+            <button type="button" onClick={onRemove} className="h-6 w-6 rounded flex items-center justify-center hover:bg-red-50 text-red-400" title="Remove">
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+      </div>
+      {open && <div className="p-4 space-y-3">{children}</div>}
+    </div>
+  );
+}
+
+// ── ExperienceEditor ──────────────────────────────────────────────────────────
+
+const ExperienceEditor = React.memo(function ExperienceEditor() {
+  const dispatch = useDispatch<AppDispatch>();
+  const raw      = useSelector((s: RootState) => s.resumeBuilder.fields.experience);
+
+  const [entries, setEntries] = useState<ExperienceEntry[]>(() => parseExperienceEntries(raw));
+
+  // Sync inward when Redux changes from outside (e.g. AI enhance / tailor)
+  const rawRef = useRef(raw);
+  useEffect(() => {
+    if (raw !== rawRef.current) {
+      rawRef.current = raw;
+      setEntries(parseExperienceEntries(raw));
+    }
+  }, [raw]);
+
+  const commit = useCallback((next: ExperienceEntry[]) => {
+    const serialised = serialiseExperienceEntries(next);
+    rawRef.current   = serialised;
+    dispatch(updateField({ field: "experience", value: serialised }));
+  }, [dispatch]);
+
+  const updateEntry = useCallback(<K extends keyof ExperienceEntry>(
+    id: string, key: K, value: ExperienceEntry[K],
+  ) => {
+    setEntries((prev) => {
+      const next = prev.map((e) => e._id === id ? { ...e, [key]: value } : e);
+      commit(next);
+      return next;
+    });
+  }, [commit]);
+
+  const moveUp   = useCallback((idx: number) => setEntries((p) => { const n=[...p]; [n[idx-1],n[idx]]=[n[idx],n[idx-1]]; commit(n); return n; }), [commit]);
+  const moveDown = useCallback((idx: number) => setEntries((p) => { const n=[...p]; [n[idx],n[idx+1]]=[n[idx+1],n[idx]]; commit(n); return n; }), [commit]);
+  const remove   = useCallback((id: string) => setEntries((p) => { const n=p.filter((e)=>e._id!==id); commit(n); return n; }), [commit]);
+  const addNew   = useCallback(() => setEntries((p) => { const n=[...p, blankExperience()]; commit(n); return n; }), [commit]);
+
+  return (
+    <div className="space-y-3">
+      {entries.map((entry, idx) => (
+        <EntryCard
+          key={entry._id}
+          index={idx} total={entries.length}
+          label={[entry.company, entry.title].filter(Boolean).join(" — ")}
+          onMoveUp={() => moveUp(idx)} onMoveDown={() => moveDown(idx)} onRemove={() => remove(entry._id)}
+          defaultOpen={idx === 0}
+        >
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <Label className="text-xs font-semibold text-muted-foreground">Company</Label>
+              <Input value={entry.company} onChange={(e) => updateEntry(entry._id, "company", e.target.value)} placeholder="WebSenor Inc." className="h-9 text-sm rounded-lg" />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs font-semibold text-muted-foreground">Job Title</Label>
+              <Input value={entry.title} onChange={(e) => updateEntry(entry._id, "title", e.target.value)} placeholder="Senior Engineer" className="h-9 text-sm rounded-lg" />
+            </div>
+            <div className="space-y-1 col-span-2">
+              <Label className="text-xs font-semibold text-muted-foreground">Dates</Label>
+              <Input value={entry.dates} onChange={(e) => updateEntry(entry._id, "dates", e.target.value)} placeholder="Jan 2022 – Present" className="h-9 text-sm rounded-lg" />
+            </div>
+          </div>
+          <div className="space-y-1">
+            <Label className="text-xs font-semibold text-muted-foreground">Bullet Points (one per line)</Label>
+            <Textarea
+              value={entry.bullets}
+              onChange={(e) => updateEntry(entry._id, "bullets", e.target.value)}
+              placeholder={"Achieved X by doing Y, resulting in Z\nLed initiative that reduced costs by N%"}
+              rows={4}
+              className="resize-none text-sm rounded-lg border-border bg-background placeholder:text-muted-foreground/40 leading-relaxed"
+            />
+          </div>
+        </EntryCard>
+      ))}
+      <button
+        type="button" onClick={addNew}
+        className="w-full flex items-center justify-center gap-1.5 h-9 rounded-xl border border-dashed border-border text-sm text-muted-foreground hover:text-foreground hover:border-[var(--color-brand)] hover:text-[var(--color-brand)] transition-colors"
+      >
+        <Plus className="h-3.5 w-3.5" /> Add Experience
+      </button>
+    </div>
+  );
+});
+
+// ── EducationEditor ───────────────────────────────────────────────────────────
+
+const EducationEditor = React.memo(function EducationEditor() {
+  const dispatch = useDispatch<AppDispatch>();
+  const raw      = useSelector((s: RootState) => s.resumeBuilder.fields.education);
+
+  const [entries, setEntries] = useState<EducationEntry[]>(() => parseEducationEntries(raw));
+
+  const rawRef = useRef(raw);
+  useEffect(() => {
+    if (raw !== rawRef.current) {
+      rawRef.current = raw;
+      setEntries(parseEducationEntries(raw));
+    }
+  }, [raw]);
+
+  const commit = useCallback((next: EducationEntry[]) => {
+    const s = serialiseEducationEntries(next);
+    rawRef.current = s;
+    dispatch(updateField({ field: "education", value: s }));
+  }, [dispatch]);
+
+  const updateEntry = useCallback(<K extends keyof EducationEntry>(id: string, key: K, val: EducationEntry[K]) => {
+    setEntries((prev) => { const n = prev.map((e) => e._id === id ? { ...e, [key]: val } : e); commit(n); return n; });
+  }, [commit]);
+
+  const moveUp   = useCallback((i: number) => setEntries((p) => { const n=[...p]; [n[i-1],n[i]]=[n[i],n[i-1]]; commit(n); return n; }), [commit]);
+  const moveDown = useCallback((i: number) => setEntries((p) => { const n=[...p]; [n[i],n[i+1]]=[n[i+1],n[i]]; commit(n); return n; }), [commit]);
+  const remove   = useCallback((id: string) => setEntries((p) => { const n=p.filter((e)=>e._id!==id); commit(n); return n; }), [commit]);
+  const addNew   = useCallback(() => setEntries((p) => { const n=[...p, blankEducation()]; commit(n); return n; }), [commit]);
+
+  return (
+    <div className="space-y-3">
+      {entries.map((entry, idx) => (
+        <EntryCard
+          key={entry._id} index={idx} total={entries.length}
+          label={[entry.degree, entry.institution].filter(Boolean).join(" — ")}
+          onMoveUp={() => moveUp(idx)} onMoveDown={() => moveDown(idx)} onRemove={() => remove(entry._id)}
+          defaultOpen={idx === 0}
+        >
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <Label className="text-xs font-semibold text-muted-foreground">Degree / Qualification</Label>
+              <Input value={entry.degree} onChange={(e) => updateEntry(entry._id, "degree", e.target.value)} placeholder="BSc Computer Science" className="h-9 text-sm rounded-lg" />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs font-semibold text-muted-foreground">Institution</Label>
+              <Input value={entry.institution} onChange={(e) => updateEntry(entry._id, "institution", e.target.value)} placeholder="MIT — Massachusetts Institute of Technology" className="h-9 text-sm rounded-lg" />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs font-semibold text-muted-foreground">Dates / Year</Label>
+              <Input value={entry.dates} onChange={(e) => updateEntry(entry._id, "dates", e.target.value)} placeholder="2019 – 2023" className="h-9 text-sm rounded-lg" />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs font-semibold text-muted-foreground">Additional Info (GPA, honours, etc.)</Label>
+              <Input value={entry.extra} onChange={(e) => updateEntry(entry._id, "extra", e.target.value)} placeholder="GPA: 3.9 / 4.0, Dean's List" className="h-9 text-sm rounded-lg" />
+            </div>
+          </div>
+        </EntryCard>
+      ))}
+      <button
+        type="button" onClick={addNew}
+        className="w-full flex items-center justify-center gap-1.5 h-9 rounded-xl border border-dashed border-border text-sm text-muted-foreground hover:text-foreground hover:border-[var(--color-brand)] hover:text-[var(--color-brand)] transition-colors"
+      >
+        <Plus className="h-3.5 w-3.5" /> Add Education
+      </button>
+    </div>
+  );
+});
+
+// ── ProjectsEditor ────────────────────────────────────────────────────────────
+
+const ProjectsEditor = React.memo(function ProjectsEditor() {
+  const dispatch = useDispatch<AppDispatch>();
+  const raw      = useSelector((s: RootState) => s.resumeBuilder.fields.projects);
+
+  const [entries, setEntries] = useState<ProjectEntry[]>(() => parseProjectEntries(raw));
+
+  const rawRef = useRef(raw);
+  useEffect(() => {
+    if (raw !== rawRef.current) {
+      rawRef.current = raw;
+      setEntries(parseProjectEntries(raw));
+    }
+  }, [raw]);
+
+  const commit = useCallback((next: ProjectEntry[]) => {
+    const s = serialiseProjectEntries(next);
+    rawRef.current = s;
+    dispatch(updateField({ field: "projects", value: s }));
+  }, [dispatch]);
+
+  const updateEntry = useCallback(<K extends keyof ProjectEntry>(id: string, key: K, val: ProjectEntry[K]) => {
+    setEntries((prev) => { const n = prev.map((e) => e._id === id ? { ...e, [key]: val } : e); commit(n); return n; });
+  }, [commit]);
+
+  const moveUp   = useCallback((i: number) => setEntries((p) => { const n=[...p]; [n[i-1],n[i]]=[n[i],n[i-1]]; commit(n); return n; }), [commit]);
+  const moveDown = useCallback((i: number) => setEntries((p) => { const n=[...p]; [n[i],n[i+1]]=[n[i+1],n[i]]; commit(n); return n; }), [commit]);
+  const remove   = useCallback((id: string) => setEntries((p) => { const n=p.filter((e)=>e._id!==id); commit(n); return n; }), [commit]);
+  const addNew   = useCallback(() => setEntries((p) => { const n=[...p, blankProject()]; commit(n); return n; }), [commit]);
+
+  return (
+    <div className="space-y-3">
+      {entries.map((entry, idx) => (
+        <EntryCard
+          key={entry._id} index={idx} total={entries.length}
+          label={entry.title || `Project ${idx + 1}`}
+          onMoveUp={() => moveUp(idx)} onMoveDown={() => moveDown(idx)} onRemove={() => remove(entry._id)}
+          defaultOpen={idx === 0}
+        >
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <Label className="text-xs font-semibold text-muted-foreground">Project Name</Label>
+              <Input value={entry.title} onChange={(e) => updateEntry(entry._id, "title", e.target.value)} placeholder="AI Resume Builder" className="h-9 text-sm rounded-lg" />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs font-semibold text-muted-foreground">Bullet Points (one per line)</Label>
+              <Textarea
+                value={entry.bullets}
+                onChange={(e) => updateEntry(entry._id, "bullets", e.target.value)}
+                placeholder={"Built with React + TypeScript\nReduced load time by 60% via code splitting"}
+                rows={4}
+                className="resize-none text-sm rounded-lg border-border bg-background placeholder:text-muted-foreground/40 leading-relaxed"
+              />
+            </div>
+          </div>
+        </EntryCard>
+      ))}
+      <button
+        type="button" onClick={addNew}
+        className="w-full flex items-center justify-center gap-1.5 h-9 rounded-xl border border-dashed border-border text-sm text-muted-foreground hover:text-foreground hover:border-[var(--color-brand)] hover:text-[var(--color-brand)] transition-colors"
+      >
+        <Plus className="h-3.5 w-3.5" /> Add Project
+      </button>
+    </div>
+  );
+});
 
 // ─── FieldInput (module-level — MUST be outside any component) ───────────────
 //
@@ -750,12 +1185,7 @@ function SectionEditorFields() {
         />
       );
     case "experience":
-      return (
-        <FieldInput
-          label="Work Experience" fieldKey="experience" multiline rows={11}
-          placeholder={"Company Name | Job Title | Start – End\n• Achieved X by doing Y\n• Led initiative that reduced costs by N%\n\nAnother Company | Role | Dates\n• ..."}
-        />
-      );
+      return <ExperienceEditor />;
     case "skills":
       return (
         <div className="space-y-4">
@@ -766,19 +1196,9 @@ function SectionEditorFields() {
         </div>
       );
     case "projects":
-      return (
-        <FieldInput
-          label="Projects" fieldKey="projects" multiline rows={10}
-          placeholder={"Project Title\n• Built X using Y, achieving Z\n• Reduced latency by N%\n\nAnother Project\n• ..."}
-        />
-      );
+      return <ProjectsEditor />;
     case "education":
-      return (
-        <FieldInput
-          label="Education" fieldKey="education" multiline rows={7}
-          placeholder={"BSc Computer Science\nMIT — Massachusetts Institute of Technology\n2019 – 2023\n\nCertificate in ML\nCoursera / Stanford\n2022"}
-        />
-      );
+      return <EducationEditor />;
     case "certifications":
       return (
         <FieldInput
@@ -794,9 +1214,37 @@ function SectionEditorFields() {
         />
       );
     default:
-      return null;
+      // Custom / detected section
+      return <CustomSectionEditor sectionId={activeSection} />;
   }
 }
+
+// ─── CustomSectionEditor ──────────────────────────────────────────────────────
+
+const CustomSectionEditor = React.memo(function CustomSectionEditor({ sectionId }: { sectionId: string }) {
+  const dispatch  = useDispatch<AppDispatch>();
+  const rawMap    = useSelector((s: RootState) => s.resumeBuilder.fields._customSections);
+  const sectionLabel = useSelector((s: RootState) =>
+    s.resumeBuilder.customSectionDefs.find((d) => d.id === sectionId)?.label ?? sectionId,
+  );
+
+  const value = (() => {
+    try { return (JSON.parse(rawMap || "{}") as Record<string, string>)[sectionId] ?? ""; } catch { return ""; }
+  })();
+
+  return (
+    <div className="space-y-1.5">
+      <Label className="text-sm font-semibold tracking-tight text-foreground">{sectionLabel}</Label>
+      <Textarea
+        value={value}
+        onChange={(e) => dispatch(updateCustomField({ id: sectionId, value: e.target.value }))}
+        rows={8}
+        placeholder={`Enter your ${sectionLabel} details here…`}
+        className="resize-none text-sm leading-relaxed rounded-xl border-border bg-background focus-visible:border-[var(--color-brand)] focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]/15 focus-visible:ring-offset-0 placeholder:text-muted-foreground/40"
+      />
+    </div>
+  );
+});
 
 // ─── AiDiffPanel ─────────────────────────────────────────────────────────────
 
@@ -865,23 +1313,224 @@ function AiDiffPanel() {
   );
 }
 
+// ─── SectionQualityMeter ──────────────────────────────────────────────────────
+
+const QUALITY_COLORS = {
+  excellent:        { bar: "#22c55e", bg: "bg-emerald-50", text: "text-emerald-700", border: "border-emerald-200/60", label: "Excellent" },
+  good:             { bar: "#84cc16", bg: "bg-lime-50",    text: "text-lime-700",    border: "border-lime-200/60",    label: "Good"      },
+  needs_improvement:{ bar: "#f59e0b", bg: "bg-amber-50",  text: "text-amber-700",   border: "border-amber-200/60",  label: "Needs work"},
+  poor:             { bar: "#ef4444", bg: "bg-red-50",     text: "text-red-700",     border: "border-red-200/60",    label: "Poor"      },
+} as const;
+
+function SectionQualityMeter({ quality }: { quality: SectionQuality | undefined }) {
+  const [open, setOpen] = useState(false);
+
+  if (!quality) return null;
+
+  const { score, status, issues, suggestions, constraints, wordCount, isValidating } = quality;
+  const colors = QUALITY_COLORS[status] ?? QUALITY_COLORS.needs_improvement;
+
+  // Word count range indicator
+  const wordPct = Math.min(100, (wordCount / constraints.maxWords) * 100);
+  const inRange  = wordCount >= constraints.minWords && wordCount <= constraints.maxWords;
+  const tooShort = wordCount < constraints.minWords;
+  const wordBadgeColor = inRange ? "text-emerald-600" : tooShort ? "text-amber-600" : "text-red-600";
+
+  return (
+    <div className={cn(
+      "rounded-2xl border p-4 space-y-3 transition-all duration-300",
+      colors.bg, colors.border,
+      isValidating && "opacity-60"
+    )}>
+      {/* Header row */}
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <TrendingUp className={cn("h-4 w-4 shrink-0", colors.text)} />
+          <span className={cn("text-sm font-semibold", colors.text)}>
+            Section Quality
+          </span>
+          {isValidating && (
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+          )}
+        </div>
+
+        {/* Score badge */}
+        <div className="flex items-center gap-2">
+          <span className={cn("text-xs font-bold px-2 py-0.5 rounded-full border", colors.bg, colors.text, colors.border)}>
+            {colors.label}
+          </span>
+          <span className={cn("text-base font-black tabular-nums", colors.text)}>
+            {score}
+            <span className="text-xs font-semibold opacity-60">/100</span>
+          </span>
+        </div>
+      </div>
+
+      {/* Score bar */}
+      <div className="relative h-1.5 rounded-full bg-black/8 overflow-hidden">
+        <div
+          className="absolute inset-y-0 left-0 rounded-full transition-all duration-700"
+          style={{ width: `${score}%`, background: colors.bar }}
+        />
+      </div>
+
+      {/* Word count vs ideal range */}
+      <div className="flex items-center justify-between text-xs">
+        <span className="text-muted-foreground">
+          <span className={cn("font-semibold", wordBadgeColor)}>{wordCount}</span>
+          {" "}words{" "}
+          <span className="opacity-60">
+            · ideal {constraints.minWords}–{constraints.maxWords}
+          </span>
+        </span>
+
+        {/* Visual range bar */}
+        <div className="relative w-24 h-1 rounded-full bg-black/8 overflow-visible">
+          {/* ideal zone */}
+          <div
+            className="absolute inset-y-0 rounded-full bg-emerald-400/30"
+            style={{
+              left:  `${(constraints.minWords / constraints.maxWords) * 100}%`,
+              width: `${Math.max(0, Math.min(100, 100 - (constraints.minWords / constraints.maxWords) * 100))}%`,
+            }}
+          />
+          {/* cursor dot */}
+          <div
+            className={cn(
+              "absolute top-1/2 -translate-y-1/2 -translate-x-1/2 h-2.5 w-2.5 rounded-full border-2 border-white shadow-sm transition-all duration-500",
+              inRange ? "bg-emerald-500" : tooShort ? "bg-amber-500" : "bg-red-500"
+            )}
+            style={{ left: `${Math.min(100, wordPct)}%` }}
+          />
+        </div>
+      </div>
+
+      {/* Constraint reason tooltip */}
+      {constraints.reason && (
+        <p className="text-[10px] text-muted-foreground/70 italic leading-relaxed">
+          {constraints.reason}
+        </p>
+      )}
+
+      {/* Issues & suggestions (collapsible) */}
+      {(issues.length > 0 || suggestions.length > 0) && (
+        <div>
+          <button
+            onClick={() => setOpen((p) => !p)}
+            className={cn(
+              "flex items-center gap-1 text-xs font-medium transition-colors",
+              colors.text, "opacity-80 hover:opacity-100"
+            )}
+          >
+            <ChevronRight className={cn("h-3 w-3 transition-transform", open && "rotate-90")} />
+            {issues.length} issue{issues.length !== 1 ? "s" : ""}
+            {suggestions.length > 0 && ` · ${suggestions.length} suggestion${suggestions.length !== 1 ? "s" : ""}`}
+          </button>
+
+          {open && (
+            <div className="mt-2 space-y-2">
+              {issues.length > 0 && (
+                <ul className="space-y-1">
+                  {issues.map((issue, i) => (
+                    <li key={i} className="flex items-start gap-1.5 text-xs text-foreground/80">
+                      <AlertTriangle className="h-3 w-3 shrink-0 text-amber-500 mt-0.5" />
+                      {issue}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {suggestions.length > 0 && (
+                <ul className="space-y-1 pt-1 border-t border-black/8">
+                  {suggestions.map((s, i) => (
+                    <li key={i} className="flex items-start gap-1.5 text-xs text-foreground/80">
+                      <Sparkles className="h-3 w-3 shrink-0 text-violet-400 mt-0.5" />
+                      {s}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── CenterPanel — Editor ─────────────────────────────────────────────────────
 
 function CenterPanel() {
-  const dispatch      = useDispatch<AppDispatch>();
-  const activeSection = useSelector((s: RootState) => s.resumeBuilder.activeSection);
-  const sections      = useSelector((s: RootState) => s.resumeBuilder.sections);
-  const isEnhancing   = useSelector((s: RootState) => s.resumeBuilder.isEnhancing);
-  const aiSuggestion  = useSelector((s: RootState) => s.resumeBuilder.aiSuggestion);
-  const fields        = useSelector((s: RootState) => s.resumeBuilder.fields);
-  const { balance }   = useCreditsBalance();
-  const { getToken }  = useAuth();
+  const dispatch            = useDispatch<AppDispatch>();
+  const activeSection       = useSelector((s: RootState) => s.resumeBuilder.activeSection);
+  const sections            = useSelector((s: RootState) => s.resumeBuilder.sections);
+  const customDefs          = useSelector((s: RootState) => s.resumeBuilder.customSectionDefs);
+  const isEnhancing         = useSelector((s: RootState) => s.resumeBuilder.isEnhancing);
+  const aiSuggestion        = useSelector((s: RootState) => s.resumeBuilder.aiSuggestion);
+  const fields              = useSelector((s: RootState) => s.resumeBuilder.fields);
+  const aiEnhancedSections  = useSelector((s: RootState) => s.resumeBuilder.aiEnhancedSections);
+  const sectionValidation   = useSelector((s: RootState) => s.resumeBuilder.sectionValidation);
+  const jobTitle            = useSelector((s: RootState) => s.resumeBuilder.jobTitle);
+  const company             = useSelector((s: RootState) => s.resumeBuilder.company);
+  const { balance }         = useCreditsBalance();
+  const { getToken }        = useAuth();
 
-  const sectionMeta     = sections.find((s) => s.id === activeSection);
-  const Icon            = SECTION_ICONS[activeSection];
+  const sectionMeta     = [...sections, ...customDefs].find((s) => s.id === activeSection);
+  const Icon            = getSectionIcon(activeSection);
   const canAI           = AI_ENHANCEABLE.includes(activeSection);
   const credits         = balance ? parseFloat(balance.totalAvailable ?? "0") : null;
   const hasEnoughCredit = credits === null || credits >= AI_CREDIT_COST;
+
+  const isAiEnhanced    = aiEnhancedSections.includes(activeSection);
+  const sweepKey        = `${activeSection}-${isAiEnhanced}`;
+  const quality         = sectionValidation[activeSection];
+
+  /** Debounced validation — fires 1.5s after user stops typing or switches section. */
+  const validateTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const fieldsSnapshot = JSON.stringify(fields);
+
+  useEffect(() => {
+    // Only validate AI-enhanceable sections (personalInfo has no free-text field to score)
+    if (!canAI) return;
+    const text = sectionAIText(activeSection, fields);
+    if (!text || text.trim().length < 15) return;
+
+    dispatch(setSectionValidating({ sectionId: activeSection, isValidating: true }));
+    clearTimeout(validateTimer.current);
+    validateTimer.current = setTimeout(async () => {
+      try {
+        const token = await getToken();
+        const res = await fetch(ENDPOINTS.resumeBuilderValidateSection(), {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            sectionId: activeSection,
+            currentText: text,
+            jobTitle: jobTitle || undefined,
+            company: company || undefined,
+            resumeContext: fields.name ? `${fields.name}, ${fields.role}` : undefined,
+          }),
+        });
+        if (!res.ok) throw new Error("Validation failed");
+        const data = await res.json();
+        dispatch(setSectionQuality({
+          sectionId: activeSection,
+          quality: {
+            score:       data.score,
+            status:      data.status,
+            issues:      data.issues ?? [],
+            suggestions: data.suggestions ?? [],
+            constraints: data.constraints,
+            wordCount:   data.wordCount,
+          },
+        }));
+      } catch {
+        dispatch(setSectionValidating({ sectionId: activeSection, isValidating: false }));
+      }
+    }, 1500);
+
+    return () => clearTimeout(validateTimer.current);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fieldsSnapshot, activeSection]);
 
   const handleAIEnhance = useCallback(async () => {
     if (isEnhancing) return;
@@ -915,13 +1564,25 @@ function CenterPanel() {
         {/* Section header */}
         <div className="flex items-start justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="h-10 w-10 rounded-2xl bg-[var(--color-brand)]/10 border border-[var(--color-brand)]/20 flex items-center justify-center shrink-0">
-              <Icon className="h-5 w-5 text-[var(--color-brand)]" />
+            {/* Icon — glows violet when this section has AI-generated content */}
+            <div className={cn(
+              "h-10 w-10 rounded-2xl border flex items-center justify-center shrink-0 transition-all duration-500",
+              isAiEnhanced
+                ? "bg-gradient-to-br from-violet-100 to-indigo-100 border-violet-200/60 ai-icon-glow"
+                : "bg-[var(--color-brand)]/10 border-[var(--color-brand)]/20"
+            )}>
+              <Icon className={cn(
+                "h-5 w-5 transition-colors duration-500",
+                isAiEnhanced ? "text-violet-500" : "text-[var(--color-brand)]"
+              )} />
             </div>
             <div>
               <h2 className="text-lg font-bold tracking-tight text-foreground">{sectionMeta?.label}</h2>
-              <p className="text-xs text-muted-foreground mt-0.5">
+              <p className="text-xs text-muted-foreground mt-0.5 flex items-center gap-1.5 flex-wrap">
                 {canAI ? "AI-enhanced rewriting available" : "Edit your details below"}
+                {isAiEnhanced && (
+                  <span className="ai-enhanced-badge">✦ AI Enhanced</span>
+                )}
               </p>
             </div>
           </div>
@@ -951,9 +1612,25 @@ function CenterPanel() {
         </div>
 
         {/* Section-specific fields */}
-        <div className="bg-background rounded-2xl border border-border p-6 shadow-sm">
-          <SectionEditorFields />
-        </div>
+        {isAiEnhanced ? (
+          <div className="ai-gradient-border rounded-2xl p-[1.5px] shadow-sm">
+            <div className="relative bg-background rounded-[14px] p-6 overflow-hidden">
+              <div key={sweepKey} className="ai-sweep-container">
+                <div className="ai-sweep-ray" />
+              </div>
+              <div className="relative z-10">
+                <SectionEditorFields />
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="bg-background rounded-2xl border border-border p-6 shadow-sm">
+            <SectionEditorFields />
+          </div>
+        )}
+
+        {/* Quality meter — only for AI-enhanceable sections */}
+        {canAI && <SectionQualityMeter quality={quality} />}
 
         {/* AI diff review panel */}
         <AiDiffPanel />
@@ -1241,15 +1918,141 @@ function useA4PreviewScale(ref: React.RefObject<HTMLDivElement | null>) {
   return scale;
 }
 
-function RightPanel({ templateCode }: { templateCode: string }) {
+// ─── TemplateMarketplace ───────────────────────────────────────────────────────
+
+function TemplateMarketplace({
+  templates,
+  currentTemplateId,
+  fields,
+  onSelect,
+  onClose,
+}: {
+  templates: TemplateItem[];
+  currentTemplateId: string;
+  fields: ResumeFields;
+  onSelect: (id: string, code: string) => void;
+  onClose: () => void;
+}) {
+  const data = fieldsToResumeData(fields);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-6"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className="bg-background rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-border shrink-0">
+          <div>
+            <h2 className="text-base font-bold tracking-tight">Choose Template</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">Switch anytime — your content is preserved</p>
+          </div>
+          <button
+            onClick={onClose}
+            className="h-8 w-8 rounded-lg flex items-center justify-center hover:bg-muted text-muted-foreground transition-colors"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {/* Template grid */}
+        <div className="flex-1 overflow-y-auto p-6">
+          <div className="grid grid-cols-3 gap-6">
+            {templates.map((tpl) => {
+              // Determine if this template is the current one (match by id, name, or category)
+              const tid = currentTemplateId?.toLowerCase();
+              const isActive =
+                tpl.id === currentTemplateId ||
+                tpl.name.toLowerCase() === tid ||
+                tpl.category.toLowerCase() === tid;
+
+              // Render a tiny scaled iframe preview
+              let previewHtml = "";
+              try { previewHtml = populateTemplate(tpl.code, data, {}); } catch { /* ignore */ }
+
+              return (
+                <button
+                  key={tpl.id}
+                  onClick={() => { onSelect(tpl.id, tpl.code); onClose(); }}
+                  className={cn(
+                    "group relative flex flex-col rounded-2xl overflow-hidden border-2 transition-all text-left",
+                    isActive
+                      ? "border-[var(--color-brand)] shadow-[0_0_0_4px_var(--color-brand-muted)]"
+                      : "border-border hover:border-[var(--color-brand)]/50 hover:shadow-md",
+                  )}
+                >
+                  {/* Mini preview */}
+                  <div className="relative bg-white overflow-hidden" style={{ height: 240 }}>
+                    {previewHtml ? (
+                      <iframe
+                        srcDoc={previewHtml}
+                        className="block border-none bg-white pointer-events-none"
+                        style={{ width: 794, height: 1123, transform: "scale(0.302)", transformOrigin: "top left" }}
+                        title={tpl.name}
+                        sandbox=""
+                      />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center bg-muted/30">
+                        <FileText className="h-8 w-8 text-muted-foreground/30" />
+                      </div>
+                    )}
+                    {isActive && (
+                      <div className="absolute top-2 right-2 h-6 w-6 rounded-full bg-[var(--color-brand)] flex items-center justify-center shadow-sm">
+                        <Check className="h-3.5 w-3.5 text-white" />
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Label */}
+                  <div className={cn(
+                    "px-4 py-3 border-t flex items-center justify-between",
+                    isActive ? "bg-[var(--color-brand-muted)]/60 border-[var(--color-brand)]/20" : "bg-background border-border",
+                  )}>
+                    <span className={cn(
+                      "text-sm font-semibold",
+                      isActive ? "text-[var(--color-brand)]" : "text-foreground",
+                    )}>
+                      {tpl.name}
+                    </span>
+                    {isActive ? (
+                      <span className="text-[10px] font-bold text-[var(--color-brand)] bg-[var(--color-brand-muted)] px-2 py-0.5 rounded-full">Active</span>
+                    ) : (
+                      <span className="text-[10px] text-muted-foreground group-hover:text-[var(--color-brand)] transition-colors">Apply →</span>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+
+          {templates.length === 0 && (
+            <div className="flex flex-col items-center justify-center py-16 gap-3 text-center">
+              <Loader2 className="h-8 w-8 animate-spin text-muted-foreground/40" />
+              <p className="text-sm text-muted-foreground">Loading templates…</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── RightPanel ───────────────────────────────────────────────────────────────
+
+function RightPanel({
+  templateCode,
+  currentTemplateName,
+  onOpenMarketplace,
+}: {
+  templateCode: string;
+  currentTemplateName: string;
+  onOpenMarketplace: () => void;
+}) {
   const dispatch   = useDispatch<AppDispatch>();
-  const templateId = useSelector((s: RootState) => s.resumeBuilder.templateId);
   const zoom       = useSelector((s: RootState) => s.resumeBuilder.zoom);
   const fields     = useSelector((s: RootState) => s.resumeBuilder.fields);
 
   // Defer the expensive template render so typing stays snappy.     (rerender-use-deferred-value)
-  // React will process the deferred render with lower priority — it can
-  // be interrupted by urgent updates (keystrokes, clicks) and resumed later.
   const deferredFields = useDeferredValue(fields);
 
   const [populatedHtml, setPopulatedHtml] = useState("");
@@ -1259,8 +2062,7 @@ function RightPanel({ templateCode }: { templateCode: string }) {
   const finalScale = baseScale * zoom;
   const containerHeight = Math.round(1123 * finalScale);
 
-  // Debounce template population by 400 ms — prevents the iframe from
-  // reloading (and visually stuttering) on every single keystroke.
+  // Debounce template population by 400 ms
   useEffect(() => {
     if (!templateCode) return;
     clearTimeout(populateTimerRef.current);
@@ -1276,9 +2078,6 @@ function RightPanel({ templateCode }: { templateCode: string }) {
     return () => clearTimeout(populateTimerRef.current);
   }, [deferredFields, templateCode]);
 
-  // Skip CSS transform when scale is effectively 1.0 — avoids promoting the
-  // iframe to a new GPU composite layer unnecessarily, which was causing the
-  // visible flicker at 100 % zoom.
   const iframeTransformStyle: React.CSSProperties =
     Math.abs(finalScale - 1) < 0.005
       ? { width: 794, height: 1123 }
@@ -1292,17 +2091,15 @@ function RightPanel({ templateCode }: { templateCode: string }) {
       <div className="px-4 py-3 border-b border-border/40 shrink-0 space-y-2.5">
         <h3 className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Live Preview</h3>
 
-        {/* Template dropdown */}
-        <div className="flex items-center gap-2">
-          <LayoutTemplate className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-          <select
-            value={templateId}
-            onChange={(e) => dispatch(setTemplate(e.target.value as TemplateId))}
-            className="flex-1 text-xs rounded-lg border border-border/60 bg-background px-2 py-1 focus:outline-none focus:ring-1 focus:ring-[var(--color-brand)]/40 appearance-auto"
-          >
-            {TEMPLATES.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
-          </select>
-        </div>
+        {/* Template picker button */}
+        <button
+          onClick={onOpenMarketplace}
+          className="w-full flex items-center gap-2 px-3 py-2 rounded-xl border border-border/60 bg-background hover:bg-muted/50 hover:border-[var(--color-brand)]/40 transition-all text-left group"
+        >
+          <LayoutTemplate className="h-3.5 w-3.5 text-muted-foreground group-hover:text-[var(--color-brand)] shrink-0 transition-colors" />
+          <span className="flex-1 text-sm font-medium text-foreground truncate">{currentTemplateName || "Classic"}</span>
+          <ChevronDown className="h-3.5 w-3.5 text-muted-foreground group-hover:text-[var(--color-brand)] shrink-0 transition-colors" />
+        </button>
 
         {/* Zoom controls */}
         <div className="flex items-center gap-1">
@@ -1426,9 +2223,12 @@ export default function ResumeEditor() {
   const { getToken }    = useAuth();
 
   const [templateCode, setTemplateCode] = useState<string>("");
-  // isInitialized prevents the single-frame flash of empty Redux state
-  // before initFromConfig populates the fields.
   const [isInitialized, setIsInitialized] = useState(false);
+  const [showTemplateMarket, setShowTemplateMarket] = useState(false);
+
+  /** All templates fetched from the API, cached so switching is instant. */
+  const allTemplatesRef = useRef<TemplateItem[]>([]);
+  const [currentTemplateName, setCurrentTemplateName] = useState<string>("Classic");
 
   const saveTimerRef    = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const showSavingTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -1448,16 +2248,59 @@ export default function ResumeEditor() {
       jobTitle:       config.jobTitle ?? "",
       company:        config.company ?? "",
     }));
-    // When opening an existing saved resume, restore its backend ID so that
-    // subsequent saves update the same record rather than creating a new one.
     if (config.resumeId) dispatch(setSavedResumeId(config.resumeId));
-    if (config.templateCode) setTemplateCode(config.templateCode);
-    setIsInitialized(true);
+
+    // Always fetch all templates so the marketplace and template switching work
+    const backendUrl = import.meta.env.VITE_BACKEND_URL ?? "";
+    fetch(`${backendUrl}/api/resume/all-templates`)
+      .then((r) => r.json())
+      .then((list: TemplateItem[]) => {
+        if (!Array.isArray(list)) return;
+        allTemplatesRef.current = list;
+        const tid = (config.templateId ?? "classic").toLowerCase();
+        const match =
+          list.find((t) => t.id === config.templateId) ??
+          list.find((t) => t.name.toLowerCase() === tid) ??
+          list.find((t) => t.category.toLowerCase() === tid);
+        if (match) {
+          setCurrentTemplateName(match.name);
+          if (config.templateCode) {
+            // Config already has code (fresh load) — prefer that, but still
+            // cache the code from API into allTemplatesRef for correct switching
+            setTemplateCode(config.templateCode);
+          } else {
+            setTemplateCode(match.code);
+          }
+        } else if (config.templateCode) {
+          setTemplateCode(config.templateCode);
+        }
+      })
+      .catch(() => {
+        // Fallback: if API fails and config has templateCode, use it
+        if (config.templateCode) setTemplateCode(config.templateCode);
+      })
+      .finally(() => setIsInitialized(true));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Template switching — update templateCode when user picks a new template
+  const initializedRef = useRef(false);
+  useEffect(() => {
+    if (!initializedRef.current) { initializedRef.current = isInitialized; return; }
+    if (!isInitialized) return;
+    const list = allTemplatesRef.current;
+    if (!list.length) return;
+    const tid = templateId?.toLowerCase();
+    const match =
+      list.find((t) => t.id === templateId) ??
+      list.find((t) => t.name.toLowerCase() === tid) ??
+      list.find((t) => t.category.toLowerCase() === tid);
+    if (match) {
+      setTemplateCode(match.code);
+      setCurrentTemplateName(match.name);
+    }
+  }, [templateId, isInitialized]);
+
   // ── Debounced auto-save ────────────────────────────────────────────────────
-  // Only fires when autoSaveEnabled is true AND the user stops typing for 2 s.
-  // "Saving…" label only appears once the debounce fires, not on every keystroke.
   useEffect(() => {
     if (!isDirtyRef.current || !autoSaveEnabled) return;
 
@@ -1513,7 +2356,7 @@ export default function ResumeEditor() {
     return () => window.removeEventListener("keydown", onKey);
   }, [dispatch]);
 
-  // ── Loading guard — prevents single-frame empty-field flash ──────────────
+  // ── Loading guard ──────────────────────────────────────────────────────────
   if (!isInitialized) {
     return (
       <div className="flex items-center justify-center h-full bg-background">
@@ -1535,6 +2378,13 @@ export default function ResumeEditor() {
     );
   }
 
+  const handleTemplateSelect = (id: string, code: string) => {
+    dispatch(setTemplate(id as TemplateId));
+    setTemplateCode(code);
+    const match = allTemplatesRef.current.find((t) => t.id === id);
+    if (match) setCurrentTemplateName(match.name);
+  };
+
   const centerContent = () => {
     switch (activeBottomTab) {
       case "ats":      return <ATSPanel />;
@@ -1549,9 +2399,24 @@ export default function ResumeEditor() {
       <div className="flex flex-1 overflow-hidden min-h-0">
         <LeftPanel />
         {centerContent()}
-        <RightPanel templateCode={templateCode} />
+        <RightPanel
+          templateCode={templateCode}
+          currentTemplateName={currentTemplateName}
+          onOpenMarketplace={() => setShowTemplateMarket(true)}
+        />
       </div>
       <BottomTabsBar />
+
+      {/* Template marketplace overlay */}
+      {showTemplateMarket && (
+        <TemplateMarketplace
+          templates={allTemplatesRef.current}
+          currentTemplateId={templateId}
+          fields={fields}
+          onSelect={handleTemplateSelect}
+          onClose={() => setShowTemplateMarket(false)}
+        />
+      )}
     </div>
   );
 }

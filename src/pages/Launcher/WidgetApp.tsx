@@ -1267,29 +1267,37 @@ function WidgetContent() {
                                 >
                                   Back
                                 </button>
+                                {(() => {
+                                  const jdTrimmed = sessionInfo.jobDescription.trim();
+                                  const jdValid = !jdTrimmed || JOB_DESCRIPTION_REGEX.test(jdTrimmed);
+                                  const canProceed =
+                                    !!sessionInfo.companyName.trim() &&
+                                    !!sessionInfo.resumeId &&
+                                    jdValid;
+                                  const tooltipMsg = !sessionInfo.companyName.trim()
+                                    ? "Enter the company name to continue."
+                                    : !sessionInfo.resumeId
+                                      ? "Select a resume to continue."
+                                      : !jdValid
+                                        ? "Job description is too short — add more detail."
+                                        : "";
+                                  return (
                                 <button
                                   onClick={() => setCreationStep(2)}
-                                  disabled={
-                                    !sessionInfo.companyName.trim() ||
-                                    !sessionInfo.resumeId ||
-                                    (!!sessionInfo.jobDescription.trim() &&
-                                      !JOB_DESCRIPTION_REGEX.test(
-                                        sessionInfo.jobDescription.trim(),
-                                      ))
-                                  }
+                                  disabled={!canProceed}
+                                  aria-disabled={!canProceed}
+                                  title={tooltipMsg || undefined}
                                   className={cn(
-                                    "py-2.5 rounded-2xl text-white text-sm font-bold transition-all active:scale-[0.98]",
-                                    sessionInfo.companyName.trim() &&
-                                      (!sessionInfo.jobDescription.trim() ||
-                                        JOB_DESCRIPTION_REGEX.test(
-                                          sessionInfo.jobDescription.trim(),
-                                        ))
-                                      ? "bg-zinc-900 hover:bg-zinc-800 shadow-lg shadow-black/10"
-                                      : "bg-zinc-300 text-zinc-400 cursor-not-allowed",
+                                    "py-2.5 rounded-2xl text-sm font-bold transition-all active:scale-[0.98]",
+                                    canProceed
+                                      ? "bg-zinc-900 text-white hover:bg-zinc-800 shadow-lg shadow-black/10"
+                                      : "bg-zinc-200 text-zinc-400 cursor-not-allowed",
                                   )}
                                 >
                                   Next
                                 </button>
+                                  );
+                                })()}
                               </div>
                             </div>
                           )}

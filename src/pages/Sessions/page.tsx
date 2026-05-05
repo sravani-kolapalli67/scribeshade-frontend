@@ -6,6 +6,7 @@ import { ColumnDef } from "@tanstack/react-table";
 import { DataTable } from "@/components/data-table/data-table";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Trash2, FileText, BarChart3, Play } from "lucide-react";
 import { TranscriptDialog } from "./TranscriptDialog";
 import { SessionAnalyticsDialog } from "./SessionAnalyticsDialog";
@@ -57,6 +58,11 @@ export default function Sessions() {
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [sessionToDelete, setSessionToDelete] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+
+  // Bulk delete state
+  const [isBulkDeleteDialogOpen, setIsBulkDeleteDialogOpen] = useState(false);
+  const [bulkIdsToDelete, setBulkIdsToDelete] = useState<string[]>([]);
+  const [isBulkDeleting, setIsBulkDeleting] = useState(false);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
     null,
   );
@@ -146,9 +152,56 @@ export default function Sessions() {
     }
   };
 
+  const confirmBulkDelete = async () => {
+    if (bulkIdsToDelete.length === 0) return;
+    setIsBulkDeleting(true);
+    try {
+      await Promise.all(
+        bulkIdsToDelete.map((id) =>
+          fetch(`${import.meta.env.VITE_BACKEND_URL}/api/session/${id}`, {
+            method: "DELETE",
+          }),
+        ),
+      );
+      setRefreshKey((prev) => prev + 1);
+      setIsBulkDeleteDialogOpen(false);
+      setBulkIdsToDelete([]);
+    } catch (error) {
+      console.error("Bulk delete error:", error);
+    } finally {
+      setIsBulkDeleting(false);
+    }
+  };
+
   // ✅ COLUMN DEFINITIONS
   const columns: ColumnDef<Session>[] = useMemo(
     () => [
+      {
+        id: "select",
+        header: ({ table }) => (
+          <Checkbox
+            checked={
+              table.getIsAllPageRowsSelected() ||
+              (table.getIsSomePageRowsSelected() && "indeterminate")
+            }
+            onCheckedChange={(value) =>
+              table.toggleAllPageRowsSelected(!!value)
+            }
+            aria-label="Select all"
+          />
+        ),
+        cell: ({ row }) => (
+          <Checkbox
+            checked={row.getIsSelected()}
+            onCheckedChange={(value) => row.toggleSelected(!!value)}
+            aria-label="Select row"
+            onClick={(e) => e.stopPropagation()}
+          />
+        ),
+        enableSorting: false,
+        enableHiding: false,
+        size: 40,
+      },
       {
         accessorKey: "companyName",
         header: "Company Name",
@@ -273,12 +326,20 @@ export default function Sessions() {
         cell: ({ row }) => {
           const date = new Date(row.getValue("createdAt"));
           return (
-            <span className="text-muted-foreground text-sm font-medium">
+            <span className="text-muted-foreground text-sm font-medium whitespace-nowrap">
               {date.toLocaleDateString("en-GB", {
                 day: "numeric",
                 month: "short",
                 year: "numeric",
               })}
+              {" "}
+              <span className="text-muted-foreground/60 text-xs">
+                {date.toLocaleTimeString("en-US", {
+                  hour: "numeric",
+                  minute: "2-digit",
+                  hour12: true,
+                })}
+              </span>
             </span>
           );
         },
@@ -397,7 +458,55 @@ export default function Sessions() {
           headers: ["companyName", "jobDescription", "aiUsage", "createdAt"],
         }}
         fetchByIdsFn={async () => []}
+        renderToolbarContent={({ allSelectedIds, totalSelectedCount, resetSelection }) =>
+          totalSelectedCount > 0 ? (
+            <Button
+              variant="destructive"
+              size="sm"
+              className="h-8 gap-1.5 font-semibold"
+              onClick={() => {
+                setBulkIdsToDelete(allSelectedIds);
+                setIsBulkDeleteDialogOpen(true);
+              }}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              Delete {totalSelectedCount} session{totalSelectedCount > 1 ? "s" : ""}
+            </Button>
+          ) : null
+        }
       />
+
+      {/* Bulk Delete Confirmation Dialog */}
+      <Dialog open={isBulkDeleteDialogOpen} onOpenChange={setIsBulkDeleteDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-xl font-bold">
+              Delete {bulkIdsToDelete.length} Session{bulkIdsToDelete.length > 1 ? "s" : ""}
+            </DialogTitle>
+            <DialogDescription className="text-base text-muted-foreground mt-2">
+              Are you sure you want to delete the {bulkIdsToDelete.length} selected session{bulkIdsToDelete.length > 1 ? "s" : ""}? This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="flex flex-row justify-end gap-3 mt-6">
+            <Button
+              variant="outline"
+              onClick={() => setIsBulkDeleteDialogOpen(false)}
+              className="px-6 h-11 font-medium rounded-xl"
+              disabled={isBulkDeleting}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={confirmBulkDelete}
+              className="px-6 h-11 font-medium rounded-xl"
+              disabled={isBulkDeleting}
+            >
+              {isBulkDeleting ? "Deleting..." : `Delete ${bulkIdsToDelete.length}`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Delete Confirmation Dialog */}
       <Dialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>

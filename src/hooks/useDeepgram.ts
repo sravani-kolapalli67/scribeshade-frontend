@@ -113,8 +113,27 @@ export const useDeepgram = ({
       });
       mediaRecorderRef.current = mediaRecorder;
 
-      const url = `wss://api.deepgram.com/v1/listen?model=${model}&punctuate=true&interim_results=true&language=${language}&smart_format=true&endpointing=300&utterance_end_ms=500&vad_events=true&diarize=false&tag=craftvita`;
+      // URL parameters — keep this list minimal and validated.
+      // Removed `endpointing`, `utterance_end_ms`, `vad_events` because
+      // Deepgram rejects values below its documented minimums (e.g.
+      // utterance_end_ms must be >= 1000) with an HTTP 400 on the WS upgrade,
+      // which surfaces in the browser only as the unhelpful generic
+      // "WebSocket connection failed" error. Audio is sent as WebM/Opus, so
+      // we do NOT specify encoding/sample_rate — Deepgram auto-detects them
+      // from the container.
+      const params = new URLSearchParams({
+        model,
+        language,
+        punctuate: "true",
+        interim_results: "true",
+        smart_format: "true",
+        tag: "craftvita",
+      });
+      const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
 
+      // Browser WebSocket cannot set custom headers, so Deepgram's
+      // subprotocol-based auth is the only option here. Keep this list in
+      // sync with the Rust desktop path's `Authorization: Token <key>` header.
       const socket = new WebSocket(url, ["token", apiKey]);
       socketRef.current = socket;
 
@@ -214,9 +233,14 @@ export const useDeepgram = ({
         // 1000 = normal closure (we sent CloseStream) — do not retry.
         if (evt.code === 1000) return;
 
-        // 1008 = Policy Violation: invalid/expired API key — no point retrying.
+        // 1008 = Policy Violation: invalid/expired API key, or unsupported
+        // parameter for the chosen model — no point retrying.
         if (evt.code === 1008) {
-          setError("Deepgram auth failed — check your API key");
+          setError(
+            apiKey
+              ? "Deepgram auth failed — check VITE_DEEPGRAM_API_KEY or account credits"
+              : "Deepgram API key is missing — set VITE_DEEPGRAM_API_KEY"
+          );
           return;
         }
 

@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
+import { useAuth } from "@clerk/clerk-react";
 import { ColumnDef } from "@tanstack/react-table";
 import { DataTable } from "@/components/data-table/data-table";
 import type { ExportableData } from "@/components/data-table/utils/export-utils";
@@ -27,6 +28,7 @@ export interface Resume extends ExportableData {
   path?: string;
   ats?: boolean;
   atsAnalysis?: any;
+  source?: "uploaded" | "builder";
 }
 
 interface ListOfResumesProps {
@@ -41,6 +43,7 @@ export default function ListOfResumes({
   selectedResumeId,
 }: ListOfResumesProps) {
   const navigate = useNavigate();
+  const { getToken } = useAuth();
   const [previewResume, setPreviewResume] = useState<Resume | null>(null);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
 
@@ -148,12 +151,20 @@ export default function ListOfResumes({
 
     setIsDeleting(true);
     try {
-      const res = await fetch(
-        `${import.meta.env.VITE_BACKEND_URL}/api/resume/${resumeToDelete.id}`,
-        {
-          method: "DELETE",
-        },
-      );
+      // Builder resumes (source === "builder") are stored in BuiltResume table
+      // and must be deleted via the builder endpoint with auth.
+      const isBuilt = resumeToDelete.source === "builder";
+      const url = isBuilt
+        ? `${import.meta.env.VITE_BACKEND_URL}/api/resume/builder/${resumeToDelete.id}`
+        : `${import.meta.env.VITE_BACKEND_URL}/api/resume/${resumeToDelete.id}`;
+
+      const headers: Record<string, string> = {};
+      if (isBuilt) {
+        const token = await getToken();
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+      }
+
+      const res = await fetch(url, { method: "DELETE", headers });
 
       if (!res.ok) {
         throw new Error("Failed to delete resume");

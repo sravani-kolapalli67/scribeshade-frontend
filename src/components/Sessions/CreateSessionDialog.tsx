@@ -63,7 +63,7 @@ export default function CreateSessionDialog({
   );
 
   // Credit check states
-  const { balance, refresh: refreshBalance } = useCreditsBalance();
+  const { balance, isLoading: isBalanceLoading, refresh: refreshBalance } = useCreditsBalance();
   const [isOutOfCreditsOpen, setIsOutOfCreditsOpen] = React.useState(false);
   const [isBuyCreditsOpen, setIsBuyCreditsOpen] = React.useState(false);
 
@@ -161,8 +161,12 @@ export default function CreateSessionDialog({
   };
 
   const handleTriggerClick = (e: React.MouseEvent) => {
-    // If it's a paid session and balance is 0, show the out of credits dialog
-    if (!isFree && balance) {
+    if (!isFree) {
+      // While balance is still loading, don't open anything
+      if (isBalanceLoading || balance === null) {
+        e.preventDefault();
+        return;
+      }
       const available = parseFloat(balance.totalAvailable);
       if (available <= 0) {
         e.preventDefault();
@@ -177,6 +181,7 @@ export default function CreateSessionDialog({
     <>
       <Button
         onClick={handleTriggerClick}
+        disabled={!isFree && isBalanceLoading}
         className={cn(
           "gap-2 px-6 py-6 rounded-xl font-semibold shadow-lg transition-all active:scale-95",
           isFree

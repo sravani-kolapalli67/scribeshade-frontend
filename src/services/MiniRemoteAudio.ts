@@ -74,6 +74,11 @@ export class MiniRemoteAudio {
   private dgKeepaliveTimer: ReturnType<typeof setInterval> | null = null;
   private dgReconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private rustReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  // Watchdog: if no PCM binary frame arrives within 10 s of the metadata
+  // handshake the Rust stream is up but producing no audio (e.g. system audio
+  // muted, SCKit permission edge-case, or hardware issue). Surface an error
+  // so the user knows rather than seeing a silent "transcribing" state.
+  private pcmWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Whether stop() has been called — prevents reconnect timers from firing
   // after an intentional teardown.
@@ -173,6 +178,20 @@ export class MiniRemoteAudio {
           return;
         }
         this.audioMeta = meta;
+        // Start PCM watchdog: if no binary audio arrives within 10 s the Rust
+        // capture is running but silent (muted output, permission edge-case…).
+        if (this.pcmWatchdogTimer) clearTimeout(this.pcmWatchdogTimer);
+        this.pcmWatchdogTimer = setTimeout(() => {
+          this.pcmWatchdogTimer = null;
+          if (!this.stopped && this.status !== "idle") {
+            this.onError?.(
+              "System audio is connected but no audio is flowing. " +
+              "Ensure something is playing on your system, or check " +
+              "Screen Recording permission (macOS: System Settings → Privacy & Security → Screen Recording)."
+            );
+            this.stop();
+          }
+        }, 10_000);
         this._openDeepgramWs(meta);
         return;
       }
@@ -180,6 +199,11 @@ export class MiniRemoteAudio {
       // ── Subsequent messages: raw i16 LE PCM binary frames ─────────────
       // Zero-copy forward to Deepgram — no AudioContext, no MediaRecorder.
       if (!(evt.data instanceof ArrayBuffer)) return;
+      // Cancel the PCM watchdog — audio is flowing normally.
+      if (this.pcmWatchdogTimer) {
+        clearTimeout(this.pcmWatchdogTimer);
+        this.pcmWatchdogTimer = null;
+      }
       if (this.dgWs?.readyState === WebSocket.OPEN) {
         this.dgWs.send(evt.data);
       }
@@ -237,11 +261,11 @@ export class MiniRemoteAudio {
       `&utterance_end_ms=600` +
       `&vad_events=true` +
       `&encoding=linear16` +
+      // Rust always downmixes to mono (channels=1) before sending; no multichannel
+      // parameter needed. Sending mono is more reliable with nova-3 and avoids the
+      // Deepgram multichannel response format (channels[] vs channel) mismatch.
       `&sample_rate=${meta.sampleRate}` +
       `&channels=${meta.channels}` +
-      // multichannel=true required for stereo (2-ch) WASAPI loopback on Windows;
-      // without it Deepgram returns empty results for stereo linear16.
-      (meta.channels > 1 ? `&multichannel=true` : ``) +
       `&tag=craftvita-remote`;
 
     const dg = new WebSocket(url, ["token", this.apiKey]);
@@ -329,6 +353,7 @@ export class MiniRemoteAudio {
   // ── Private: Helpers ───────────────────────────────────────────────────────
 
   private _closeLocalConnections(): void {
+    if (this.pcmWatchdogTimer) { clearTimeout(this.pcmWatchdogTimer); this.pcmWatchdogTimer = null; }
     if (this.rustWs) {
       this.rustWs.onclose = null;
       this.rustWs.onerror = null;
@@ -350,6 +375,7 @@ export class MiniRemoteAudio {
     if (this.dgKeepaliveTimer) { clearInterval(this.dgKeepaliveTimer); this.dgKeepaliveTimer = null; }
     if (this.dgReconnectTimer) { clearTimeout(this.dgReconnectTimer); this.dgReconnectTimer = null; }
     if (this.rustReconnectTimer) { clearTimeout(this.rustReconnectTimer); this.rustReconnectTimer = null; }
+    if (this.pcmWatchdogTimer) { clearTimeout(this.pcmWatchdogTimer); this.pcmWatchdogTimer = null; }
   }
 
   private _setStatus(s: MiniRemoteAudioStatus): void {

@@ -29,8 +29,6 @@ import {
 import { ChatActionButtons } from "./components/ChatActionButtons";
 import { ModelSelector } from "./components/ModelSelector";
 import { useFreeSessionTimer } from "@/hooks/useFreeSessionTimer";
-import { useDeepgram } from "@/hooks/useDeepgram";
-import { MiniRemoteAudio, MiniRemoteAudioStatus } from "@/services/MiniRemoteAudio";
 import { useAIChat } from "@/hooks/useAIChat";
 import { useSessionHeartbeat } from "@/hooks/useSessionHeartbeat";
 import { useSessionEvents } from "@/hooks/useSessionEvents";
@@ -596,76 +594,124 @@ const FloatingApp: React.FC = () => {
     [], // no deps â€” reads sessionInfoRef
   );
 
-  const micTranscription = useDeepgram({
-    apiKey: DEEPGRAM_KEY,
-    model: "nova-3",
-    language: getLanguageCode(sessionInfo?.language ?? "English"),
-    onTranscript: handleUserTranscript,
-  });
-
-  // Keep ref fresh so session-init listener can call startTranscription
-  const startMicRef = useRef(micTranscription.startTranscription);
-  startMicRef.current = micTranscription.startTranscription;
-
-  // Auto-start mic when sessionInfo is first available.
-  // Covers two cases:
-  //   1. session-init event fires AFTER this component mounts (normal flow)
-  //   2. sessionInfo is pre-loaded from sessionStorage (mini window reload /
-  //      window already open) — session-init was already processed, won't fire again.
-  // The session-init listener also calls startMicRef after 500 ms; the idempotency
-  // guard inside useDeepgram.startTranscription prevents a double-start.
-  const micAutoStartedRef = useRef(false);
-  useEffect(() => {
-    if (!sessionInfo || micAutoStartedRef.current) return;
-    micAutoStartedRef.current = true;
-    const t = setTimeout(() => startMicRef.current(), 300);
-    return () => clearTimeout(t);
-  // Re-run only when the sessionId changes (new session)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionInfo?.sessionId]);
-
-  // Surface mic errors as toasts
-  useEffect(() => {
-    if (micTranscription.error) {
-      toast.error(`Mic: ${micTranscription.error}`, { duration: 6000 });
-    }
-  }, [micTranscription.error]);
-
-  // Remote audio transcription (Interviewer) via MiniRemoteAudio service.
-  const remoteAudioRef = useRef<MiniRemoteAudio | null>(null);
-  const [tabStatus, setTabStatus] = useState<MiniRemoteAudioStatus>("idle");
+  // ── Rust-native STT state ────────────────────────────────────────────────
+  // The floating window never touches raw audio or Deepgram WebSockets.
+  // Rust captures PCM, owns the DG connection, and emits Tauri events.
+  const [isMicActive, setIsMicActive] = useState(false);
+  const [isMicConnecting, setIsMicConnecting] = useState(false);
+  const [micInterimTranscript, setMicInterimTranscript] = useState("");
+  const [tabStatus, setTabStatus] = useState<"idle" | "connecting" | "transcribing" | "error">("idle");
+  const [tabError, setTabError] = useState<string | null>(null);
   const [tabInterimTranscript, setTabInterimTranscript] = useState("");
+
+  // captureArmed = the user just started a session in the launcher (live
+  // "session-init" event arrived in this run of the app).  Hydrating
+  // sessionInfo from sessionStorage on mount must NOT trigger native capture
+  // — that was the source of the launch-time "System audio failed" toast.
+  const [captureArmed, setCaptureArmed] = useState(false);
 
   const handleInterviewerTranscriptRef = useRef(handleInterviewerTranscript);
   handleInterviewerTranscriptRef.current = handleInterviewerTranscript;
 
+  const handleUserTranscriptRef = useRef(handleUserTranscript);
+  handleUserTranscriptRef.current = handleUserTranscript;
+
+  const startSystemAudio = useCallback(async () => {
+    if (!sessionInfoRef.current) return;
+    const lang = getLanguageCode(sessionInfoRef.current.language ?? "English");
+    setTabError(null);
+    setTabStatus("connecting");
+    try {
+      await invoke("start_system_audio_transcription", {
+        language: lang, model: "nova-3",
+      });
+    } catch (e: unknown) {
+      const msg = String(e);
+      setTabError(msg);
+      setTabStatus("error");
+    }
+  }, []);
+
+  // Transcript + status listeners are unconditional so a late-arriving
+  // session-init still wires correctly.  No capture is started here.
   useEffect(() => {
-    if (!sessionInfo) return;
+    let unlistenTx: (() => void) | undefined;
+    let unlistenSt: (() => void) | undefined;
 
-    const svc = new MiniRemoteAudio({
-      apiKey: DEEPGRAM_KEY,
-      model: "nova-3",
-      language: getLanguageCode(sessionInfo.language ?? "English"),
-      onTranscript: (text, isFinal) => {
-        if (isFinal) {
-          setTabInterimTranscript("");
-          handleInterviewerTranscriptRef.current(text, true);
-        } else {
-          setTabInterimTranscript(text);
-        }
-      },
-      onStatusChange: setTabStatus,
-      onError: (msg) => toast.error(`Remote audio: ${msg}`, { duration: 6000 }),
-    });
+    listen<{ text: string; is_final: boolean }>("stt:system-audio", (event) => {
+      const { text, is_final } = event.payload;
+      if (is_final) {
+        setTabInterimTranscript("");
+        handleInterviewerTranscriptRef.current(text, true);
+      } else {
+        setTabInterimTranscript(text);
+      }
+    }).then(fn => { unlistenTx = fn; }).catch(() => {});
 
-    remoteAudioRef.current = svc;
-    svc.start();
+    listen<{ status: string; error?: string }>("stt:status:system", (event) => {
+      const { status, error } = event.payload;
+      setTabStatus(status as "idle" | "connecting" | "transcribing" | "error");
+      if (status === "error" && error) {
+        setTabError(error);
+      } else if (status === "transcribing") {
+        setTabError(null);
+      }
+    }).then(fn => { unlistenSt = fn; }).catch(() => {});
 
     return () => {
-      svc.stop();
+      unlistenTx?.();
+      unlistenSt?.();
+    };
+  }, []);
+
+  // Arm → start.  The ONLY trigger for native system audio is a live
+  // session-init event setting captureArmed.  App launch / window reload /
+  // sessionStorage hydration never fire this on their own.
+  useEffect(() => {
+    if (!captureArmed || !sessionInfo) return;
+    void startSystemAudio();
+    return () => {
+      invoke("stop_system_audio_transcription").catch(() => {});
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionInfo?.sessionId]);
+  }, [captureArmed, sessionInfo?.sessionId]);
+
+  // Mic: user-controlled (off by default). Transcripts arrive via stt:mic events.
+  useEffect(() => {
+    let unlistenTx: (() => void) | undefined;
+    let unlistenSt: (() => void) | undefined;
+
+    listen<{ text: string; is_final: boolean }>("stt:mic", (event) => {
+      const { text, is_final } = event.payload;
+      if (is_final) {
+        setMicInterimTranscript("");
+        handleUserTranscriptRef.current(text, true);
+      } else {
+        setMicInterimTranscript(text);
+      }
+    }).then(fn => { unlistenTx = fn; }).catch(() => {});
+
+    listen<{ status: string; error?: string }>("stt:status:mic", (event) => {
+      const { status, error } = event.payload;
+      if (status === "transcribing") {
+        setIsMicActive(true);
+        setIsMicConnecting(false);
+      } else if (status === "connecting") {
+        setIsMicConnecting(true);
+      } else {
+        setIsMicActive(false);
+        setIsMicConnecting(false);
+      }
+      if (status === "error" && error) {
+        toast.error(`Mic: ${error}`, { duration: 6000 });
+      }
+    }).then(fn => { unlistenSt = fn; }).catch(() => {});
+
+    return () => {
+      unlistenTx?.();
+      unlistenSt?.();
+    };
+  }, []);
 useEffect(() => {
     let unlisten: (() => void) | undefined;
     listen<SessionInitData>("session-init", (event) => {
@@ -675,8 +721,12 @@ useEffect(() => {
       setSelectedModel(info.aiModel || "google/gemma-4-26b-a4b-it");
       // Notify Rust that a session is now active
       invoke("set_session_active", { active: true }).catch(() => {});
-      // Auto-start mic after a short delay so Deepgram hook has settled
-      setTimeout(() => startMicRef.current(), 500);
+      // Arm capture: this is the only path that triggers native system audio.
+      // Hydrating sessionInfo from sessionStorage on mount is intentionally
+      // NOT enough — we require a live event in this run of the app so that
+      // app launch / window reload never auto-starts capture.
+      setCaptureArmed(true);
+      // Mic is OFF by default — user must toggle it on.
     })
       .then((fn) => {
         unlisten = fn;
@@ -801,7 +851,7 @@ useEffect(() => {
     if (!info) return;
 
     const msgs = messagesRef.current;
-    const interimMic = micTranscription.interimTranscript;
+    const interimMic = micInterimTranscript;
     const interimTab = tabInterimTranscript;
     const combined = msgs
       .map((m) => `[${m.sender === "User" ? "YOU" : "Interviewer"}]: ${m.text}`)
@@ -828,7 +878,7 @@ useEffect(() => {
   }, [
     isAnswering,
     handleAiAnswer,
-    micTranscription.interimTranscript,
+    micInterimTranscript,
     tabInterimTranscript,
   ]);
 
@@ -874,19 +924,31 @@ useEffect(() => {
     );
   }, [inputValue, handleCustomQuery]);
 
-  const handleToggleMic = useCallback(() => {
-    if (micTranscription.isTranscribing) {
-      micTranscription.stopTranscription();
-    } else {
-      micTranscription.startTranscription();
+  const handleToggleMic = useCallback(async () => {
+    if (isMicActive || isMicConnecting) {
+      await invoke("stop_mic_transcription").catch(() => {});
+      setIsMicActive(false);
+      setIsMicConnecting(false);
+      setMicInterimTranscript("");
+    } else if (sessionInfoRef.current) {
+      setIsMicConnecting(true);
+      try {
+        await invoke("start_mic_transcription", {
+          language: getLanguageCode(sessionInfoRef.current.language ?? "English"),
+          model: "nova-3",
+        });
+      } catch (e: unknown) {
+        toast.error(`Mic: ${String(e)}`);
+        setIsMicConnecting(false);
+      }
     }
-  }, [micTranscription]);
+  }, [isMicActive, isMicConnecting]);
 
   const handleClearTranscript = useCallback(() => {
-    micTranscription.clearTranscript();
+    setMicInterimTranscript("");
     setTabInterimTranscript("");
     setMessages([]);
-  }, [micTranscription]);
+  }, []);
 
   const handleExit = useCallback(() => {
     endSessionNowRef.current();
@@ -895,10 +957,7 @@ useEffect(() => {
   const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
   const lastTranscriptLine = lastMessage?.text ?? "";
   const lastTranscriptSender = lastMessage?.sender ?? null;
-  const interimTranscript =
-    micTranscription.interimTranscript || tabInterimTranscript;
-  const isMicActive = micTranscription.isTranscribing;
-  const isMicConnecting = micTranscription.isConnecting;
+  const interimTranscript = micInterimTranscript || tabInterimTranscript;
   const isTabActive = tabStatus === "transcribing";
   const isTabConnecting = tabStatus === "connecting";
 
@@ -1075,13 +1134,13 @@ useEffect(() => {
                   {lastTranscriptLine && (
                     <span
                       className={cn(
-                        "font-bold mr-1 text-[9px] uppercase tracking-wider not-italic",
+                        "font-bold mr-1.5 text-[9px] uppercase tracking-wider not-italic",
                         lastTranscriptSender === "User"
                           ? "text-blue-400"
                           : "text-purple-400",
                       )}
                     >
-                      {lastTranscriptSender === "User" ? "You:" : "Them:"}
+                      {lastTranscriptSender === "User" ? "You •" : "System •"}
                     </span>
                   )}
                   {lastTranscriptLine}
@@ -1091,6 +1150,26 @@ useEffect(() => {
                     </span>
                   )}
                 </>
+              ) : tabStatus === "error" ? (
+                <span className="flex items-center gap-2 text-rose-300/90">
+                  <span className="text-[11px] font-semibold truncate max-w-[260px]" title={tabError ?? "System audio unavailable"}>
+                    {tabError ?? "System audio unavailable"}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => { void startSystemAudio(); }}
+                    className="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider bg-white/10 hover:bg-white/20 text-white border border-white/10 transition-colors"
+                  >
+                    Retry
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { invoke("open_screen_recording_settings").catch(() => {}); }}
+                    className="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider bg-white/10 hover:bg-white/20 text-white border border-white/10 transition-colors"
+                  >
+                    Open Settings
+                  </button>
+                </span>
               ) : (
                 <span className="text-white/20">
                   {isMicActive
@@ -1155,7 +1234,7 @@ useEffect(() => {
                 side="left"
                 className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
               >
-                {isMicActive ? "Mute My Mic" : "Unmute My Mic"}
+                {isMicActive ? "Disable Mic" : "Enable Mic (optional)"}
               </TooltipContent>
             </Tooltip>
 
@@ -1214,77 +1293,110 @@ useEffect(() => {
           </div>
         </div>
 
-        {/* Collapsible Transcript Panel — full conversation log */}
+        {/* Collapsible Transcript Panel — full conversation log.
+            Layout convention: incoming "System" (interviewer / system audio)
+            shows on the LEFT, outgoing "You" (mic) shows on the RIGHT —
+            matches WhatsApp / iMessage / Slack so users instantly know who
+            spoke. */}
         {isTranscriptExpanded && (
-          <div className="border-b border-white/10 max-h-52 overflow-y-auto no-scrollbar px-3 py-2 space-y-2">
+          <div className="border-b border-white/10 max-h-52 overflow-y-auto no-scrollbar px-3 py-2.5 space-y-2.5">
             {messages.length === 0 ? (
-              <p className="text-[11px] text-white/20 text-center py-2">
-                No transcript yet...
+              <p className="text-[11px] text-white/30 text-center py-2">
+                No transcript yet…
               </p>
             ) : (
-              messages.map((m) => (
+              messages.map((m) => {
+                const isYou = m.sender === "User";
+                return (
+                  <div
+                    key={m.id}
+                    className={cn(
+                      "flex gap-2 items-start",
+                      isYou ? "flex-row-reverse" : "flex-row",
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "shrink-0 mt-1.5 h-1.5 w-1.5 rounded-full",
+                        isYou
+                          ? "bg-blue-400 shadow-[0_0_6px_rgba(96,165,250,0.6)]"
+                          : "bg-purple-400 shadow-[0_0_6px_rgba(192,132,252,0.6)]",
+                      )}
+                    />
+                    <div
+                      className={cn(
+                        "flex flex-col max-w-[82%]",
+                        isYou ? "items-end" : "items-start",
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          "text-[9px] font-bold uppercase tracking-[0.12em] mb-0.5",
+                          isYou ? "text-blue-400" : "text-purple-400",
+                        )}
+                      >
+                        {isYou ? "You" : "System"}
+                      </span>
+                      <span
+                        className={cn(
+                          "px-3 py-1.5 rounded-2xl text-[12.5px] leading-snug font-medium break-words",
+                          isYou
+                            ? "bg-blue-500/15 text-blue-50 rounded-tr-sm"
+                            : "bg-purple-500/15 text-purple-50 rounded-tl-sm",
+                        )}
+                      >
+                        {m.text}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+            {/* Live interim bubble — same direction rules as final messages. */}
+            {(micInterimTranscript || tabInterimTranscript) && (() => {
+              const isYou = !!micInterimTranscript;
+              const text = micInterimTranscript || tabInterimTranscript;
+              return (
                 <div
-                  key={m.id}
                   className={cn(
-                    "flex gap-2 items-start",
-                    m.sender === "User" ? "flex-row" : "flex-row-reverse",
+                    "flex gap-2 items-start opacity-60",
+                    isYou ? "flex-row-reverse" : "flex-row",
                   )}
                 >
                   <span
                     className={cn(
-                      "shrink-0 text-[9px] font-bold uppercase tracking-wider pt-1.5",
-                      m.sender === "User"
-                        ? "text-blue-400"
-                        : "text-purple-400",
+                      "shrink-0 mt-1.5 h-1.5 w-1.5 rounded-full animate-pulse",
+                      isYou ? "bg-blue-400" : "bg-purple-400",
                     )}
-                  >
-                    {m.sender === "User" ? "You" : "Them"}
-                  </span>
-                  <span
+                  />
+                  <div
                     className={cn(
-                      "px-2.5 py-1.5 rounded-xl text-[12px] leading-snug font-medium max-w-[85%]",
-                      m.sender === "User"
-                        ? "bg-blue-500/10 text-blue-100 rounded-tl-none"
-                        : "bg-purple-500/10 text-purple-100 rounded-tr-none",
+                      "flex flex-col max-w-[82%]",
+                      isYou ? "items-end" : "items-start",
                     )}
                   >
-                    {m.text}
-                  </span>
+                    <span
+                      className={cn(
+                        "text-[9px] font-bold uppercase tracking-[0.12em] mb-0.5",
+                        isYou ? "text-blue-400" : "text-purple-400",
+                      )}
+                    >
+                      {isYou ? "You" : "System"}
+                    </span>
+                    <span
+                      className={cn(
+                        "px-3 py-1.5 rounded-2xl text-[12.5px] leading-snug font-medium italic break-words",
+                        isYou
+                          ? "bg-blue-500/10 text-blue-100 rounded-tr-sm"
+                          : "bg-purple-500/10 text-purple-100 rounded-tl-sm",
+                      )}
+                    >
+                      {text}
+                    </span>
+                  </div>
                 </div>
-              ))
-            )}
-            {/* Live interim bubble */}
-            {(micTranscription.interimTranscript || tabInterimTranscript) && (
-              <div
-                className={cn(
-                  "flex gap-2 items-start opacity-50",
-                  micTranscription.interimTranscript
-                    ? "flex-row"
-                    : "flex-row-reverse",
-                )}
-              >
-                <span
-                  className={cn(
-                    "shrink-0 text-[9px] font-bold uppercase tracking-wider pt-1.5",
-                    micTranscription.interimTranscript
-                      ? "text-blue-400"
-                      : "text-purple-400",
-                  )}
-                >
-                  {micTranscription.interimTranscript ? "You" : "Them"}
-                </span>
-                <span
-                  className={cn(
-                    "px-2.5 py-1.5 rounded-xl text-[12px] leading-snug font-medium italic",
-                    micTranscription.interimTranscript
-                      ? "bg-blue-500/10 text-blue-100 rounded-tl-none"
-                      : "bg-purple-500/10 text-purple-100 rounded-tr-none",
-                  )}
-                >
-                  {micTranscription.interimTranscript || tabInterimTranscript}
-                </span>
-              </div>
-            )}
+              );
+            })()}
           </div>
         )}
 
