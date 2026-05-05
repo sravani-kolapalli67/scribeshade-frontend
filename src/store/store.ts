@@ -1,9 +1,11 @@
 import { configureStore } from "@reduxjs/toolkit";
 import resumeBuilderReducer from "./resumeBuilderSlice";
+import aiProjectsReducer from "./aiProjectsSlice";
 
 export const store = configureStore({
   reducer: {
     resumeBuilder: resumeBuilderReducer,
+    aiProjects:    aiProjectsReducer,
   },
 });
 

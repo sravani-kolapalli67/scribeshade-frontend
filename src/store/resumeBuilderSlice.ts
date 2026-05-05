@@ -69,8 +69,15 @@ export interface ResumeBuilderState {
   // Persistence
   autoSaveStatus: AutoSaveStatus;
   isDirty: boolean;
+  autoSaveEnabled: boolean;
+  /** Backend UUID assigned after the first successful save. Null until saved. */
+  savedResumeId: string | null;
   // Bottom tab mode
   activeBottomTab: BottomTab;
+  // Target role / JD (from wizard step 3)
+  jobDescription: string;
+  jobTitle: string;
+  company: string;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -122,7 +129,16 @@ const initialState: ResumeBuilderState = {
   future: [],
   autoSaveStatus: "idle",
   isDirty: false,
+  // Read persisted preference; default to true
+  autoSaveEnabled:
+    typeof localStorage !== "undefined"
+      ? localStorage.getItem("resume_autosave_enabled") !== "false"
+      : true,
+  savedResumeId: null,
   activeBottomTab: "editor",
+  jobDescription: "",
+  jobTitle: "",
+  company: "",
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -291,6 +307,20 @@ const resumeBuilderSlice = createSlice({
       if (action.payload === "saved") state.isDirty = false;
     },
 
+    toggleAutoSave(state) {
+      state.autoSaveEnabled = !state.autoSaveEnabled;
+      try {
+        localStorage.setItem(
+          "resume_autosave_enabled",
+          state.autoSaveEnabled ? "true" : "false",
+        );
+      } catch {/* private browsing */}
+    },
+
+    setSavedResumeId(state, action: PayloadAction<string | null>) {
+      state.savedResumeId = action.payload;
+    },
+
     setActiveBottomTab(state, action: PayloadAction<BottomTab>) {
       state.activeBottomTab = action.payload;
     },
@@ -306,9 +336,12 @@ const resumeBuilderSlice = createSlice({
         fields?: Partial<ResumeFields>;
         templateId?: TemplateId;
         lockedFields?: Partial<Record<keyof ResumeFields, boolean>>;
+        jobDescription?: string;
+        jobTitle?: string;
+        company?: string;
       }>,
     ) {
-      const { title, fields, templateId, lockedFields } = action.payload;
+      const { title, fields, templateId, lockedFields, jobDescription, jobTitle, company } = action.payload;
       if (title) state.resumeTitle = title;
       if (templateId) state.templateId = templateId;
       state.fields = { ...EMPTY_FIELDS, ...(fields ?? {}) };
@@ -317,10 +350,15 @@ const resumeBuilderSlice = createSlice({
       state.future = [];
       state.isDirty = false;
       state.autoSaveStatus = "idle";
+      state.savedResumeId = null;
+      // preserve user's autosave preference across sessions
       state.activeSection = "personalInfo";
       state.aiSuggestion = null;
       state.aiSectionId = null;
       state.activeBottomTab = "editor";
+      state.jobDescription = jobDescription ?? "";
+      state.jobTitle = jobTitle ?? "";
+      state.company = company ?? "";
     },
   },
 });
@@ -341,6 +379,8 @@ export const {
   undo,
   redo,
   setAutoSaveStatus,
+  toggleAutoSave,
+  setSavedResumeId,
   setActiveBottomTab,
   initFromConfig,
 } = resumeBuilderSlice.actions;

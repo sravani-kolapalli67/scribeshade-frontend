@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { FileText } from "lucide-react";
+import { FileText, X } from "lucide-react";
 import {
   Select,
   SelectContent,
@@ -33,12 +33,13 @@ export interface Resume {
 
 interface ResumeSelectorProps {
   onSelect?: (resume: Resume) => void;
+  onDeselect?: () => void;
   value?: string;
   className?: string;
   filter?: (resume: Resume) => boolean;
 }
 
-export function ResumeSelector({ onSelect, value, filter }: ResumeSelectorProps) {
+export function ResumeSelector({ onSelect, onDeselect, value, filter }: ResumeSelectorProps) {
   const [resumes, setResumes] = React.useState<Resume[]>([]);
   const [selectedResumeId, setSelectedResumeId] = React.useState<string>(value || "");
 
@@ -93,14 +94,21 @@ export function ResumeSelector({ onSelect, value, filter }: ResumeSelectorProps)
     }
   };
 
+  const handleClear = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setSelectedResumeId("");
+    onDeselect?.();
+  };
+
   const selectedResume = resumes.find((r) => r.id === selectedResumeId);
 
   return (
-    <Select
-      value={selectedResumeId}
-      onValueChange={handleValueChange}
-      disabled={loading || resumes.length === 0}
-    >
+    <div className="relative">
+      <Select
+        value={selectedResumeId}
+        onValueChange={handleValueChange}
+        disabled={loading || resumes.length === 0}
+      >
       <SelectTrigger className="h-12 w-full px-4 rounded-xl border-border/80 bg-background hover:bg-muted/30 transition-all focus:ring-primary/20 py-6">
         <SelectValue
           placeholder={
@@ -149,7 +157,18 @@ export function ResumeSelector({ onSelect, value, filter }: ResumeSelectorProps)
           </SelectItem>
         ))}
       </SelectContent>
-    </Select>
+      </Select>
+      {selectedResume && (
+        <button
+          type="button"
+          onClick={handleClear}
+          aria-label="Clear selected resume"
+          className="absolute right-10 top-1/2 -translate-y-1/2 flex h-5 w-5 items-center justify-center rounded-full bg-muted hover:bg-muted-foreground/20 text-muted-foreground hover:text-foreground transition-colors z-10"
+        >
+          <X className="h-3 w-3" />
+        </button>
+      )}
+    </div>
     // <Card className={cn("w-full shadow-none border-border/50", className)}>
     //   <CardHeader className="py-4 px-6 border-b border-border/40">
     //     <CardTitle className="text-sm font-semibold text-foreground/90">

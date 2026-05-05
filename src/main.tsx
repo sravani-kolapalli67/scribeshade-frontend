@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import { Provider } from "react-redux";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ClerkProvider } from "@clerk/clerk-react";
+import { Toaster } from "sonner";
 import App from "./App";
 import { store } from "./store/store";
 
@@ -40,6 +41,7 @@ createRoot(document.getElementById("root")!).render(
         <ClerkProviderWithNavigate>
           <TooltipProvider>
             <App />
+            <Toaster richColors position="bottom-right" />
           </TooltipProvider>
         </ClerkProviderWithNavigate>
       </BrowserRouter>

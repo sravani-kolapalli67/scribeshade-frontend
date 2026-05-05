@@ -4,8 +4,8 @@ import { FileText, Type, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface SourceSelectionStepProps {
-  sourceType: "resume" | "manual" | null;
-  onSelect: (type: "resume" | "manual") => void;
+  sourceType: "resume" | "scratch" | null;
+  onSelect: (type: "resume" | "scratch") => void;
 }
 
 export function SourceSelectionStep({
@@ -56,10 +56,10 @@ export function SourceSelectionStep({
       </div>
 
       <button
-        onClick={() => onSelect("manual")}
+        onClick={() => onSelect("scratch")}
         className={cn(
           "relative flex items-center gap-6 p-2 rounded-2xl border-2 transition-all text-left group w-full",
-          sourceType === "manual"
+          sourceType === "scratch"
             ? "border-primary bg-primary/5 shadow-md"
             : "border-border hover:border-border/80 hover:bg-muted/30",
         )}
@@ -67,7 +67,7 @@ export function SourceSelectionStep({
         <div
           className={cn(
             "p-2 rounded-xl transition-colors shrink-0",
-            sourceType === "manual"
+            sourceType === "scratch"
               ? "bg-primary text-primary-foreground"
               : "bg-muted text-muted-foreground group-hover:text-foreground",
           )}
@@ -75,12 +75,12 @@ export function SourceSelectionStep({
           <Type className="h-5 w-5" />
         </div>
         <div className="flex-1">
-          <h3 className="font-bold text-lg mb-1">Enter Manually</h3>
+          <h3 className="font-bold text-lg mb-1">Start from Scratch</h3>
           <p className="text-sm text-muted-foreground">
-            Start from scratch if you don't have a resume yet.
+            AI builds your resume from the job description or role you provide.
           </p>
         </div>
-        {sourceType === "manual" && (
+        {sourceType === "scratch" && (
           <div className="absolute top-4 right-4 h-6 w-6 rounded-full bg-primary flex items-center justify-center">
             <Check className="h-4 w-4 text-primary-foreground" />
           </div>

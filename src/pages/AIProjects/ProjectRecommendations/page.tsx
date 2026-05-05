@@ -1,14 +1,38 @@
-import { useState, useEffect } from "react";
-import { useParams, Link } from "react-router-dom";
-import { ProjectDetailsView } from "@/components/AI projects/ProjectDetailsView";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { useParams, Link, useNavigate } from "react-router-dom";
+import { ProjectReportView, ProjectResponse } from "@/components/AI projects/ProjectReportView";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Share2, Download, RefreshCw, FileText, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { ProjectResponse } from "@/components/AI projects/ProjectReportView";
+import { useAuth } from "@clerk/clerk-react";
+import { toast } from "sonner";
+import { ENDPOINTS } from "@/lib/endpoints";
+import { useCreditsBalance } from "@/hooks/useCreditsBalance";
+import { OutOfCreditsDialog } from "@/components/Billing/OutOfCreditsDialog";
+import { VersionHistorySheet } from "@/components/AI projects/VersionHistorySheet";
+import { useAppDispatch, useAppSelector } from "@/store/hooks";
+import {
+  setPdfBusy,
+  setPdfResult,
+  clearPdfForRecord,
+  setRegenerating,
+  setActiveProjectRecord,
+  setRegenJob,
+  tickRegenJob,
+  finishRegenJob,
+  errorRegenJob,
+} from "@/store/aiProjectsSlice";
+import { getPdfCache, setPdfCache, clearPdfCache } from "@/lib/pdfCache";
+import jsPDF from "jspdf";
+import html2canvas from "html2canvas-pro";
+
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 interface ProjectRecord {
   id: string;
   position: string;
+  industry?: string;
+  experienceLevel?: string;
   jobDescription: string;
   resumeId: string | null;
   projects: ProjectResponse[];
@@ -17,98 +41,384 @@ interface ProjectRecord {
   updatedAt: string;
 }
 
+// ─── PDF generation ───────────────────────────────────────────────────────────
+
+// html2canvas-pro is used instead of html2canvas — it natively supports
+// modern CSS color functions (oklch, oklab, lch, lab, color()) that
+// Tailwind v4 emits for all its CSS custom properties.
+
+// ─── Smart page-break helpers ─────────────────────────────────────────────────
+//
+// Strategy (js-index-maps, rerender-dependencies):
+//   1. Collect the canvas-pixel y-positions of every semantic block inside
+//      reportEl (sections, headings, cards) as candidate page-break points.
+//   2. For each A4 page, pick the latest candidate that fits; fall back to a
+//      hard cut only when a single element is taller than a full page.
+//   3. Render each resulting slice as one PDF page so content never cuts mid-word.
+
+const PAGE_W_MM    = 210;
+const PAGE_H_MM    = 297;
+const MARGIN_MM    = 12;
+const CONTENT_W_MM = PAGE_W_MM - MARGIN_MM * 2;
+const CONTENT_H_MM = PAGE_H_MM - MARGIN_MM * 2;
+
+// Selectors for elements whose top edge is a safe page-break candidate.
+// Matches every SectionBlock (`id="section-*"` + `scroll-mt-20`) and visible cards.
+const BREAK_SELECTOR = [
+  "[id^='section-']",
+  "section",
+  "h1", "h2", "h3",
+].join(",");
+
+function collectBreakPoints(reportEl: HTMLElement, scale: number): number[] {
+  const reportTop = reportEl.getBoundingClientRect().top;
+  const pts = new Set<number>([0]);
+  reportEl.querySelectorAll<HTMLElement>(BREAK_SELECTOR).forEach((el) => {
+    const relTop = (el.getBoundingClientRect().top - reportTop) * scale;
+    if (relTop > 4) pts.add(Math.floor(relTop));   // skip sub-4px noise
+  });
+  return [...pts].sort((a, b) => a - b);
+}
+
+function buildPageSlices(
+  canvasHeight: number,
+  pageHeightPx: number,
+  breakPoints: number[],
+): Array<{ start: number; end: number }> {
+  const slices: Array<{ start: number; end: number }> = [];
+  let cursor = 0;
+
+  while (cursor < canvasHeight) {
+    const ideal = cursor + pageHeightPx;
+
+    if (ideal >= canvasHeight) {
+      slices.push({ start: cursor, end: canvasHeight });
+      break;
+    }
+
+    // Latest break point that fits within this page (js-early-exit)
+    let cut = ideal;          // fallback: hard cut
+    for (let i = breakPoints.length - 1; i >= 0; i--) {
+      const bp = breakPoints[i];
+      if (bp <= cursor) break; // no point further back than current cursor
+      if (bp < ideal) { cut = bp; break; }
+    }
+
+    // Always advance — if no break found before ideal, hard-cut at ideal
+    if (cut <= cursor) cut = ideal;
+
+    slices.push({ start: cursor, end: cut });
+    cursor = cut;
+  }
+
+  return slices;
+}
+
+async function generatePdf(reportEl: HTMLElement, title: string): Promise<string> {
+  // Scale 1.5 = 144 dpi equivalent — sharp at print size, ~44% fewer pixels than scale 2.
+  // JPEG at 0.88 quality instead of PNG reduces each page image by ~85-90%.
+  // Together these bring a typical 20-section report from ~65 MB down to ~3-5 MB.
+  const SCALE = 1.5;
+  const canvas = await html2canvas(reportEl, {
+    scale: SCALE,
+    useCORS: true,
+    allowTaint: false,
+    backgroundColor: "#ffffff",
+    logging: false,
+  });
+
+  const mmPerPx       = CONTENT_W_MM / canvas.width;
+  const pageHeightPx  = CONTENT_H_MM / mmPerPx;
+
+  const breakPoints = collectBreakPoints(reportEl, SCALE);
+  const slices      = buildPageSlices(canvas.height, pageHeightPx, breakPoints);
+
+  const pdf = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  pdf.setProperties({ title });
+
+  slices.forEach(({ start, end }, i) => {
+    if (i > 0) pdf.addPage();
+
+    const hPx  = end - start;
+    const hMM  = hPx * mmPerPx;
+
+    const slice = document.createElement("canvas");
+    slice.width  = canvas.width;
+    slice.height = Math.ceil(hPx);
+    slice.getContext("2d")!.drawImage(
+      canvas,
+      0, start, canvas.width, hPx,   // source rect
+      0, 0,     canvas.width, hPx,   // destination rect
+    );
+    pdf.addImage(slice.toDataURL("image/jpeg", 0.88), "JPEG", MARGIN_MM, MARGIN_MM, CONTENT_W_MM, hMM);
+  });
+
+
+  return pdf.output("dataurlstring");
+}
+
+// ─── Download / Share helpers ─────────────────────────────────────────────────
+
+function downloadDataUrl(dataUrl: string, filename: string) {
+  const a = document.createElement("a");
+  a.href = dataUrl; a.download = filename; a.click();
+}
+
+async function sharePdf(dataUrl: string, filename: string) {
+  const blob = await (await fetch(dataUrl)).blob();
+  const file = new File([blob], filename, { type: "application/pdf" });
+  if (typeof navigator.share === "function" && navigator.canShare?.({ files: [file] })) {
+    await navigator.share({ files: [file], title: filename });
+  } else {
+    downloadDataUrl(dataUrl, filename);
+  }
+}
+
+// ─── Streaming helper ─────────────────────────────────────────────────────────
+
+const STREAM_DELIM = "|||PROJECT_END|||";
+async function streamProjects(res: Response, onProject: (p: ProjectResponse) => void) {
+  if (!res.body) throw new Error("ReadableStream not supported");
+  const reader = res.body.getReader(); const decoder = new TextDecoder(); let buf = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const parts = buf.split(STREAM_DELIM); buf = parts.pop() ?? "";
+    for (const part of parts) {
+      const t = part.trim().replace(/^```json\n?/i, "").replace(/\n?```$/i, "").trim();
+      if (!t) continue;
+      try { onProject(JSON.parse(t) as ProjectResponse); } catch { /* skip */ }
+    }
+  }
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
+
 export default function ProjectRecommendations() {
-  const { projectId } = useParams();
+  const { projectId } = useParams<{ projectId: string }>();
+  const navigate = useNavigate();
+  const { getToken } = useAuth();
+  const { balance, refresh: refreshBalance } = useCreditsBalance();
+  const dispatch = useAppDispatch();
+
+  // ── Local state (page-mount lifecycle) ───────────────────────────────────
   const [data, setData] = useState<ProjectRecord | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showOutOfCredits, setShowOutOfCredits] = useState(false);
 
-  useEffect(() => {
+  const reportRef = useRef<HTMLDivElement>(null);
+
+  // ── Redux state (survives navigation) ────────────────────────────────────
+  const pdfState = useAppSelector((s) =>
+    projectId ? (s.aiProjects.pdfByRecord[projectId] ?? { dataUrl: null, ready: false, busyFor: null }) : { dataUrl: null, ready: false, busyFor: null },
+  );
+  const regenerating = useAppSelector((s) =>
+    projectId ? !!s.aiProjects.regeneratingIds[projectId] : false,
+  );
+
+  const pdfBusyFor = pdfState.busyFor;
+  const pdfReady   = pdfState.ready;
+  const pdfDataUrl = pdfState.dataUrl;
+
+  // ── Fetch ─────────────────────────────────────────────────────────────────
+
+  const fetchProject = useCallback(async () => {
     if (!projectId) return;
+    setLoading(true); setError(null);
+    try {
+      const res = await fetch(ENDPOINTS.projectsGet(projectId));
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error((e as { error?: string }).error || "Failed to fetch project");
+      }
+      const json = await res.json();
+      let pd = json.projects;
+      if (typeof pd === "string") { try { pd = JSON.parse(pd); } catch { pd = []; } }
+      if (pd && !Array.isArray(pd) && Array.isArray((pd as { projects?: unknown[] }).projects))
+        pd = (pd as { projects: unknown[] }).projects;
+      if (Array.isArray(pd))
+        pd = pd.map((p: unknown) => { if (typeof p === "string") { try { return JSON.parse(p); } catch { return p; } } return p; });
+      json.projects = Array.isArray(pd) ? pd : [];
+      const record = json as ProjectRecord;
+      setData(record);
+      dispatch(setActiveProjectRecord(record));
+    } catch (err: unknown) {
+      setError((err as Error).message || "Something went wrong");
+    } finally { setLoading(false); }
+  }, [projectId, dispatch]);
 
-    const fetchProject = async () => {
-      setLoading(true);
-      setError(null);
+  useEffect(() => { fetchProject(); }, [fetchProject]);
+
+  // Restore cached PDF into Redux on load (if IDB has it but Redux doesn't)
+  useEffect(() => {
+    if (!projectId || pdfReady) return;
+    getPdfCache(projectId).then((cached) => {
+      if (cached) dispatch(setPdfResult({ id: projectId, dataUrl: cached }));
+    });
+  }, [projectId, pdfReady, dispatch]);
+
+  // ── Regenerate ────────────────────────────────────────────────────────────
+
+  const handleRegenerate = useCallback(async () => {
+    if (!data || !projectId) return;
+    if (parseFloat(balance?.totalAvailable ?? "0") <= 0) { setShowOutOfCredits(true); return; }
+
+    // 1. Set Redux regen-job so the table page can show the progress row
+    dispatch(setRegenJob({
+      recordId: projectId,
+      position: data.position,
+      industry: data.industry ?? "",
+    }));
+    dispatch(setRegenerating({ id: projectId, value: true }));
+
+    // 2. Navigate to the table immediately — user sees the in-progress row there
+    navigate("/ai-projects");
+
+    // 3. Continue the fetch/stream/PATCH in the background (fire-and-forget)
+    const run = async () => {
+      const tid = "cv-regen";
+      toast.loading("Regenerating projects…", { id: tid });
       try {
-        console.log("Fetching project with ID:", projectId);
-        const res = await fetch(
-          `${import.meta.env.VITE_BACKEND_URL}/api/projects/${projectId}`,
-        );
+        const token = await getToken();
+        const storedUserId = localStorage.getItem("userId") ?? undefined;
+        const body: Record<string, string> = { position: data.position, jobDescription: data.jobDescription ?? "" };
+        if (storedUserId)         body.userId          = storedUserId;
+        if (data.resumeId)        body.resumeId        = data.resumeId;
+        if (data.industry)        body.industry        = data.industry;
+        if (data.experienceLevel) body.experienceLevel = data.experienceLevel;
+
+        const res = await fetch(ENDPOINTS.projectsGenerate(), {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify(body),
+        });
         if (!res.ok) {
-          const errData = await res.json().catch(() => ({}));
-          throw new Error(errData.error || "Failed to fetch project");
-        }
-        const json = await res.json();
-        console.log("Fetched project data:", json);
-
-        let projectsData = json.projects;
-        if (typeof projectsData === "string") {
-          try {
-            projectsData = JSON.parse(projectsData);
-          } catch (e) {
-            console.error("Failed to parse projects JSON string", e);
-            projectsData = [];
-          }
+          const e = await res.json().catch(() => ({}));
+          const msg = (e as { error?: string }).error ?? "Regeneration failed";
+          toast.error(msg, { id: tid });
+          dispatch(errorRegenJob(msg));
+          return;
         }
 
-        // Handle case where JSON is { "projects": [ ... ] }
-        if (
-          projectsData &&
-          typeof projectsData === "object" &&
-          !Array.isArray(projectsData) &&
-          Array.isArray(projectsData.projects)
-        ) {
-          projectsData = projectsData.projects;
+        const newProjects: ProjectResponse[] = [];
+        await streamProjects(res, (p) => {
+          newProjects.push(p);
+          dispatch(tickRegenJob());   // advance count 0→1→2→3 for progress dots
+        });
+
+        if (!newProjects.length) {
+          const msg = "No projects returned — try again.";
+          toast.error(msg, { id: tid });
+          dispatch(errorRegenJob(msg));
+          return;
         }
 
-        // Handle case where array elements are stringified JSON
-        if (Array.isArray(projectsData)) {
-          projectsData = projectsData.map((p: any) => {
-            if (typeof p === "string") {
-              try {
-                return JSON.parse(p);
-              } catch (e) {
-                console.error("Failed to parse project element JSON string", e);
-                return p;
-              }
-            }
-            return p;
-          });
-        }
+        const patchToken = await getToken();
+        await fetch(ENDPOINTS.projectsReplaceProjects(projectId), {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${patchToken}` },
+          body: JSON.stringify({ projects: newProjects }),
+        }).catch(() => { /* best-effort */ });
 
-        json.projects = Array.isArray(projectsData) ? projectsData : [];
-
-        setData(json);
-      } catch (err: any) {
-        console.error("Fetch project error:", err);
-        setError(err.message || "Something went wrong");
+        await clearPdfCache(projectId);
+        dispatch(clearPdfForRecord(projectId));
+        dispatch(finishRegenJob());
+        refreshBalance();
+        toast.success("Projects regenerated!", { id: tid });
+      } catch (err: unknown) {
+        const msg = (err as Error).message || "Unexpected error";
+        toast.error(msg, { id: "cv-regen" });
+        dispatch(errorRegenJob(msg));
       } finally {
-        setLoading(false);
+        dispatch(setRegenerating({ id: projectId, value: false }));
       }
     };
 
-    fetchProject();
-  }, [projectId]);
+    run();
+  }, [data, projectId, balance, getToken, refreshBalance, dispatch, navigate]);
+
+  // ── PDF ───────────────────────────────────────────────────────────────────
+
+  const pdfFilename = useCallback(() =>
+    data?.position ? `${data.position.replace(/\s+/g, "-")}-AI-Projects.pdf` : "AI-Projects.pdf"
+  , [data]);
+
+  // Returns a cached or freshly-generated PDF data-URL.
+  // Caller must dispatch setPdfBusy BEFORE calling this so the right button shows a spinner.
+  const getOrGenPdf = useCallback(async (): Promise<string | null> => {
+    // 1. In-memory Redux hit — instant
+    if (pdfDataUrl) return pdfDataUrl;
+
+    // 2. IndexedDB hit — fast, no render needed
+    if (projectId) {
+      const cached = await getPdfCache(projectId);
+      if (cached) {
+        dispatch(setPdfResult({ id: projectId, dataUrl: cached }));
+        return cached;
+      }
+    }
+
+    // 3. Render + cache
+    if (!reportRef.current || !projectId) return null;
+    const tid = "cv-pdf";
+    toast.loading("Generating PDF — this may take a moment…", { id: tid });
+    try {
+      const title = data?.position ? `${data.position} – AI Projects` : "AI Projects";
+      const url = await generatePdf(reportRef.current, title);
+      await setPdfCache(projectId, url);
+      dispatch(setPdfResult({ id: projectId, dataUrl: url }));
+      toast.success("PDF ready! You can now download or share it.", { id: tid, duration: 4000 });
+      return url;
+    } catch (err: unknown) {
+      console.error("PDF error", err);
+      toast.error("PDF generation failed — try again.", { id: tid });
+      return null;
+    }
+  }, [pdfDataUrl, projectId, data]);
+
+  const handleExportPDF = useCallback(async () => {
+    if (!projectId || pdfBusyFor) return;
+    dispatch(setPdfBusy({ id: projectId, busyFor: "export" }));
+    try {
+      const url = await getOrGenPdf();
+      if (url) downloadDataUrl(url, pdfFilename());
+    } finally {
+      dispatch(setPdfBusy({ id: projectId, busyFor: null }));
+    }
+  }, [getOrGenPdf, pdfFilename, pdfBusyFor, projectId, dispatch]);
+
+  const handleSharePDF = useCallback(async () => {
+    if (!projectId || pdfBusyFor) return;
+    dispatch(setPdfBusy({ id: projectId, busyFor: "share" }));
+    try {
+      const url = await getOrGenPdf();
+      if (!url) return;
+      try { await sharePdf(url, pdfFilename()); }
+      catch (err: unknown) { if ((err as Error).name !== "AbortError") toast.error("Could not share PDF"); }
+    } finally {
+      dispatch(setPdfBusy({ id: projectId, busyFor: null }));
+    }
+  }, [getOrGenPdf, pdfFilename, pdfBusyFor, projectId, dispatch]);
+
+  // ── Loading / Error ───────────────────────────────────────────────────────
 
   if (loading) {
     return (
-      <div className="flex-1 space-y-8 p-2">
-        <Skeleton className="h-8 w-64 rounded-xl" />
-        <Skeleton className="h-5 w-48 rounded-lg" />
-        <div className="flex gap-2 mt-6">
-          <Skeleton className="h-10 w-40 rounded-xl" />
-          <Skeleton className="h-10 w-40 rounded-xl" />
-          <Skeleton className="h-10 w-40 rounded-xl" />
-        </div>
-        <div className="space-y-6 mt-8">
-          <Skeleton className="h-40 w-full rounded-xl" />
-          <div className="grid grid-cols-4 gap-4">
-            <Skeleton className="h-32 rounded-xl" />
-            <Skeleton className="h-32 rounded-xl" />
-            <Skeleton className="h-32 rounded-xl" />
-            <Skeleton className="h-32 rounded-xl" />
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <Skeleton className="h-8 w-24 rounded-lg" />
+          <div className="flex gap-2">
+            <Skeleton className="h-8 w-20 rounded-lg" />
+            <Skeleton className="h-8 w-28 rounded-lg" />
           </div>
-          <Skeleton className="h-60 w-full rounded-xl" />
+        </div>
+        <Skeleton className="h-32 w-full rounded-xl" />
+        <div className="space-y-3">
+          <Skeleton className="h-40 w-full rounded-xl" />
+          <Skeleton className="h-40 w-full rounded-xl" />
+          <Skeleton className="h-40 w-full rounded-xl" />
         </div>
       </div>
     );
@@ -116,36 +426,109 @@ export default function ProjectRecommendations() {
 
   if (error || !data) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center py-20 text-center gap-4">
-        <p className="text-lg font-bold text-destructive">
-          {error || "Project not found"}
-        </p>
+      <div className="flex flex-col items-center justify-center py-20 text-center gap-4">
+        <p className="text-sm font-medium text-destructive">{error || "Project not found"}</p>
         <Link to="/ai-projects">
-          <Button variant="outline" className="gap-2 rounded-xl">
-            <ArrowLeft className="h-4 w-4" />
-            Back to Projects
+          <Button variant="outline" size="sm" className="gap-2">
+            <ArrowLeft className="h-3.5 w-3.5" /> Back to Projects
           </Button>
         </Link>
       </div>
     );
   }
 
-  return (
-    <div className="flex-1 space-y-6">
-      {/* Back link */}
-      <Link to="/ai-projects">
-        <Button
-          variant="ghost"
-          size="sm"
-          className="gap-2 rounded-lg text-muted-foreground hover:text-foreground -ml-2"
-        >
-          <ArrowLeft className="h-4 w-4" />
-          All Projects
-        </Button>
-      </Link>
+  const pdfGenerating = pdfBusyFor !== null;
 
-      {/* Report */}
-      <ProjectDetailsView projects={data.projects} />
+  return (
+    <div className="min-h-0 space-y-4 pb-6">
+
+      {/* ── Top bar ──────────────────────────────────────────────────────── */}
+      <div className="flex items-center justify-between gap-2 sticky top-0 z-20 bg-muted/90 backdrop-blur-sm py-2 -mx-4 px-4 md:-mx-8 md:px-8 border-b border-border/40">
+        <Link to="/ai-projects">
+          <Button variant="ghost" size="sm" className="gap-1.5 text-muted-foreground hover:text-foreground -ml-2 h-8">
+            <ArrowLeft className="h-3.5 w-3.5" />
+            <span className="hidden xs:inline">All Projects</span>
+          </Button>
+        </Link>
+        <div className="flex items-center gap-1.5 sm:gap-2">
+
+          {/* Version history */}
+          {projectId && (
+            <VersionHistorySheet
+              projectId={projectId}
+              onRollbackSuccess={() => {
+                fetchProject();
+                if (projectId) clearPdfCache(projectId).then(() => dispatch(clearPdfForRecord(projectId)));
+              }}
+            />
+          )}
+
+          {/* Regenerate — disabled while regenerating or a PDF is being generated */}
+          <Button
+            variant="outline" size="sm" className="gap-1.5 h-8"
+            onClick={handleRegenerate}
+            disabled={regenerating || pdfGenerating}
+          >
+            {regenerating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+            <span className="hidden sm:inline">{regenerating ? "Regenerating…" : "Regenerate"}</span>
+          </Button>
+
+          {/* Share PDF — spinner only on this button, only when share triggered the generation */}
+          <Button
+            variant="outline" size="sm" className="gap-1.5 h-8"
+            onClick={handleSharePDF}
+            disabled={regenerating || pdfBusyFor === "share"}
+          >
+            {pdfBusyFor === "share"
+              ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              : <Share2 className="h-3.5 w-3.5" />
+            }
+            <span className="hidden sm:inline">
+              {pdfBusyFor === "share" ? "Preparing…" : "Share PDF"}
+            </span>
+          </Button>
+
+          {/* Export PDF — spinner only on this button, only when export triggered the generation */}
+          <Button
+            size="sm" className="gap-1.5 h-8 bg-[#458fff] hover:bg-[#1a73ff] text-white border-0"
+            onClick={handleExportPDF}
+            disabled={regenerating || pdfBusyFor === "export"}
+          >
+            {pdfBusyFor === "export"
+              ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              : pdfReady ? <FileText className="h-3.5 w-3.5" /> : <Download className="h-3.5 w-3.5" />
+            }
+            <span className="hidden sm:inline">
+              {pdfBusyFor === "export" ? "Generating…" : pdfReady ? "Download PDF" : "Export PDF"}
+            </span>
+          </Button>
+        </div>
+      </div>
+
+      {/* PDF-ready badge */}
+      {pdfReady && (
+        <div className="flex items-center gap-2 text-[11px] text-emerald-600 bg-emerald-50 border border-emerald-100 rounded-lg px-3 py-2 w-fit">
+          <FileText className="h-3.5 w-3.5 shrink-0" />
+          PDF ready — <strong>Download PDF</strong> or <strong>Share PDF</strong> instantly.
+        </div>
+      )}
+
+      {/* ── Report (PDF capture target) ───────────────────────────────────── */}
+      <div ref={reportRef}>
+        <ProjectReportView
+          projects={data.projects}
+          position={data.position}
+          industry={data.industry}
+          experienceLevel={data.experienceLevel}
+          createdAt={data.createdAt}
+        />
+      </div>
+
+      <OutOfCreditsDialog
+        open={showOutOfCredits}
+        onOpenChange={setShowOutOfCredits}
+        onGetCredits={() => navigate("/billing")}
+      />
     </div>
   );
 }

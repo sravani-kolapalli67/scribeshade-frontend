@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { ColumnDef } from "@tanstack/react-table";
 import { DataTable } from "@/components/data-table/data-table";
@@ -55,7 +55,12 @@ export default function ListOfResumes({
   );
 
   // ✅ FETCH FUNCTION (DataTable format)
-  const fetchResumes = async () => {
+  // Wrapped in useCallback so the reference only changes when userId changes,
+  // preventing DataTable from re-fetching on every parent render.
+  const fetchResumes = useCallback(async () => {
+    if (!userId) {
+      return { success: true, data: [], pagination: { page: 1, limit: 0, total_pages: 1, total_items: 0 } };
+    }
     const res = await fetch(
       `${import.meta.env.VITE_BACKEND_URL}/api/resume/list?userId=${userId}`,
     );
@@ -72,7 +77,7 @@ export default function ListOfResumes({
         total_items: data.length,
       },
     };
-  };
+  }, [userId]);
 
   // ✅ ATS
   const handleATS = async (resume: Resume) => {
@@ -166,8 +171,8 @@ export default function ListOfResumes({
     }
   };
 
-  // ✅ COLUMNS
-  const columns: ColumnDef<Resume>[] = [
+  // ✅ COLUMNS — memoized so DataTable's getColumns dep doesn't bust on every render
+  const columns: ColumnDef<Resume>[] = useMemo(() => [
     {
       accessorKey: "filename",
       header: "Resume Name",
@@ -259,7 +264,8 @@ export default function ListOfResumes({
         );
       },
     },
-  ];
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  ], [onSelectResume, selectedResumeId, atsLoadingIds, handleATS, handleDelete]);
 
   return (
     <div className="space-y-4">
@@ -271,7 +277,7 @@ export default function ListOfResumes({
       {/* ✅ DATATABLE */}
       <DataTable
         key={refreshKey}
-        getColumns={() => columns}
+        getColumns={useCallback(() => columns, [columns])}
         fetchDataFn={fetchResumes}
         fetchByIdsFn={async () => []}
         idField="id"

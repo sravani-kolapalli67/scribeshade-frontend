@@ -1,7 +1,5 @@
 "use client";
 
-import { useState } from "react";
-import { SubscriptionPricing } from "@/components/Subscription/SubscriptionPricing";
 import { useCreditsBalance } from "@/hooks/useCreditsBalance";
 import { useCreditBrackets } from "@/hooks/useCreditBrackets";
 import { useCreditsLedger } from "@/hooks/useCreditsLedger";
@@ -9,7 +7,7 @@ import { useCreditsPurchases } from "@/hooks/useCreditsPurchases";
 import { Coins, Clock, Zap, ShieldCheck, ChevronLeft, ChevronRight, ArrowDownLeft, ArrowUpRight, CheckCircle2, XCircle, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { BuyCreditsDialog } from "@/components/Billing/BuyCreditsDialog";
+import { CreditPlansSection } from "@/components/Billing/CreditPlansSection";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 function fmt(iso: string) {
@@ -37,7 +35,6 @@ function reasonLabel(reason: string) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function BillingPage() {
-  const [buyOpen, setBuyOpen] = useState(false);
   const { balance, isLoading: balanceLoading, refresh: refreshBalance } = useCreditsBalance();
   const { brackets, isLoading: bracketsLoading } = useCreditBrackets();
   const {
@@ -149,7 +146,7 @@ export default function BillingPage() {
             <Button
               size="lg"
               className="px-10 h-12 rounded-xl font-bold bg-[#0f172a] hover:bg-[#1e293b] text-white gap-2"
-              onClick={() => setBuyOpen(true)}
+              onClick={() => {}}
             >
               <Coins className="h-4 w-4" />
               Buy Credits
@@ -305,28 +302,11 @@ export default function BillingPage() {
           </div>
         </div>
 
-        {/* ── Subscription plans ──────────────────────────────── */}
-        <div>
-          <div className="text-center mb-10">
-            <h2 className="text-3xl md:text-5xl font-extrabold tracking-tight mb-4">
-              Choose Your Plan
-            </h2>
-            <p className="text-muted-foreground text-lg max-w-2xl mx-auto px-4 mb-10">
-              Unlock the full power of AI-assisted interviews with our flexible
-              subscription plans tailored to your career goals.
-            </p>
-          </div>
-          <SubscriptionPricing />
-        </div>
+        {/* ── Credit plans for purchase ──────────────────────── */}
+        <CreditPlansSection onSuccess={refreshBalance} />
 
       </div>
     </div>
-
-    <BuyCreditsDialog
-      open={buyOpen}
-      onOpenChange={setBuyOpen}
-      onSuccess={refreshBalance}
-    />
     </>
   );
 }

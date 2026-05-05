@@ -80,16 +80,20 @@ interface BuyCreditsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSuccess?: () => void;
+  initialPlan?: CreditPlan;
+  initialCurrency?: SupportedCurrency;
 }
 
 export function BuyCreditsDialog({
   open,
   onOpenChange,
   onSuccess,
+  initialPlan,
+  initialCurrency,
 }: BuyCreditsDialogProps) {
   const { getToken } = useAuth();
-  const [currency, setCurrency] = useState<SupportedCurrency>("INR");
-  const [selectedPlan, setSelectedPlan] = useState<CreditPlan | null>(null);
+  const [currency, setCurrency] = useState<SupportedCurrency>(initialCurrency ?? "INR");
+  const [selectedPlan, setSelectedPlan] = useState<CreditPlan | null>(initialPlan ?? null);
   const [paying, setPaying] = useState(false);
 
   const { plans, isLoading } = useCreditPlans(currency);

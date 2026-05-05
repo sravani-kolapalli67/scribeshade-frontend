@@ -6,7 +6,7 @@ import {
   useNavigate,
 } from "react-router-dom";
 import { useUser } from "@clerk/clerk-react";
-import { useEffect } from "react";
+import { useEffect, lazy, Suspense } from "react";
 import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { emit, listen } from "@tauri-apps/api/event";
@@ -15,31 +15,42 @@ import { isTauri } from "@/lib/utils";
 import "./App.css";
 import { AppSidebar } from "@/components/app-sidebar";
 import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
-import Dashboard from "./pages/Dashboard/page";
-import Sessions from "./pages/Sessions/page";
-import AllResumes from "./pages/Resume/AllResume/page";
-import ATSAnalysis from "./pages/Resume/ATSAnalysis/page";
-import CoverLetter from "./pages/Resume/CoverLetter/page";
-import ATSResult from "./pages/Resume/ATSResult/page";
-import Analytics from "./pages/Analytics/page";
-import DocumentPage from "./pages/Document/page";
-import AllQuestions from "./pages/QuestionBank/All Questions/page";
-import UserQuestions from "./pages/QuestionBank/User Questions/page";
-import UserQuestionDetails from "./pages/QuestionBank/UserQuestionDetails/page";
-import CompanyQuestions from "./pages/QuestionBank/CompanyQuestions/page";
-import QuestionDetails from "./pages/QuestionBank/QuestionDetails/page";
-import ActiveSession from "./pages/Sessions/ActiveSession/page";
-import Navbar from "./components/Navbar";
-import BuildResume from "./pages/Resume/BuildResume/page";
-import ResumeEditor from "./pages/Resume/ResumeEditor/page";
-import SignInPage from "./pages/Auth/SignIn/page";
-import SignUpPage from "./pages/Auth/SignUp/page";
-import SSOCallbackPage from "./pages/Auth/SSOCallback/page";
-import BillingPage from "./pages/Billing/page";
-import AIProjects from "./pages/AIProjects/page";
-import ProjectRecommendations from "./pages/AIProjects/ProjectRecommendations/page";
 import { TauriReturnBanner } from "@/components/TauriReturnBanner";
 import { checkForUpdates } from "@/lib/updater";
+import Navbar from "./components/Navbar";
+
+// Lazy-load all route-level pages so each page's JS is only downloaded when
+// the user first navigates to that route (bundle-dynamic-imports rule).
+const Dashboard = lazy(() => import("./pages/Dashboard/page"));
+const Sessions = lazy(() => import("./pages/Sessions/page"));
+const AllResumes = lazy(() => import("./pages/Resume/AllResume/page"));
+const ATSAnalysis = lazy(() => import("./pages/Resume/ATSAnalysis/page"));
+const CoverLetter = lazy(() => import("./pages/Resume/CoverLetter/page"));
+const ATSResult = lazy(() => import("./pages/Resume/ATSResult/page"));
+const Analytics = lazy(() => import("./pages/Analytics/page"));
+const DocumentPage = lazy(() => import("./pages/Document/page"));
+const AllQuestions = lazy(() => import("./pages/QuestionBank/All Questions/page"));
+const UserQuestions = lazy(() => import("./pages/QuestionBank/User Questions/page"));
+const UserQuestionDetails = lazy(() => import("./pages/QuestionBank/UserQuestionDetails/page"));
+const CompanyQuestions = lazy(() => import("./pages/QuestionBank/CompanyQuestions/page"));
+const QuestionDetails = lazy(() => import("./pages/QuestionBank/QuestionDetails/page"));
+const ActiveSession = lazy(() => import("./pages/Sessions/ActiveSession/page"));
+const BuildResume = lazy(() => import("./pages/Resume/BuildResume/page"));
+const ResumeEditor = lazy(() => import("./pages/Resume/ResumeEditor/page"));
+const SignInPage = lazy(() => import("./pages/Auth/SignIn/page"));
+const SignUpPage = lazy(() => import("./pages/Auth/SignUp/page"));
+const SSOCallbackPage = lazy(() => import("./pages/Auth/SSOCallback/page"));
+const BillingPage = lazy(() => import("./pages/Billing/page"));
+const AIProjects = lazy(() => import("./pages/AIProjects/page"));
+const ProjectRecommendations = lazy(() => import("./pages/AIProjects/ProjectRecommendations/page"));
+
+function PageLoader() {
+  return (
+    <div className="flex min-h-[60vh] items-center justify-center">
+      <div className="h-8 w-8 animate-spin rounded-full border-4 border-blue-500 border-t-transparent" />
+    </div>
+  );
+}
 
 function App() {
   const { isSignedIn, isLoaded } = useUser();
@@ -145,14 +156,16 @@ function App() {
 
   if (!isSignedIn) {
     return (
-      <Routes>
-        <Route path="/sign-in/*" element={<SignInPage />} />
-        <Route path="/sign-up/*" element={<SignUpPage />} />
-        <Route path="/sso-callback" element={<SSOCallbackPage />} />
-        <Route path="/sign-in/sso-callback" element={<SSOCallbackPage />} />
-        <Route path="/sign-up/sso-callback" element={<SSOCallbackPage />} />
-        <Route path="*" element={<Navigate to="/sign-in" replace />} />
-      </Routes>
+      <Suspense fallback={<PageLoader />}>
+        <Routes>
+          <Route path="/sign-in/*" element={<SignInPage />} />
+          <Route path="/sign-up/*" element={<SignUpPage />} />
+          <Route path="/sso-callback" element={<SSOCallbackPage />} />
+          <Route path="/sign-in/sso-callback" element={<SSOCallbackPage />} />
+          <Route path="/sign-up/sso-callback" element={<SSOCallbackPage />} />
+          <Route path="*" element={<Navigate to="/sign-in" replace />} />
+        </Routes>
+      </Suspense>
     );
   }
 
@@ -162,14 +175,37 @@ function App() {
     if (id && id !== "list") {
       // Assuming list is /sessions or similar
       return (
-        <Routes>
-          <Route path="/sessions/:id" element={<ActiveSession />} />
-        </Routes>
+        <Suspense fallback={<PageLoader />}>
+          <Routes>
+            <Route path="/sessions/:id" element={<ActiveSession />} />
+          </Routes>
+        </Suspense>
       );
     }
   }
 
   //Routes
+
+  // Full-bleed editor layout — no padding wrapper, no max-width constraint
+  if (location.pathname === "/resume/editor") {
+    return (
+      <SidebarProvider>
+        <AppSidebar />
+        <SidebarInset className="flex flex-col h-screen overflow-hidden">
+          <TauriReturnBanner />
+          <Navbar />
+          <div className="flex-1 overflow-hidden">
+            <Suspense fallback={<PageLoader />}>
+              <Routes>
+                <Route path="/resume/editor" element={<ResumeEditor />} />
+                <Route path="*" element={<Navigate to="/resume/editor" replace />} />
+              </Routes>
+            </Suspense>
+          </div>
+        </SidebarInset>
+      </SidebarProvider>
+    );
+  }
 
   return (
     <SidebarProvider>
@@ -179,6 +215,7 @@ function App() {
         <Navbar />
         <div className="flex-1 overflow-y-auto p-4 md:p-8">
           <div className="max-w-7xl mx-auto">
+            <Suspense fallback={<PageLoader />}>
             <Routes>
               <Route path="/" element={<Navigate to="/dashboard" replace />} />
               <Route path="/dashboard" element={<Dashboard />} />
@@ -213,6 +250,7 @@ function App() {
               />
               <Route path="*" element={<Navigate to="/dashboard" replace />} />
             </Routes>
+            </Suspense>
           </div>
         </div>
       </SidebarInset>

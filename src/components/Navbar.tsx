@@ -5,10 +5,10 @@ import { ATSAnalysisDialog } from "./Resume/ATSAnalysisDialog";
 import { BuildResumeDialog } from "./Resume/BuildResumeDialog";
 import CreateSessionDialog from "@/components/Sessions/CreateSessionDialog";
 import UploadDocumentDialog from "@/components/Document/UploadDocumentDialog";
-import { GenerateProjectDialog } from "./AI projects/GenerateProjectDialog";
 import { useCreditsBalance } from "@/hooks/useCreditsBalance";
 import { Coins, AlertCircle } from "lucide-react";
 import { Link } from "react-router-dom";
+import { SidebarTrigger } from "@/components/ui/sidebar";
 import {
   Tooltip,
   TooltipContent,
@@ -66,12 +66,12 @@ const Navbar = () => {
   }, []); // intentionally run only once on mount
 
   const isDocumentPage = location.pathname.startsWith("/document");
-  const isAIProjectsPage = location.pathname.startsWith("/ai-projects");
   const userId = localStorage.getItem("userId") || "";
 
   return (
     <nav className="flex items-center justify-between px-4 py-3 bg-white/80 backdrop-blur-md border-b border-gray-100 sticky top-0 z-50 shadow-sm w-full h-18">
       <div className="flex items-center gap-2">
+        <SidebarTrigger className="md:hidden -ml-1 text-gray-500 hover:text-gray-900" />
         <h1 className="text-lg font-semibold tracking-tight text-gray-900 py-2">
           {title}
         </h1>
@@ -94,7 +94,6 @@ const Navbar = () => {
         {isATSAnalysisPage && <ATSAnalysisDialog />}
         {isBuildResumePage && <BuildResumeDialog />}
         {isDocumentPage && <UploadDocumentDialog userId={userId} />}
-        {isAIProjectsPage && <GenerateProjectDialog />}
 
         {/* Credit balance badge */}
         {balance && (
