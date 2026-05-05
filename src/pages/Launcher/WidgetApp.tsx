@@ -13,6 +13,7 @@ import { emit, listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { start, cancel } from "@fabianlars/tauri-plugin-oauth";
 import { useCreditsBalance } from "@/hooks/useCreditsBalance";
+import { checkForUpdates } from "@/lib/updater";
 import { cn } from "@/lib/utils";
 import {
   MoreVertical,
@@ -773,6 +774,12 @@ function WidgetContent() {
   const setZoom = useCallback((z: number) => {
     setZoomState(z);
     localStorage.setItem(ZOOM_KEY, String(z));
+  }, []);
+
+  // ── Auto-update check on launch ────────────────────────────────────────────
+  useEffect(() => {
+    checkForUpdates();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ── Dynamic window height ─────────────────────────────────────────────────
