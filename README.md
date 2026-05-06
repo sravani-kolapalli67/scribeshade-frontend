@@ -1,4 +1,4 @@
-# CraftVita — Frontend
+# ScribeShade — Frontend
 
 AI-powered interview assistant built as a **desktop-first** application using **Tauri v2 + React + TypeScript + Vite**. Also deployable as a web app on Vercel.
 
@@ -6,7 +6,7 @@ AI-powered interview assistant built as a **desktop-first** application using **
 
 ## What It Does
 
-CraftVita helps candidates during live interviews by providing:
+ScribeShade helps candidates during live interviews by providing:
 
 - **Real-time AI coaching** — transcribes audio and generates contextual answers via an always-on-top floating overlay
 - **Session management** — create, track, pause, and review interview sessions with full analytics
@@ -124,7 +124,7 @@ src/
 
 src-tauri/
 ├── src/lib.rs                # All Tauri commands and app setup
-├── tauri.conf.json           # Window config, deep-link scheme (craftvita://)
+├── tauri.conf.json           # Window config, deep-link scheme (ScribeShade://)
 └── capabilities/             # Tauri v2 permission declarations
 ```
 
@@ -157,8 +157,8 @@ pnpm build:win   # Windows installer → src-tauri/target/x86_64-pc-windows-msvc
 
 ## Related
 
-- [Backend repo](../CraftVita-01-backend/) — Express 5 + Prisma + BullMQ API server
+- [Backend repo](../ScribeShade-01-backend/) — Express 5 + Prisma + BullMQ API server
 - [API Reference](.github/docs/api-reference.md)
 - [Frontend Integration Guide](.github/docs/frontend-integration-guide.md)
 - [Real-time Events Guide](.github/docs/realtime-events-guide.md)
-- [Pricing & Credits](.github/docs/CraftVita%20Pricing%20%26%20Credits.md)
+- [Pricing & Credits](.github/docs/ScribeShade%20Pricing%20%26%20Credits.md)
