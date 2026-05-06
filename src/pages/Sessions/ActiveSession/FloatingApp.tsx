@@ -346,6 +346,33 @@ const AnswerArea: React.FC<{
 };
 
 // â”€â”€â”€ Main FloatingApp 
+
+// Compresses the raw PNG data-URL from capture_screen (typically 5-15 MB) to a
+// JPEG Blob of <= 1280 px wide at 65% quality (~200-400 KB) using the Canvas API.
+// Drastically reduces upload payload and backend recompression overhead.
+function compressScreenshotToBlob(dataUrl: string): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const MAX_WIDTH = 1280;
+      const scale = Math.min(1, MAX_WIDTH / img.width);
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) { reject(new Error("Canvas 2d context unavailable")); return; }
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob(
+        (blob) => (blob ? resolve(blob) : reject(new Error("Canvas toBlob returned null"))),
+        "image/jpeg",
+        0.65,
+      );
+    };
+    img.onerror = () => reject(new Error("Failed to load screenshot image"));
+    img.src = dataUrl;
+  });
+}
+
 const FloatingApp: React.FC = () => {
   // â”€â”€ Session context (received from launcher via "session-init" event) â”€â”€â”€
   const [sessionInfo, setSessionInfo] = useState<SessionInitData | null>(() => {
@@ -380,6 +407,8 @@ const FloatingApp: React.FC = () => {
   const lastSentHeightRef = useRef<number>(185);
   const heightDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isEmittingRef = useRef(false);
+  const isAnalyzeEmittingRef = useRef(false);
+  const [isCapturing, setIsCapturing] = useState(false);
 
   // â”€â”€ Stable refs so event-listeners never stale â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const sessionInfoRef = useRef<SessionInitData | null>(null);
@@ -446,6 +475,10 @@ const FloatingApp: React.FC = () => {
     } catch (err) {
       console.error("Error ending session:", err);
     } finally {
+      // Notify launcher to reset session state before showing it
+      await emit("session:reset").catch(() => {});
+      // Show the launcher widget instead of just closing the window
+      invoke("show_launcher_widget").catch(() => {});
       await getCurrentWindow().close();
     }
   }, [isEnding]);
@@ -844,7 +877,7 @@ useEffect(() => {
     };
   }, [miniState]);
 
-  // â”€â”€ Actions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
   const handleAiAnswerClick = useCallback(async () => {
     if (isEmittingRef.current || isAnswering) return;
     const info = sessionInfoRef.current;
@@ -883,32 +916,26 @@ useEffect(() => {
   ]);
 
   const handleAnalyzeScreenClick = useCallback(async () => {
-    if (isEmittingRef.current || isAnalyzing) return;
+    if (isAnalyzeEmittingRef.current || isAnalyzing) return;
     const info = sessionInfoRef.current;
     if (!info) return;
 
-    isEmittingRef.current = true;
+    isAnalyzeEmittingRef.current = true;
+    setIsCapturing(true);
     try {
+      // Capture raw PNG from Tauri, then compress to JPEG via Canvas before upload.
+      // This reduces the upload payload from ~10 MB (PNG) to ~200-400 KB (JPEG),
+      // eliminating most of the backend processing delay before streaming starts.
       const screenshotData = await invoke<string>("capture_screen");
-      // Convert base64 to Blob
-      const hasPrefix = screenshotData.includes(",");
-      const base64Data = hasPrefix
-        ? screenshotData.split(",")[1]
-        : screenshotData;
-      const contentType = hasPrefix
-        ? screenshotData.split(",")[0].split(":")[1].split(";")[0]
-        : "image/jpeg";
-      const binary = atob(base64Data);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      const blob = new Blob([bytes.buffer], { type: contentType });
+      const blob = await compressScreenshotToBlob(screenshotData);
       await handleAnalyzeScreen(info.sessionId, blob, selectedModelRef.current);
     } catch (err) {
       console.error("Failed to capture screen:", err);
       toast.error("Failed to capture screen");
     } finally {
+      setIsCapturing(false);
       setTimeout(() => {
-        isEmittingRef.current = false;
+        isAnalyzeEmittingRef.current = false;
       }, 800);
     }
   }, [isAnalyzing, handleAnalyzeScreen]);
@@ -964,23 +991,24 @@ useEffect(() => {
   if (isWindowCollapsed) {
     return (
       <div ref={rootRef} className="w-full h-full flex items-center">
-        <button
-          onClick={() => setIsWindowCollapsed(false)}
-          className="w-full h-full flex items-center justify-center gap-2 px-3 bg-zinc-900/95 backdrop-blur-2xl rounded-xl border border-white/10 hover:border-blue-500/40 hover:bg-zinc-800/90 transition-all active:scale-95 group"
-          title="Expand Craft Vita"
-        >
-          <div className="w-2 h-2 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)] animate-pulse shrink-0" />
-          <span className="text-[11px] font-bold text-white/60 group-hover:text-white uppercase tracking-widest transition-colors leading-none">
-            Craft Vita
-          </span>
-          {aiResponses.length > 0 && (
-            <span className="ml-1 flex items-center justify-center w-3.5 h-3.5 rounded-full bg-blue-500/30 border border-blue-500/50">
-              <span className="text-[8px] font-bold text-blue-300">
-                {aiResponses.length}
-              </span>
-            </span>
-          )}
-        </button>
+        <Tooltip delayDuration={300}>
+          <TooltipTrigger asChild>
+            <button
+              onClick={() => setIsWindowCollapsed(false)}
+              className="w-full h-full flex items-center justify-center gap-2 px-3 bg-zinc-900/95 backdrop-blur-2xl rounded-xl border border-white/10 hover:border-blue-500/40 hover:bg-zinc-800/90 transition-all active:scale-95 group"
+            >
+              <div className="w-2 h-2 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)] animate-pulse shrink-0" />
+              {aiResponses.length > 0 && (
+                <span className="ml-1 flex items-center justify-center w-3.5 h-3.5 rounded-full bg-blue-500/30 border border-blue-500/50">
+                  <span className="text-[8px] font-bold text-blue-300">
+                    {aiResponses.length}
+                  </span>
+                </span>
+              )}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">Expand ScribeShade</TooltipContent>
+        </Tooltip>
       </div>
     );
   }
@@ -1003,10 +1031,17 @@ useEffect(() => {
           {/* Left: Title & Drag Handle */}
           <div className="flex items-center gap-3 data-tauri-drag-region">
             <div className="flex items-center gap-2 drag">
-              <div className="w-2 h-2 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)] animate-pulse" />
-              <h1 className="text-xs font-bold text-white uppercase tracking-widest leading-none pointer-events-none">
-                Craft Vita
-              </h1>
+              <Tooltip delayDuration={300}>
+                <TooltipTrigger asChild>
+                  <div className="w-2 h-2 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)] animate-pulse cursor-default" />
+                </TooltipTrigger>
+                <TooltipContent
+                  side="bottom"
+                  className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
+                >
+                  ScribeShade
+                </TooltipContent>
+              </Tooltip>
             </div>
             <Tooltip delayDuration={500}>
               <TooltipTrigger asChild>
@@ -1152,9 +1187,16 @@ useEffect(() => {
                 </>
               ) : tabStatus === "error" ? (
                 <span className="flex items-center gap-2 text-rose-300/90">
-                  <span className="text-[11px] font-semibold truncate max-w-[260px]" title={tabError ?? "System audio unavailable"}>
-                    {tabError ?? "System audio unavailable"}
-                  </span>
+                  <Tooltip delayDuration={300}>
+                    <TooltipTrigger asChild>
+                      <span className="text-[11px] font-semibold truncate max-w-[260px] cursor-default">
+                        {tabError ?? "System audio unavailable"}
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent side="top" className="max-w-[280px]">
+                      {tabError ?? "System audio unavailable"}
+                    </TooltipContent>
+                  </Tooltip>
                   <button
                     type="button"
                     onClick={() => { void startSystemAudio(); }}
@@ -1406,7 +1448,7 @@ useEffect(() => {
             onAiAnswer={handleAiAnswerClick}
             onAnalyzeScreen={handleAnalyzeScreenClick}
             isAnswering={isAnswering}
-            isAnalyzing={isAnalyzing}
+            isAnalyzing={isAnalyzing || isCapturing}
             canAnswer={!!sessionInfo && messages.length > 0}
             canAnalyze={!!sessionInfo}
             isFullscreen={true}

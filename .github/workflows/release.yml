@@ -1,4 +1,4 @@
-name: Release CraftVita
+name: Release ScribeShade
 
 # Trigger: push to the `release` branch.
 # Workflow:
@@ -8,7 +8,7 @@ name: Release CraftVita
 #      GitHub Release, and uploads every artifact — fully automatic.
 #
 # Prerequisites (set once in repo Settings → Secrets → Actions):
-#   TAURI_SIGNING_PRIVATE_KEY         raw text of ~/.tauri/craftvita.key
+#   TAURI_SIGNING_PRIVATE_KEY         raw text of ~/.tauri/scribeshade.key
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  your key password (or empty string)
 
 on:
@@ -78,9 +78,9 @@ jobs:
         with:
           # __VERSION__ is replaced by tauri-action with the version from tauri.conf.json
           tagName: v__VERSION__
-          releaseName: CraftVita v__VERSION__
+          releaseName: ScribeShade v__VERSION__
           releaseBody: |
-            ## CraftVita v__VERSION__
+            ## ScribeShade v__VERSION__
 
             Download the installer for your platform below.
 

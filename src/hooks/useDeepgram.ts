@@ -24,6 +24,9 @@ export const useDeepgram = ({
   const socketRef = useRef<WebSocket | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  // Cached mic stream — persists across WS retries so getUserMedia (and the
+  // macOS permission dialog) is only triggered once per session.
+  const cachedMicStreamRef = useRef<MediaStream | null>(null);
   const isStartingRef = useRef(false);
   const ownsStreamRef = useRef(false);
   // Ref mirror of isTranscribing — avoids stale-closure bugs in retry callbacks.
@@ -89,15 +92,27 @@ export const useDeepgram = ({
         stream = new MediaStream(audioTracks);
         ownsStreamRef.current = false;
       } else {
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-            channelCount: 1,
-            sampleRate: 48000,
-          },
-        });
+        // Reuse the cached stream if its tracks are still live — this prevents
+        // repeated macOS permission dialogs when the WebSocket retries after a
+        // network error, because getUserMedia is only called the first time.
+        const cached = cachedMicStreamRef.current;
+        const isCachedLive =
+          cached !== null &&
+          cached.getAudioTracks().some((t) => t.readyState === "live");
+        if (isCachedLive) {
+          stream = cached!;
+        } else {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+              channelCount: 1,
+              sampleRate: 48000,
+            },
+          });
+          cachedMicStreamRef.current = stream;
+        }
         ownsStreamRef.current = true;
       }
 
@@ -127,7 +142,7 @@ export const useDeepgram = ({
         punctuate: "true",
         interim_results: "true",
         smart_format: "true",
-        tag: "craftvita",
+        tag: "scribeshade",
       });
       const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
 
@@ -315,6 +330,11 @@ export const useDeepgram = ({
       streamRef.current.getTracks().forEach((track) => track.stop());
     }
     streamRef.current = null;
+    // Release the cached mic stream so the next manual start gets a fresh one.
+    if (cachedMicStreamRef.current) {
+      cachedMicStreamRef.current.getTracks().forEach((track) => track.stop());
+      cachedMicStreamRef.current = null;
+    }
 
     setIsTranscribing(false);
     setIsConnecting(false);

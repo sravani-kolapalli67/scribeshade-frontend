@@ -65,13 +65,26 @@ const FRONTEND_URL = _rawFrontendUrl.startsWith("http")
   ? _rawFrontendUrl
   : `https://${_rawFrontendUrl}`;
 const WIDGET_W = 460;
-const APP_NAME = "CraftVita";
-const ZOOM_KEY = "craftvita.widget.zoom";
-const PRIVATE_KEY = "craftvita.widget.private";
-const AUTODETECT_KEY = "craftvita.widget.autodetect";
+const APP_NAME = "ScribeShade";
+const BACKEND_URL: string = import.meta.env.VITE_BACKEND_URL || "http://localhost:3200";
+const ZOOM_KEY = "scribeshade.widget.zoom";
+const PRIVATE_KEY = "scribeshade.widget.private";
+const AUTODETECT_KEY = "scribeshade.widget.autodetect";
 const ZOOM_STEP = 0.1;
 const ZOOM_MIN = 0.7;
 const ZOOM_MAX = 1.6;
+
+// Safe JSON parser — WKWebView throws "The string did not match the expected
+// pattern" when Response.json() receives non-JSON (e.g. HTML error pages).
+async function safeJson<T = unknown>(res: Response): Promise<T | null> {
+  const text = await res.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    console.warn("[WidgetApp] Non-JSON response from", res.url, "—", text.slice(0, 120));
+    return null;
+  }
+}
 
 const JOB_DESCRIPTION_REGEX = /^.{2,}/im;
 
@@ -115,15 +128,17 @@ function HoverTooltip({
   text,
   children,
   side = "bottom",
+  className,
 }: {
   text: string;
   children: React.ReactNode;
   side?: "bottom" | "top";
+  className?: string;
 }) {
   const [open, setOpen] = useState(false);
   return (
     <span
-      className="relative inline-flex"
+      className={cn("relative inline-flex", className)}
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={() => setOpen(false)}
     >
@@ -244,7 +259,7 @@ function SessionSelector({
         <span className="text-sm font-bold text-zinc-800">
           Select Session Type
         </span>
-        <HoverTooltip text="Free sessions are limited to 10 minutes.\nPremium sessions use 1 credit per minute and unlock AI responses.">
+        <HoverTooltip text="Free sessions are limited to 5 minutes.\nPremium sessions use 0.5 credits per minute and unlock AI responses.">
           <Info className="w-3.5 h-3.5 text-zinc-400 cursor-help" />
         </HoverTooltip>
       </div>
@@ -425,7 +440,7 @@ function WidgetSelect({
 // ─── AuthScreen ───────────────────────────────────────────────────────────────
 // Opens the SYSTEM BROWSER at the web sign-in page.
 // The web page, after sign-in, calls the backend to create a Clerk sign-in
-// ticket and redirects to craftvita://auth-callback?ticket=TOKEN.
+// ticket and redirects to scribeshade://auth-callback?ticket=TOKEN.
 // Rust's on_open_url handler emits "auth:tauri-ticket" to this webview.
 // The useEffect in WidgetContent listens for that event and signs in here.
 //
@@ -843,6 +858,33 @@ function WidgetContent() {
     };
   }, []);
 
+  // ── Session ended — reset creation state so launcher reopens at step 0 ────
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<void>("session:reset", () => {
+      setCreationStep(0);
+      setIsCreating(false);
+      setSessionInfo({
+        companyName: "",
+        jobDescription: "",
+        resumeId: "",
+        documentId: "",
+        language: "English",
+        simpleLanguage: false,
+        extraContext: "",
+        aiModel: "google/gemma-4-26b-a4b-it",
+        autoGenerateAI: true,
+        saveTranscript: true,
+        isFree: false,
+      });
+      setTab("create");
+      setCollapsed(false);
+    })
+      .then((fn) => { unlisten = fn; })
+      .catch(console.error);
+    return () => { unlisten?.(); };
+  }, []);
+
   // Fetch resumes and documents
   useEffect(() => {
     if (!isSignedIn || !user?.id) return;
@@ -862,11 +904,11 @@ function WidgetContent() {
           const token = await getToken();
           if (token) {
             const meRes = await fetch(
-              `${import.meta.env.VITE_BACKEND_URL}/api/auth/me`,
+              `${BACKEND_URL}/api/auth/me`,
               { headers: { Authorization: `Bearer ${token}` } },
             );
             if (meRes.ok) {
-              const meData = await meRes.json();
+              const meData = await safeJson<{ id: string }>(meRes);
               if (meData?.id) {
                 userId = meData.id as string;
                 localStorage.setItem("userId", userId);
@@ -884,23 +926,23 @@ function WidgetContent() {
 
         const [resumeRes, docRes] = await Promise.all([
           fetch(
-            `${import.meta.env.VITE_BACKEND_URL}/api/resume/list?userId=${userId}`,
+            `${BACKEND_URL}/api/resume/list?userId=${userId}`,
             { headers: authHeaders },
           ),
           fetch(
-            `${import.meta.env.VITE_BACKEND_URL}/api/document/list?userId=${userId}`,
+            `${BACKEND_URL}/api/document/list?userId=${userId}`,
             { headers: authHeaders },
           ),
         ]);
 
         if (!cancelled) {
-          const resumeData = resumeRes.ok ? await resumeRes.json() : [];
+          const resumeData = resumeRes.ok ? await safeJson<unknown>(resumeRes) : null;
           setResumes(
-            Array.isArray(resumeData) ? resumeData : resumeData.data || [],
+            Array.isArray(resumeData) ? resumeData : (resumeData as any)?.data || [],
           );
 
-          const docData = docRes.ok ? await docRes.json() : [];
-          setDocuments(Array.isArray(docData) ? docData : docData.data || []);
+          const docData = docRes.ok ? await safeJson<unknown>(docRes) : null;
+          setDocuments(Array.isArray(docData) ? docData : (docData as any)?.data || []);
         }
       } catch (err) {
         console.error("[WidgetApp] Failed to fetch resumes/documents:", err);
@@ -954,7 +996,7 @@ function WidgetContent() {
       formData.append("saveTranscript", sessionInfo.saveTranscript.toString());
 
       const createRes = await fetch(
-        `${import.meta.env.VITE_BACKEND_URL}/api/session/create-session`,
+        `${BACKEND_URL}/api/session/create-session`,
         {
           method: "POST",
           body: formData,
@@ -962,19 +1004,20 @@ function WidgetContent() {
       );
 
       if (!createRes.ok) throw new Error("Failed to create session");
-      const createData = await createRes.json();
+      const createData = await safeJson<{ id?: string; sessionId?: string }>(createRes);
+      if (!createData) throw new Error("Invalid response from create session");
       const sessionId = createData.id || createData.sessionId;
 
       // 2. Activate Session
       const activateRes = await fetch(
-        `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionId}/activate`,
+        `${BACKEND_URL}/api/session/${sessionId}/activate`,
         {
           method: "POST",
         },
       );
 
       if (!activateRes.ok) throw new Error("Failed to activate session");
-      const activateData = await activateRes.json();
+      const activateData = await safeJson<{ startedAt?: string; maxAllowedMinutes?: number }>(activateRes) ?? {};
 
       // 3. Send session context directly to the mini window via event
       await emit("session-init", {
@@ -1027,59 +1070,62 @@ function WidgetContent() {
               className="flex items-center gap-2 flex-1 min-w-0 cursor-grab active:cursor-grabbing"
               onMouseDown={handleDragStart}
             >
-              <img
-                src="/src-tauri/icons/icon.png"
-                alt=""
-                className="w-6 h-6 rounded-lg flex-shrink-0"
-                onError={(e) => {
-                  (e.target as HTMLImageElement).style.display = "none";
-                }}
-              />
-              <span className="text-sm font-semibold text-zinc-800 truncate">
-                {APP_NAME}
-              </span>
+              <HoverTooltip text={APP_NAME}>
+                <img
+                  src="/src-tauri/icons/icon.png"
+                  alt={APP_NAME}
+                  className="w-6 h-6 rounded-lg flex-shrink-0"
+                  onError={(e) => {
+                    (e.target as HTMLImageElement).style.display = "none";
+                  }}
+                />
+              </HoverTooltip>
             </div>
 
             <CreditsBadge />
 
             <div className="flex items-center gap-0.5 ml-1">
-              <button
-                onClick={() => setMenuOpen((o) => !o)}
-                className={cn(
-                  "p-1.5 rounded-xl transition-colors border",
-                  menuOpen
-                    ? "bg-zinc-100 border-zinc-200 text-zinc-700"
-                    : "border-transparent hover:bg-zinc-100 text-zinc-400 hover:text-zinc-600",
-                )}
-                title="Menu"
-              >
-                <MoreVertical className="w-3.5 h-3.5" />
-              </button>
-              <button
-                onMouseDown={handleDragStart}
-                className="p-1.5 rounded-xl border border-zinc-200 hover:bg-zinc-100 text-zinc-500 hover:text-zinc-700 transition-colors cursor-grab active:cursor-grabbing"
-                title="Drag"
-              >
-                <Move className="w-3.5 h-3.5" />
-              </button>
-              <button
-                onClick={handleCollapseToggle}
-                className="p-1.5 rounded-xl border border-zinc-200 hover:bg-zinc-100 text-zinc-500 hover:text-zinc-700 transition-colors"
-                title={collapsed ? "Expand" : "Collapse"}
-              >
-                {collapsed ? (
-                  <ChevronDown className="w-3.5 h-3.5" />
-                ) : (
-                  <ChevronUp className="w-3.5 h-3.5" />
-                )}
-              </button>
-              <button
-                onClick={handleClose}
-                className="p-1.5 rounded-xl bg-red-500 hover:bg-red-600 text-white transition-colors ml-0.5"
-                title="Close"
-              >
-                <X className="w-3 h-3" />
-              </button>
+              <HoverTooltip text="Menu" side="bottom">
+                <button
+                  onClick={() => setMenuOpen((o) => !o)}
+                  className={cn(
+                    "p-1.5 rounded-xl transition-colors border",
+                    menuOpen
+                      ? "bg-zinc-100 border-zinc-200 text-zinc-700"
+                      : "border-transparent hover:bg-zinc-100 text-zinc-400 hover:text-zinc-600",
+                  )}
+                >
+                  <MoreVertical className="w-3.5 h-3.5" />
+                </button>
+              </HoverTooltip>
+              <HoverTooltip text="Drag" side="bottom">
+                <button
+                  onMouseDown={handleDragStart}
+                  className="p-1.5 rounded-xl border border-zinc-200 hover:bg-zinc-100 text-zinc-500 hover:text-zinc-700 transition-colors cursor-grab active:cursor-grabbing"
+                >
+                  <Move className="w-3.5 h-3.5" />
+                </button>
+              </HoverTooltip>
+              <HoverTooltip text={collapsed ? "Expand" : "Collapse"} side="bottom">
+                <button
+                  onClick={handleCollapseToggle}
+                  className="p-1.5 rounded-xl border border-zinc-200 hover:bg-zinc-100 text-zinc-500 hover:text-zinc-700 transition-colors"
+                >
+                  {collapsed ? (
+                    <ChevronDown className="w-3.5 h-3.5" />
+                  ) : (
+                    <ChevronUp className="w-3.5 h-3.5" />
+                  )}
+                </button>
+              </HoverTooltip>
+              <HoverTooltip text="Close" side="bottom">
+                <button
+                  onClick={handleClose}
+                  className="p-1.5 rounded-xl bg-red-500 hover:bg-red-600 text-white transition-colors ml-0.5"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </HoverTooltip>
             </div>
           </div>
 
@@ -1289,13 +1335,13 @@ function WidgetContent() {
                                         ? "Job description is too short — add more detail."
                                         : "";
                                   return (
+                                <HoverTooltip text={tooltipMsg} side="top" className="w-full">
                                 <button
                                   onClick={() => setCreationStep(2)}
                                   disabled={!canProceed}
                                   aria-disabled={!canProceed}
-                                  title={tooltipMsg || undefined}
                                   className={cn(
-                                    "py-2.5 rounded-2xl text-sm font-bold transition-all active:scale-[0.98]",
+                                    "w-full py-2.5 rounded-2xl text-sm font-bold transition-all active:scale-[0.98]",
                                     canProceed
                                       ? "bg-zinc-900 text-white hover:bg-zinc-800 shadow-lg shadow-black/10"
                                       : "bg-zinc-200 text-zinc-400 cursor-not-allowed",
@@ -1303,6 +1349,7 @@ function WidgetContent() {
                                 >
                                   Next
                                 </button>
+                                </HoverTooltip>
                                   );
                                 })()}
                               </div>

@@ -220,9 +220,31 @@ async fn capture_screen(window: Window) -> Result<String, String> {
 
 #[tauri::command]
 async fn show_mini_top_center(app: AppHandle) -> Result<(), String> {
-    let window = app
-        .get_webview_window("mini")
-        .ok_or("mini window not found")?;
+    // The mini window is destroyed when a session ends (getCurrentWindow().close()).
+    // Re-create it with the same config as tauri.conf.json when it no longer exists.
+    let window = match app.get_webview_window("mini") {
+        Some(w) => w,
+        None => WebviewWindowBuilder::new(
+            &app,
+            "mini",
+            WebviewUrl::App("floating.html".into()),
+        )
+        .title("ScribeShade Floating Screen")
+        .inner_size(700f64, 360f64)
+        .transparent(true)
+        .decorations(false)
+        .always_on_top(true)
+        .minimizable(false)
+        .maximizable(false)
+        .resizable(false)
+        .skip_taskbar(true)
+        .visible(false)
+        .visible_on_all_workspaces(true)
+        .accept_first_mouse(true)
+        .content_protected(true)
+        .build()
+        .map_err(|e| e.to_string())?,
+    };
 
     window
         .set_size(LogicalSize::new(700u32, 222u32))
@@ -1218,7 +1240,7 @@ async fn start_system_audio_transcription(
                 language,
                 sample_rate: 48000,
                 channels: 1,
-                tag: "craftvita-rust",
+                tag: "scribeshade-rust",
             },
             SttChannel::System,
             pcm_rx,
@@ -1321,7 +1343,7 @@ async fn start_mic_transcription(
                 language,
                 sample_rate,
                 channels: 1,
-                tag: "craftvita-mic",
+                tag: "scribeshade-mic",
             },
             SttChannel::Mic,
             pcm_rx,
@@ -1424,7 +1446,7 @@ async fn start_system_audio_transcription(
                 language,
                 sample_rate,
                 channels: 1,
-                tag: "craftvita-rust",
+                tag: "scribeshade-rust",
             },
             SttChannel::System,
             pcm_rx,
@@ -1527,7 +1549,7 @@ async fn start_mic_transcription(
                 language,
                 sample_rate,
                 channels: 1,
-                tag: "craftvita-mic",
+                tag: "scribeshade-mic",
             },
             SttChannel::Mic,
             pcm_rx,
@@ -1717,7 +1739,7 @@ async fn open_main_dashboard(
         let url = WebviewUrl::App(path.into());
 
         WebviewWindowBuilder::new(&app, "main", url)
-            .title("CraftVita")
+            .title("ScribeShade")
             .decorations(false)
             .inner_size(1200.0, 800.0)
             .center()
@@ -1974,12 +1996,12 @@ pub fn run() {
             }
 
             // ── Deep-link: handle auth ticket + bring widget to front ────
-            // craftvita://auth-callback?ticket=TOKEN  ← browser login flow
+            // scribeshade://auth-callback?ticket=TOKEN  ← browser login flow
             //   Extract the ticket and emit it to the launcher webview so the
             //   widget can sign in via Clerk's "ticket" strategy without ever
             //   showing a webview or the main window.
             //
-            // Any other deep link (e.g. craftvita://oauth-callback) just
+            // Any other deep link (e.g. scribeshade://oauth-callback) just
             // brings the appropriate window to the front as before.
             let deep_link_handle = app.handle().clone();
             app.handle().deep_link().on_open_url(move |event| {
@@ -1987,7 +2009,7 @@ pub fn run() {
                 let url_str = urls.first().map(|u| u.as_str().to_owned()).unwrap_or_default();
 
                 // ── auth-callback: extract ticket, emit to launcher ────────
-                if url_str.starts_with("craftvita://auth-callback") {
+                if url_str.starts_with("scribeshade://auth-callback") {
                     if let Ok(parsed) = url::Url::parse(&url_str) {
                         let ticket = parsed
                             .query_pairs()

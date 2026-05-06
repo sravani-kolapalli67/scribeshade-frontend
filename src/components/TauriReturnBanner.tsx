@@ -53,7 +53,7 @@ export function TauriReturnBanner() {
           )}
         </div>
         <span className="text-sm font-medium truncate">
-          {loading ? "Returning to CraftVita…" : "You signed in via CraftVita desktop"}
+          {loading ? "Returning to ScribeShade…" : "You signed in via ScribeShade desktop"}
         </span>
       </div>
       <div className="flex items-center gap-2 flex-shrink-0">
@@ -62,7 +62,7 @@ export function TauriReturnBanner() {
           disabled={loading}
           className="text-xs font-semibold bg-white text-zinc-900 rounded-lg px-3 py-1.5 hover:bg-zinc-100 transition disabled:opacity-60"
         >
-          {loading ? "Redirecting…" : "↩ Return to CraftVita"}
+          {loading ? "Redirecting…" : "↩ Return to ScribeShade"}
         </button>
         <button
           onClick={handleDismiss}

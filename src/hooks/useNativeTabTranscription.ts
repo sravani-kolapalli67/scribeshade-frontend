@@ -138,7 +138,7 @@ export function useNativeTabTranscription({
       // multichannel=true lets Deepgram transcribe all channels independently;
       // without it stereo loopback audio often returns empty results.
       (meta.channels > 1 ? `&multichannel=true` : ``) +
-      `&tag=craftvita-display`;
+      `&tag=scribeshade-display`;
 
     const dgWs = new WebSocket(dgUrl, ["token", apiKeyRef.current]);
     dgWsRef.current = dgWs;

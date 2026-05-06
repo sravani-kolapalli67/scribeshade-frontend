@@ -159,7 +159,7 @@ const SignInPage = () => {
           <div>
             <h1 className="text-lg font-semibold text-slate-900">You're signed in!</h1>
             <p className="mt-1 text-sm text-slate-500">
-              {autoRedirecting ? "Returning to CraftVita…" : "Ready to return to CraftVita."}
+              {autoRedirecting ? "Returning to ScribeShade…" : "Ready to return to ScribeShade."}
             </p>
           </div>
           <button
@@ -168,7 +168,7 @@ const SignInPage = () => {
             onClick={() => returnToTauri(() => getToken())}
             className="w-full h-11 rounded-xl bg-zinc-900 text-sm font-semibold text-white hover:bg-zinc-800 transition active:scale-[0.97] disabled:opacity-60"
           >
-            ↩ Open CraftVita
+            ↩ Open ScribeShade
           </button>
           <button
             type="button"
@@ -187,10 +187,10 @@ const SignInPage = () => {
       <div className="w-full max-w-md rounded-2xl shadow-xl border border-slate-100 bg-white">
         {/* Header */}
         <div className="px-8 pt-8 pb-6 text-center">
-          <h1 className="text-xl font-semibold text-slate-900">Sign in to CraftVita</h1>
+          <h1 className="text-xl font-semibold text-slate-900">Sign in to ScribeShade</h1>
           {fromTauri && (
             <p className="mt-1.5 text-xs font-medium text-blue-600 bg-blue-50 rounded-full px-3 py-1 inline-block">
-              Signing in for CraftVita desktop app
+              Signing in for ScribeShade desktop app
             </p>
           )}
           {!fromTauri && (

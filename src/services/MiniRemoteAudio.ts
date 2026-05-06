@@ -266,7 +266,7 @@ export class MiniRemoteAudio {
       // Deepgram multichannel response format (channels[] vs channel) mismatch.
       `&sample_rate=${meta.sampleRate}` +
       `&channels=${meta.channels}` +
-      `&tag=craftvita-remote`;
+      `&tag=scribeshade-remote`;
 
     const dg = new WebSocket(url, ["token", this.apiKey]);
     this.dgWs = dg;

@@ -28,3 +28,4 @@ D:\ScribeShade\scribeshade-01-frontend\~\.tauri
 
 # Auto-updater manifest — generated per release, uploaded as a release asset
 latest.json
+.vercel

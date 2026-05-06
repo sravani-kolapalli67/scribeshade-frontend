@@ -75,8 +75,8 @@ function App() {
     }
   }, [isSignedIn, isLoaded]);
 
-  // Listen for craftvita:// deep-links from the OS (e.g. "Return to ScribeShade"
-  // button after OAuth, or a craftvita://oauth-callback from Clerk).
+  // Listen for scribeshade:// deep-links from the OS (e.g. "Return to ScribeShade"
+  // button after OAuth, or a scribeshade://oauth-callback from Clerk).
   // Rust already focuses the window; this handler covers URL routing.
   useEffect(() => {
     if (!isTauri()) return;
@@ -89,7 +89,7 @@ function App() {
         .setFocus()
         .catch(() => undefined);
 
-      if (url.startsWith("craftvita://oauth-callback")) {
+      if (url.startsWith("scribeshade://oauth-callback")) {
         const parsed = new URL(url);
         navigate(`/sso-callback${parsed.search}`);
       }
@@ -117,7 +117,7 @@ function App() {
       <div className="min-h-screen bg-white flex items-center justify-center p-4">
         <div className="animate-pulse flex flex-col items-center gap-4">
           <div className="w-12 h-12 rounded-full border-4 border-blue-500 border-t-transparent animate-spin"></div>
-          <p className="text-slate-600 font-medium">Loading Craft Vita...</p>
+          <p className="text-slate-600 font-medium">Loading ScribeShade...</p>
         </div>
       </div>
     );
