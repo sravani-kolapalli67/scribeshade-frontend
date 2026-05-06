@@ -103,6 +103,14 @@ interface Document {
   uploadedAt: string;
 }
 
+interface AIProject {
+  id: string;
+  position: string;
+  jobDescription: string;
+  createdAt: string;
+  projects: Array<{ projectHeader?: { title?: string } }>;
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function formatCredits(raw: string | null | undefined): string {
@@ -769,9 +777,12 @@ function WidgetContent() {
     autoGenerateAI: true,
     saveTranscript: true,
     isFree: false,
+    projectIds: [] as string[],
   });
   const [resumes, setResumes] = useState<Resume[]>([]);
   const [documents, setDocuments] = useState<Document[]>([]);
+  const [aiProjects, setAIProjects] = useState<AIProject[]>([]);
+  const [isLoadingProjects, setIsLoadingProjects] = useState(false);
   const [isLoadingResumes, setIsLoadingResumes] = useState(false);
   const [isLoadingDocs, setIsLoadingDocs] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
@@ -876,6 +887,7 @@ function WidgetContent() {
         autoGenerateAI: true,
         saveTranscript: true,
         isFree: false,
+        projectIds: [],
       });
       setTab("create");
       setCollapsed(false);
@@ -894,6 +906,7 @@ function WidgetContent() {
     const fetchData = async () => {
       setIsLoadingResumes(true);
       setIsLoadingDocs(true);
+      setIsLoadingProjects(true);
 
       try {
         // Resolve the backend internal userId — the Clerk user.id is NOT the same.
@@ -924,13 +937,17 @@ function WidgetContent() {
           ? { Authorization: `Bearer ${token}` }
           : {};
 
-        const [resumeRes, docRes] = await Promise.all([
+        const [resumeRes, docRes, projectsRes] = await Promise.all([
           fetch(
             `${BACKEND_URL}/api/resume/list?userId=${userId}`,
             { headers: authHeaders },
           ),
           fetch(
             `${BACKEND_URL}/api/document/list?userId=${userId}`,
+            { headers: authHeaders },
+          ),
+          fetch(
+            `${BACKEND_URL}/api/projects/user/${userId}`,
             { headers: authHeaders },
           ),
         ]);
@@ -943,6 +960,10 @@ function WidgetContent() {
 
           const docData = docRes.ok ? await safeJson<unknown>(docRes) : null;
           setDocuments(Array.isArray(docData) ? docData : (docData as any)?.data || []);
+
+          const projectsData = projectsRes.ok ? await safeJson<unknown>(projectsRes) : null;
+          const rawProjects = Array.isArray(projectsData) ? projectsData : (projectsData as any)?.data || [];
+          setAIProjects(rawProjects as AIProject[]);
         }
       } catch (err) {
         console.error("[WidgetApp] Failed to fetch resumes/documents:", err);
@@ -950,6 +971,7 @@ function WidgetContent() {
         if (!cancelled) {
           setIsLoadingResumes(false);
           setIsLoadingDocs(false);
+          setIsLoadingProjects(false);
         }
       }
     };
@@ -994,6 +1016,9 @@ function WidgetContent() {
       formData.append("aiModel", sessionInfo.aiModel);
       formData.append("autoGenerateAI", sessionInfo.autoGenerateAI.toString());
       formData.append("saveTranscript", sessionInfo.saveTranscript.toString());
+      if (sessionInfo.projectIds.length > 0) {
+        formData.append("projectIds", JSON.stringify(sessionInfo.projectIds));
+      }
 
       const createRes = await fetch(
         `${BACKEND_URL}/api/session/create-session`,
@@ -1503,6 +1528,77 @@ function WidgetContent() {
                                     />
                                   </div>
                                 </div>
+
+                                {/* ── AI Projects context ── */}
+                                {(aiProjects.length > 0 || isLoadingProjects) && (
+                                  <div className="space-y-1.5">
+                                    <div className="flex items-center gap-1.5">
+                                      <Folder className="w-4 h-4 text-zinc-600" />
+                                      <Label className="text-sm font-bold text-zinc-800">
+                                        AI Projects Context
+                                      </Label>
+                                      <HoverTooltip text="Select AI-generated projects to include as additional context. The AI will use these as real project experience when answering questions.">
+                                        <Info className="w-3 h-3 text-zinc-400 cursor-help" />
+                                      </HoverTooltip>
+                                      <span className="px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700 text-[10px] font-bold">
+                                        Optional
+                                      </span>
+                                    </div>
+                                    {isLoadingProjects ? (
+                                      <div className="flex items-center gap-2 text-xs text-zinc-400 py-1">
+                                        <Loader2 className="w-3 h-3 animate-spin" />
+                                        Loading projects...
+                                      </div>
+                                    ) : (
+                                      <div className="flex flex-col gap-1 max-h-[110px] overflow-y-auto pr-0.5">
+                                        {aiProjects.map((proj) => {
+                                          const isSelected = sessionInfo.projectIds.includes(proj.id);
+                                          const firstTitle = proj.projects?.[0]?.projectHeader?.title;
+                                          const label = firstTitle || proj.position || "AI Project";
+                                          return (
+                                            <button
+                                              key={proj.id}
+                                              type="button"
+                                              onClick={() =>
+                                                setSessionInfo((p) => ({
+                                                  ...p,
+                                                  projectIds: isSelected
+                                                    ? p.projectIds.filter((id) => id !== proj.id)
+                                                    : [...p.projectIds, proj.id],
+                                                }))
+                                              }
+                                              className={cn(
+                                                "flex items-center gap-2 px-2.5 py-1.5 rounded-xl text-xs font-medium border transition-all text-left",
+                                                isSelected
+                                                  ? "bg-violet-50 border-violet-300 text-violet-800"
+                                                  : "bg-white border-zinc-200 text-zinc-700 hover:border-zinc-300 hover:bg-zinc-50",
+                                              )}
+                                            >
+                                              <div
+                                                className={cn(
+                                                  "w-3.5 h-3.5 rounded-sm border-2 flex-shrink-0 flex items-center justify-center",
+                                                  isSelected
+                                                    ? "bg-violet-600 border-violet-600"
+                                                    : "border-zinc-300",
+                                                )}
+                                              >
+                                                {isSelected && (
+                                                  <svg className="w-2 h-2 text-white" fill="none" stroke="currentColor" strokeWidth={3} viewBox="0 0 12 12">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" d="M2 6l3 3 5-5" />
+                                                  </svg>
+                                                )}
+                                              </div>
+                                              <span className="truncate">{label}</span>
+                                              <span className="ml-auto flex-shrink-0 text-[10px] text-zinc-400">
+                                                {proj.projects?.length ?? 0} project{(proj.projects?.length ?? 0) !== 1 ? "s" : ""}
+                                              </span>
+                                            </button>
+                                          );
+                                        })}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
                               </div>
 
                               <div className="grid grid-cols-2 gap-2 pt-2">
