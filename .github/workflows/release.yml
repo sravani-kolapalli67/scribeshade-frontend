@@ -82,8 +82,8 @@ jobs:
           # keys are undefined → nothing works.
           #
           # Add each of these to: repo Settings → Secrets and variables → Actions
-          VITE_BACKEND_URL: https://test.backend.scribeshade.org
-          VITE_FRONTEND_URL: https://scribeshade-01-frontend.vercel.app
+          VITE_BACKEND_URL: "https://test.backend.scribeshade.org"
+          VITE_FRONTEND_URL: "https://scribeshade-01-frontend.vercel.app"
           VITE_CLERK_PUBLISHABLE_KEY: ${{ secrets.VITE_CLERK_PUBLISHABLE_KEY }}
           VITE_DEEPGRAM_API_KEY: ${{ secrets.VITE_DEEPGRAM_API_KEY }}
           VITE_RAZORPAY_KEY_ID: ${{ secrets.VITE_RAZORPAY_KEY_ID }}

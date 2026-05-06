@@ -3,7 +3,7 @@ use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
 use screenshots::Screen;
 use base64::{Engine as _, engine::general_purpose};
-use std::sync::{Arc, atomic::{AtomicU64, AtomicBool, Ordering}};
+use std::sync::{Arc, atomic::{AtomicU64, AtomicBool, AtomicU8, Ordering}};
 use url::Url as NavUrl;
 
 // Deepgram realtime transport (macOS + Windows only).
@@ -22,7 +22,19 @@ static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 // as BlackHole that routes app/tab audio) in Rust via cpal, then stream raw
 // PCM frames over a localhost WebSocket so the frontend can feed them to
 // Deepgram directly.
+//
+// 3-state guard: 0 = STOPPED, 1 = STARTING, 2 = RUNNING
+// compare_exchange(0→1) ensures only one startup attempt proceeds at a time;
+// any concurrent call while in STARTING or RUNNING returns early.
+// This eliminates the race window between "starting" and "port ready" that
+// caused repeated macOS TCC (permission) prompts.
+const AUDIO_STOPPED: u8 = 0;
+const AUDIO_STARTING: u8 = 1;
+const AUDIO_RUNNING_STATE: u8 = 2;
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+static AUDIO_STATE: AtomicU8 = AtomicU8::new(AUDIO_STOPPED);
+// Keep AtomicBool for the cpal loop-exit signal (stream keep-alive thread reads this)
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 static AUDIO_RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -33,6 +45,10 @@ static AUDIO_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::
 /// Captures system/tab audio from the primary display — does NOT require a
 /// virtual audio device (BlackHole/Loopback).  Requires macOS 13.0+ and the
 /// user to have granted Screen Recording permission.
+///
+/// Same 3-state guard: 0 = STOPPED, 1 = STARTING, 2 = RUNNING
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+static DISPLAY_AUDIO_STATE: AtomicU8 = AtomicU8::new(AUDIO_STOPPED);
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 static DISPLAY_AUDIO_RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -426,26 +442,56 @@ async fn start_audio_stream(device_name: Option<String>) -> Result<u16, String> 
     use axum::extract::State;
     use tokio::sync::broadcast;
 
-    if AUDIO_RUNNING.load(Ordering::SeqCst) {
-        let port = AUDIO_PORT.load(Ordering::SeqCst);
-        if port != 0 {
-            return Ok(port);
+    // ── 3-state idempotency guard ─────────────────────────────────────────
+    // compare_exchange(STOPPED → STARTING) is the only path that proceeds.
+    // Any concurrent call while STARTING or RUNNING returns early without
+    // touching the OS mic device — preventing duplicate TCC permission prompts.
+    match AUDIO_STATE.compare_exchange(
+        AUDIO_STOPPED, AUDIO_STARTING, Ordering::SeqCst, Ordering::SeqCst,
+    ) {
+        Ok(_) => {} // we own the startup
+        Err(AUDIO_STARTING) => {
+            // First startup still in progress — caller should retry after a short delay
+            return Err("mic audio stream is already starting".into());
         }
+        Err(_) => {
+            // Already RUNNING — return the existing port
+            let port = AUDIO_PORT.load(Ordering::SeqCst);
+            if port != 0 { return Ok(port); }
+            return Err("mic audio stream is running but port is not ready yet".into());
+        }
+    }
+
+    // Helper that resets state on any failure path
+    macro_rules! fail {
+        ($msg:expr) => {{
+            AUDIO_RUNNING.store(false, Ordering::SeqCst);
+            AUDIO_PORT.store(0, Ordering::SeqCst);
+            AUDIO_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+            return Err($msg.to_string());
+        }};
     }
 
     let host = cpal::default_host();
 
     let device = if let Some(ref name) = device_name {
-        host.input_devices()
-            .map_err(|e| e.to_string())?
-            .find(|d| d.name().map(|n| n.contains(name.as_str())).unwrap_or(false))
-            .ok_or_else(|| format!("Audio device '{}' not found", name))?
+        match host.input_devices() {
+            Ok(mut devs) => devs
+                .find(|d| d.name().map(|n| n.contains(name.as_str())).unwrap_or(false))
+                .ok_or_else(|| { AUDIO_STATE.store(AUDIO_STOPPED, Ordering::SeqCst); format!("Audio device '{}' not found", name) })?,
+            Err(e) => fail!(e.to_string()),
+        }
     } else {
-        host.default_input_device()
-            .ok_or("No default input device")?
+        match host.default_input_device() {
+            Some(d) => d,
+            None => fail!("No default input device found. Check microphone access in System Settings → Privacy & Security → Microphone."),
+        }
     };
 
-    let config = device.default_input_config().map_err(|e| e.to_string())?;
+    let config = match device.default_input_config() {
+        Ok(c) => c,
+        Err(e) => fail!(e.to_string()),
+    };
     let sample_rate = config.sample_rate().0;
     let channels = config.channels() as u32;
 
@@ -454,19 +500,22 @@ async fn start_audio_stream(device_name: Option<String>) -> Result<u16, String> 
     let tx_arc = Arc::new(tx);
     let tx_capture = tx_arc.clone();
 
-    // Spawn cpal on a dedicated OS thread (cpal streams are !Send)
+    // Startup handshake: thread signals success/failure before we return Ok(port).
+    // Without this the frontend could retry while macOS permission is unresolved,
+    // causing repeated TCC dialogs.
+    let (init_tx, init_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+
     AUDIO_RUNNING.store(true, Ordering::SeqCst);
+
     std::thread::spawn(move || {
         let tx = tx_capture;
-
-        let err_fn = |e| eprintln!("[cpal] stream error: {e}");
+        let err_fn = |e| eprintln!("[cpal mic] stream error: {e}");
 
         let stream = match config.sample_format() {
             cpal::SampleFormat::F32 => device.build_input_stream(
                 &config.into(),
                 move |data: &[f32], _| {
                     if !AUDIO_RUNNING.load(Ordering::Relaxed) { return; }
-                    // Convert f32 → i16 PCM
                     let pcm: Vec<u8> = data.iter().flat_map(|&s| {
                         let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
                         v.to_le_bytes()
@@ -484,24 +533,69 @@ async fn start_audio_stream(device_name: Option<String>) -> Result<u16, String> 
                 },
                 err_fn, None,
             ),
-            _ => return,
+            _ => {
+                AUDIO_RUNNING.store(false, Ordering::SeqCst);
+                AUDIO_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+                let _ = init_tx.send(Err("Unsupported sample format".into()));
+                return;
+            }
         };
 
-        if let Ok(s) = stream {
-            let _ = s.play();
-            while AUDIO_RUNNING.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_millis(50));
+        match stream {
+            Ok(s) => {
+                if let Err(e) = s.play() {
+                    AUDIO_RUNNING.store(false, Ordering::SeqCst);
+                    AUDIO_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+                    let _ = init_tx.send(Err(format!("Failed to start mic stream: {e}")));
+                    return;
+                }
+                let _ = init_tx.send(Ok(()));
+                while AUDIO_RUNNING.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                // stream dropped here → cpal stops
             }
-            // stream dropped here → cpal stops
+            Err(e) => {
+                AUDIO_RUNNING.store(false, Ordering::SeqCst);
+                AUDIO_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+                let _ = init_tx.send(Err(format!(
+                    "Failed to open mic device: {e}. \
+                     Grant access in System Settings → Privacy & Security → Microphone."
+                )));
+            }
         }
     });
 
+    // Wait up to 8 s for the cpal thread to confirm the stream started.
+    match tokio::time::timeout(std::time::Duration::from_secs(8), init_rx).await {
+        Ok(Ok(Ok(()))) => {} // stream confirmed started
+        Ok(Ok(Err(e))) => {
+            eprintln!("[start_audio_stream] cpal init FAILED: {e}");
+            AUDIO_PORT.store(0, Ordering::SeqCst);
+            AUDIO_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+            return Err(e);
+        }
+        _ => {
+            let msg = "Mic stream timed out — check Microphone permission in System Settings.";
+            eprintln!("[start_audio_stream] cpal init TIMEOUT");
+            AUDIO_RUNNING.store(false, Ordering::SeqCst);
+            AUDIO_PORT.store(0, Ordering::SeqCst);
+            AUDIO_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+            return Err(msg.into());
+        }
+    }
+
     // Bind axum WebSocket server on a random port
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|e| e.to_string())?;
-    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+        Ok(l) => l,
+        Err(e) => fail!(e.to_string()),
+    };
+    let port = match listener.local_addr() {
+        Ok(a) => a.port(),
+        Err(e) => fail!(e.to_string()),
+    };
     AUDIO_PORT.store(port, Ordering::SeqCst);
+    AUDIO_STATE.store(AUDIO_RUNNING_STATE, Ordering::SeqCst);
 
     // Include sample_rate and channel count in the first message so the
     // frontend can configure Deepgram correctly.
@@ -514,7 +608,6 @@ async fn start_audio_stream(device_name: Option<String>) -> Result<u16, String> 
                 let meta_clone = meta_bytes.clone();
                 async move {
                     ws.on_upgrade(move |mut socket: WebSocket| async move {
-                        // Send metadata frame first
                         let _ = socket.send(Message::Text(
                             String::from_utf8_lossy(&meta_clone).into()
                         )).await;
@@ -548,6 +641,7 @@ async fn start_audio_stream(device_name: Option<String>) -> Result<u16, String> 
 fn stop_audio_stream() {
     AUDIO_RUNNING.store(false, Ordering::SeqCst);
     AUDIO_PORT.store(0, Ordering::SeqCst);
+    AUDIO_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
 }
 
 /// Returns the list of available audio input device names so the frontend can
@@ -578,11 +672,19 @@ async fn start_display_audio_stream() -> Result<u16, String> {
     use axum::extract::State;
     use tokio::sync::broadcast;
 
-    // Return existing port if already running
-    if DISPLAY_AUDIO_RUNNING.load(Ordering::SeqCst) {
-        let port = DISPLAY_AUDIO_PORT.load(Ordering::SeqCst);
-        if port != 0 {
-            return Ok(port);
+    // ── 3-state idempotency guard (same pattern as start_audio_stream) ────
+    match DISPLAY_AUDIO_STATE.compare_exchange(
+        AUDIO_STOPPED, AUDIO_STARTING, Ordering::SeqCst, Ordering::SeqCst,
+    ) {
+        Ok(_) => {} // we own the startup
+        Err(AUDIO_STARTING) => {
+            return Err("display audio stream is already starting".into());
+        }
+        Err(_) => {
+            // Already RUNNING — return the existing port
+            let port = DISPLAY_AUDIO_PORT.load(Ordering::SeqCst);
+            if port != 0 { return Ok(port); }
+            return Err("display audio stream is running but port is not ready yet".into());
         }
     }
 
@@ -753,11 +855,13 @@ async fn start_display_audio_stream() -> Result<u16, String> {
         Ok(Ok(Err(e))) => {
             DISPLAY_AUDIO_RUNNING.store(false, Ordering::SeqCst);
             DISPLAY_AUDIO_PORT.store(0, Ordering::SeqCst);
+            DISPLAY_AUDIO_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
             return Err(e);
         }
         _ => {
             DISPLAY_AUDIO_RUNNING.store(false, Ordering::SeqCst);
             DISPLAY_AUDIO_PORT.store(0, Ordering::SeqCst);
+            DISPLAY_AUDIO_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
             return Err(
                 "System audio capture timed out — check Screen Recording permission \
                  in System Settings → Privacy & Security → Screen Recording."
@@ -772,6 +876,7 @@ async fn start_display_audio_stream() -> Result<u16, String> {
         .map_err(|e| e.to_string())?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     DISPLAY_AUDIO_PORT.store(port, Ordering::SeqCst);
+    DISPLAY_AUDIO_STATE.store(AUDIO_RUNNING_STATE, Ordering::SeqCst);
 
     // First WS message is JSON metadata so the frontend can configure Deepgram.
     // We always output mono (channels=1) regardless of SCKit's native stereo
@@ -824,6 +929,7 @@ fn stop_display_audio_stream() {
     DISPLAY_AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst);
     DISPLAY_AUDIO_RUNNING.store(false, Ordering::SeqCst);
     DISPLAY_AUDIO_PORT.store(0, Ordering::SeqCst);
+    DISPLAY_AUDIO_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
 }
 
 // ── Windows: cpal mic audio stream ───────────────────────────────────────────
@@ -836,21 +942,47 @@ async fn start_audio_stream(device_name: Option<String>) -> Result<u16, String> 
     use tokio::sync::broadcast;
     use std::sync::Arc;
 
-    if AUDIO_RUNNING.load(Ordering::SeqCst) {
-        let port = AUDIO_PORT.load(Ordering::SeqCst);
-        if port != 0 { return Ok(port); }
+    // ── 3-state idempotency guard ─────────────────────────────────────────
+    match AUDIO_STATE.compare_exchange(
+        AUDIO_STOPPED, AUDIO_STARTING, Ordering::SeqCst, Ordering::SeqCst,
+    ) {
+        Ok(_) => {}
+        Err(AUDIO_STARTING) => return Err("mic audio stream is already starting".into()),
+        Err(_) => {
+            let port = AUDIO_PORT.load(Ordering::SeqCst);
+            if port != 0 { return Ok(port); }
+            return Err("mic audio stream is running but port is not ready yet".into());
+        }
+    }
+
+    macro_rules! fail {
+        ($msg:expr) => {{
+            AUDIO_RUNNING.store(false, Ordering::SeqCst);
+            AUDIO_PORT.store(0, Ordering::SeqCst);
+            AUDIO_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+            return Err($msg.to_string());
+        }};
     }
 
     let host = cpal::default_host();
     let device = if let Some(ref name) = device_name {
-        host.input_devices().map_err(|e| e.to_string())?
-            .find(|d| d.name().map(|n| n.contains(name.as_str())).unwrap_or(false))
-            .ok_or_else(|| format!("Audio device '{}' not found", name))?
+        match host.input_devices() {
+            Ok(devs) => devs
+                .find(|d| d.name().map(|n| n.contains(name.as_str())).unwrap_or(false))
+                .ok_or_else(|| { AUDIO_STATE.store(AUDIO_STOPPED, Ordering::SeqCst); format!("Audio device '{}' not found", name) })?,
+            Err(e) => fail!(e.to_string()),
+        }
     } else {
-        host.default_input_device().ok_or("No default input device")?
+        match host.default_input_device() {
+            Some(d) => d,
+            None => fail!("No default input device found"),
+        }
     };
 
-    let config = device.default_input_config().map_err(|e| e.to_string())?;
+    let config = match device.default_input_config() {
+        Ok(c) => c,
+        Err(e) => fail!(e.to_string()),
+    };
     let sample_rate = config.sample_rate().0;
     let channels = config.channels() as u32;
 
@@ -858,7 +990,9 @@ async fn start_audio_stream(device_name: Option<String>) -> Result<u16, String> 
     let tx_arc = Arc::new(tx);
     let tx_capture = tx_arc.clone();
 
+    let (init_tx, init_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
     AUDIO_RUNNING.store(true, Ordering::SeqCst);
+
     std::thread::spawn(move || {
         let tx = tx_capture;
         let err_fn = |e| eprintln!("[cpal win mic] stream error: {e}");
@@ -882,19 +1016,53 @@ async fn start_audio_stream(device_name: Option<String>) -> Result<u16, String> 
                     let _ = tx.send(Arc::new(pcm));
                 }, err_fn, None,
             ),
-            _ => return,
+            _ => {
+                AUDIO_RUNNING.store(false, Ordering::SeqCst);
+                AUDIO_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+                let _ = init_tx.send(Err("Unsupported sample format".into()));
+                return;
+            }
         };
-        if let Ok(s) = stream {
-            let _ = s.play();
-            while AUDIO_RUNNING.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_millis(50));
+        match stream {
+            Ok(s) => {
+                if let Err(e) = s.play() {
+                    AUDIO_RUNNING.store(false, Ordering::SeqCst);
+                    AUDIO_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+                    let _ = init_tx.send(Err(format!("Failed to start mic stream: {e}")));
+                    return;
+                }
+                let _ = init_tx.send(Ok(()));
+                while AUDIO_RUNNING.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+            Err(e) => {
+                AUDIO_RUNNING.store(false, Ordering::SeqCst);
+                AUDIO_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+                let _ = init_tx.send(Err(format!("Failed to open mic device: {e}")));
             }
         }
     });
 
+    match tokio::time::timeout(std::time::Duration::from_secs(8), init_rx).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => {
+            AUDIO_PORT.store(0, Ordering::SeqCst);
+            AUDIO_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+            return Err(e);
+        }
+        _ => {
+            AUDIO_RUNNING.store(false, Ordering::SeqCst);
+            AUDIO_PORT.store(0, Ordering::SeqCst);
+            AUDIO_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+            return Err("Mic stream timed out".into());
+        }
+    }
+
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.map_err(|e| e.to_string())?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     AUDIO_PORT.store(port, Ordering::SeqCst);
+    AUDIO_STATE.store(AUDIO_RUNNING_STATE, Ordering::SeqCst);
 
     let meta = format!("{{\"sampleRate\":{sample_rate},\"channels\":{channels}}}");
     let meta_bytes = Arc::new(meta.into_bytes());
@@ -927,6 +1095,7 @@ async fn start_audio_stream(device_name: Option<String>) -> Result<u16, String> 
 fn stop_audio_stream() {
     AUDIO_RUNNING.store(false, Ordering::SeqCst);
     AUDIO_PORT.store(0, Ordering::SeqCst);
+    AUDIO_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
 }
 
 #[cfg(target_os = "windows")]
@@ -954,9 +1123,17 @@ async fn start_display_audio_stream() -> Result<u16, String> {
     use tokio::sync::broadcast;
     use std::sync::Arc;
 
-    if DISPLAY_AUDIO_RUNNING.load(Ordering::SeqCst) {
-        let port = DISPLAY_AUDIO_PORT.load(Ordering::SeqCst);
-        if port != 0 { return Ok(port); }
+    // ── 3-state idempotency guard ─────────────────────────────────────────
+    match DISPLAY_AUDIO_STATE.compare_exchange(
+        AUDIO_STOPPED, AUDIO_STARTING, Ordering::SeqCst, Ordering::SeqCst,
+    ) {
+        Ok(_) => {}
+        Err(AUDIO_STARTING) => return Err("display audio stream is already starting".into()),
+        Err(_) => {
+            let port = DISPLAY_AUDIO_PORT.load(Ordering::SeqCst);
+            if port != 0 { return Ok(port); }
+            return Err("display audio stream is running but port is not ready yet".into());
+        }
     }
 
     let host = cpal::default_host();
@@ -1028,6 +1205,7 @@ async fn start_display_audio_stream() -> Result<u16, String> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.map_err(|e| e.to_string())?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     DISPLAY_AUDIO_PORT.store(port, Ordering::SeqCst);
+    DISPLAY_AUDIO_STATE.store(AUDIO_RUNNING_STATE, Ordering::SeqCst);
 
     // Always report channels=1 — the WASAPI callback downmixes to mono above.
     let meta = format!("{{\"sampleRate\":{sample_rate},\"channels\":1}}");
@@ -1062,6 +1240,7 @@ fn stop_display_audio_stream() {
     DISPLAY_AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst);
     DISPLAY_AUDIO_RUNNING.store(false, Ordering::SeqCst);
     DISPLAY_AUDIO_PORT.store(0, Ordering::SeqCst);
+    DISPLAY_AUDIO_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
 }
 
 // ── Linux stubs (audio capture not supported) ─────────────────────────────────
@@ -1595,6 +1774,48 @@ fn stop_mic_transcription() {}
 // Lazy permission flow: when system audio / mic capture fails because the user
 // denied the OS permission, the JS layer surfaces a "Open Settings" button that
 // invokes one of these commands to deep-link to the right Privacy pane.
+
+// ── Microphone permission preflight ──────────────────────────────────────────
+// Call this ONCE before start_audio_stream.  Returns Ok(()) if the mic is
+// accessible, Err with a human-readable message if not.
+// Separating permission-check from stream-start means the app never calls
+// start_audio_stream until permission is confirmed, eliminating the pattern
+// that triggers repeated macOS TCC dialogs.
+#[tauri::command]
+async fn ensure_microphone_permission() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use cpal::traits::{DeviceTrait, HostTrait};
+        let host = cpal::default_host();
+        match host.default_input_device() {
+            Some(device) => {
+                // Attempt to open a config — this is what triggers the macOS
+                // TCC mic dialog on first access.  If the user already granted
+                // permission the call returns instantly.
+                device.default_input_config()
+                    .map(|_| ())
+                    .map_err(|e| format!(
+                        "Microphone permission denied or device unavailable: {e}. \
+                         Grant access in System Settings → Privacy & Security → Microphone."
+                    ))
+            }
+            None => Err(
+                "No microphone found. Connect a mic and check System Settings → Sound → Input."
+                    .into(),
+            ),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Windows/Linux: permission is either always granted (Windows) or
+        // managed by the DE (Linux).  Probe the device as a basic sanity check.
+        use cpal::traits::{DeviceTrait, HostTrait};
+        let host = cpal::default_host();
+        host.default_input_device()
+            .ok_or_else(|| "No default input device found".to_string())
+            .and_then(|d| d.default_input_config().map(|_| ()).map_err(|e| e.to_string()))
+    }
+}
 
 #[tauri::command]
 fn open_screen_recording_settings(app: tauri::AppHandle) -> Result<(), String> {
@@ -2233,6 +2454,7 @@ pub fn run() {
             start_system_audio_transcription, stop_system_audio_transcription,
             start_mic_transcription, stop_mic_transcription,
             open_screen_recording_settings, open_microphone_settings,
+            ensure_microphone_permission,
             set_session_active, handle_launcher_click,
             open_main_dashboard, show_launcher_widget,
         ])
