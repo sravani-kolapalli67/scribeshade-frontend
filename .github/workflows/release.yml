@@ -75,9 +75,24 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # Baked into the binary at compile time via option_env!("VITE_DEEPGRAM_API_KEY").
-          # Add VITE_DEEPGRAM_API_KEY to repo Settings → Secrets → Actions.
+
+          # ── Vite / frontend env vars baked into the bundle at compile time ──
+          # All VITE_* vars are embedded by Vite during `pnpm tauri build`.
+          # Without these the release app falls back to localhost URLs and
+          # keys are undefined → nothing works.
+          #
+          # Add each of these to: repo Settings → Secrets and variables → Actions
+          VITE_BACKEND_URL: https://test.backend.scribeshade.org
+          VITE_FRONTEND_URL: https://scribeshade-01-frontend.vercel.app
+          VITE_CLERK_PUBLISHABLE_KEY: ${{ secrets.VITE_CLERK_PUBLISHABLE_KEY }}
           VITE_DEEPGRAM_API_KEY: ${{ secrets.VITE_DEEPGRAM_API_KEY }}
+          VITE_RAZORPAY_KEY_ID: ${{ secrets.VITE_RAZORPAY_KEY_ID }}
+          VITE_CLERK_SIGN_IN_URL: /sign-in
+          VITE_CLERK_SIGN_UP_URL: /sign-up
+          VITE_CLERK_AFTER_SIGN_IN_URL: /dashboard
+          VITE_CLERK_AFTER_SIGN_UP_URL: /dashboard
+          VITE_INACTIVITY_TIMEOUT_MS: "60000"
+          VITE_INACTIVITY_WARNING_MS: "30000"
         with:
           # __VERSION__ is replaced by tauri-action with the version from tauri.conf.json
           tagName: v__VERSION__

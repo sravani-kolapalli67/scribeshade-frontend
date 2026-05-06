@@ -36,15 +36,18 @@
   <key>com.apple.security.device.audio-input</key>
   <true/>
 
-  <!-- Screen recording / ScreenCaptureKit.
-       SCShareableContent.get() triggers the TCC screen-recording prompt.
-       This entitlement tells the OS the app is allowed to declare that
-       intent when running under the hardened runtime. Without it SCKit
-       calls return SCStreamError.userDeclined even after the user approved
-       the permission in System Preferences → Privacy & Security →
-       Screen Recording. -->
-  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
-  <false/>
+  <!-- Screen recording / ScreenCaptureKit (macOS 12.3+).
+       SCShareableContent.get() triggers the macOS TCC screen-recording
+       prompt (kTCCServiceScreenCapture).  There is no dedicated
+       entitlement key for this; the OS uses NSScreenCaptureUsageDescription
+       from Info.plist + the TCC grant stored against this binary's
+       code-signing identity.
+
+       com.apple.security.cs.allow-dyld-environment-variables lets
+       ScreenCaptureKit and its helper XPC services load their dylibs under
+       the hardened runtime without triggering library-validation failures. -->
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
 
 </dict>
 </plist>
