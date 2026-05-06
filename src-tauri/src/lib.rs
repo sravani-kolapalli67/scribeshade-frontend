@@ -1925,15 +1925,51 @@ fn show_launcher_widget(app: AppHandle) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Load .env so VITE_DEEPGRAM_API_KEY is available via std::env::var.
-    // ok() is intentional — missing .env in production (bundled app) is fine.
-    dotenvy::dotenv().ok();
-    let deepgram_key = std::env::var("VITE_DEEPGRAM_API_KEY")
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+    // ── Deepgram API key resolution (two-tier) ────────────────────────────
+    //
+    // PRODUCTION (bundled .app):
+    //   The .env file is never shipped inside the bundle, so dotenvy finds
+    //   nothing and std::env::var returns Err.  The key must be baked into
+    //   the binary at compile time by the CI workflow.
+    //
+    //   option_env!("VITE_DEEPGRAM_API_KEY") reads the env var that the CI
+    //   runner exports during `pnpm tauri build`; the value is embedded as a
+    //   &'static str.  There is exactly one binary → one embed → no
+    //   possibility of the warning firing multiple times per launch.
+    //
+    // DEVELOPMENT (pnpm tauri dev):
+    //   dotenvy::dotenv() loads the project-root .env file, then
+    //   std::env::var picks up the runtime value as the fallback.
+    //
+    // WHY THE WARNING FIRED MULTIPLE TIMES BEFORE:
+    //   The Tauri auto-updater downloads a new binary, replaces the old one,
+    //   and spawns a fresh process — so run() (and this block) executes once
+    //   per relaunch.  Each fresh process had no .env → empty key → warning.
+    //   Baking the key at compile time removes the dependency on .env at
+    //   runtime, so the warning never fires in a correctly-built release.
+    dotenvy::dotenv().ok(); // dev only; silently a no-op in bundled builds
+
+    let deepgram_key: String = option_env!("VITE_DEEPGRAM_API_KEY")
+        // compile-time path: CI baked the key into the binary
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(str::to_string)
+        // runtime path: local .env loaded above (development)
+        .or_else(|| {
+            std::env::var("VITE_DEEPGRAM_API_KEY")
+                .ok()
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty())
+        })
+        .unwrap_or_default();
+
     if deepgram_key.is_empty() {
-        eprintln!("[startup] VITE_DEEPGRAM_API_KEY is EMPTY — check .env file. STT will fail.");
+        eprintln!(
+            "[startup] VITE_DEEPGRAM_API_KEY is not set — STT will fail.\n\
+             Dev: add it to .env\n\
+             Release: add it as a GitHub Actions secret and expose it in the \
+             release workflow (VITE_DEEPGRAM_API_KEY: ${{{{ secrets.VITE_DEEPGRAM_API_KEY }}}})"
+        );
     }
 
     tauri::Builder::default()

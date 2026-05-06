@@ -64,7 +64,8 @@
       "icons/128x128@2x.png"
     ],
     "macOS": {
-      "infoPlist": "Info.plist"
+      "infoPlist": "Info.plist",
+      "entitlements": "entitlements.plist"
     }
   },
   "plugins": {
