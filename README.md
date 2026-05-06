@@ -1,4 +1,4 @@
-# ScribeShade — Frontend
+# ScribeShade
 
 AI-powered interview assistant built as a **desktop-first** application using **Tauri v2 + React + TypeScript + Vite**. Also deployable as a web app on Vercel.
 
