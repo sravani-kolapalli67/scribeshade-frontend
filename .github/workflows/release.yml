@@ -66,6 +66,26 @@ jobs:
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Verify required release secrets are present
+        env:
+          VITE_DEEPGRAM_API_KEY: ${{ secrets.VITE_DEEPGRAM_API_KEY }}
+          VITE_CLERK_PUBLISHABLE_KEY: ${{ secrets.VITE_CLERK_PUBLISHABLE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          fail=0
+          check() {
+            if [ -z "$2" ]; then
+              echo "ERROR: $1 is empty or missing — release would be broken" >&2
+              fail=1
+            else
+              echo "OK: $1 is present"
+            fi
+          }
+          check VITE_DEEPGRAM_API_KEY    "$VITE_DEEPGRAM_API_KEY"
+          check VITE_CLERK_PUBLISHABLE_KEY "$VITE_CLERK_PUBLISHABLE_KEY"
+          check TAURI_SIGNING_PRIVATE_KEY  "$TAURI_SIGNING_PRIVATE_KEY"
+          exit $fail
+
       # tauri-action runs pnpm tauri build internally.  Our tauri-wrapper.cjs
       # detects CI=true and skips the local version-bump, so the version
       # committed by bump-version.sh is used as-is.

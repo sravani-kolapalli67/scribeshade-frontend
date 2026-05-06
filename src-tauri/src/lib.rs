@@ -68,9 +68,13 @@ static SYSTEM_STT_RUNNING: AtomicBool = AtomicBool::new(false);
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 static SYSTEM_STT_GENERATION: AtomicU64 = AtomicU64::new(0);
 #[cfg(any(target_os = "macos", target_os = "windows"))]
+static SYSTEM_STT_STATE: AtomicU8 = AtomicU8::new(AUDIO_STOPPED);
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 static MIC_STT_RUNNING: AtomicBool = AtomicBool::new(false);
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 static MIC_STT_GENERATION: AtomicU64 = AtomicU64::new(0);
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+static MIC_STT_STATE: AtomicU8 = AtomicU8::new(AUDIO_STOPPED);
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1297,8 +1301,13 @@ async fn start_system_audio_transcription(
     use screencapturekit::prelude::*;
     use tokio::sync::broadcast;
 
-    if SYSTEM_STT_RUNNING.load(Ordering::SeqCst) {
-        return Ok(());
+    // ── 3-state idempotency guard ─────────────────────────────────────────
+    match SYSTEM_STT_STATE.compare_exchange(
+        AUDIO_STOPPED, AUDIO_STARTING, Ordering::SeqCst, Ordering::SeqCst,
+    ) {
+        Ok(_) => {}
+        Err(AUDIO_STARTING) => return Err("system audio STT is already starting".into()),
+        Err(_) => return Ok(()),   // already running — idempotent
     }
 
     let (init_tx, init_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
@@ -1396,15 +1405,20 @@ async fn start_system_audio_transcription(
     });
 
     match tokio::time::timeout(std::time::Duration::from_secs(10), init_rx).await {
-        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Ok(()))) => {
+            SYSTEM_STT_STATE.store(AUDIO_RUNNING_STATE, Ordering::SeqCst);
+        }
         Ok(Ok(Err(e))) => {
             eprintln!("[stt:system macos] SCKit init FAILED: {e}");
-            SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst); return Err(e);
+            SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
+            SYSTEM_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+            return Err(e);
         }
         _ => {
             let msg = "System audio capture timed out — check Screen Recording permission.".to_string();
             eprintln!("[stt:system macos] SCKit init TIMEOUT");
             SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
+            SYSTEM_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
             return Err(msg);
         }
     }
@@ -1438,6 +1452,7 @@ async fn start_system_audio_transcription(
 fn stop_system_audio_transcription() {
     SYSTEM_STT_GENERATION.fetch_add(1, Ordering::SeqCst);
     SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
+    SYSTEM_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
 }
 
 // ── macOS: cpal mic → Deepgram ────────────────────────────────────────────────
@@ -1453,16 +1468,28 @@ async fn start_mic_transcription(
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use tokio::sync::broadcast;
 
-    if MIC_STT_RUNNING.load(Ordering::SeqCst) {
-        return Ok(());
+    // ── 3-state idempotency guard ─────────────────────────────────────────
+    match MIC_STT_STATE.compare_exchange(
+        AUDIO_STOPPED, AUDIO_STARTING, Ordering::SeqCst, Ordering::SeqCst,
+    ) {
+        Ok(_) => {}
+        Err(AUDIO_STARTING) => return Err("mic STT is already starting".into()),
+        Err(_) => return Ok(()),   // already running — idempotent
     }
 
     let host = cpal::default_host();
-    let device = host.default_input_device().ok_or("No microphone found")?;
-    let config = device.default_input_config().map_err(|e| e.to_string())?;
+    let device = host.default_input_device().ok_or_else(|| {
+        MIC_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+        "No microphone found".to_string()
+    })?;
+    let config = device.default_input_config().map_err(|e| {
+        MIC_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+        e.to_string()
+    })?;
     let sample_rate = config.sample_rate().0;
     let ch = config.channels() as usize;
 
+    let (init_tx, init_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
     let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(64);
     let tx_arc = Arc::new(tx);
     let tx_capture = tx_arc.clone();
@@ -1499,17 +1526,45 @@ async fn start_mic_transcription(
                     let _ = tx.send(Arc::new(pcm));
                 }, err_fn, None,
             ),
-            _ => return,
+            _ => {
+                MIC_STT_RUNNING.store(false, Ordering::SeqCst);
+                let _ = init_tx.send(Err("Unsupported sample format".into()));
+                return;
+            }
         };
-        if let Ok(s) = stream {
-            let _ = s.play();
-            while MIC_STT_RUNNING.load(Ordering::Relaxed)
-                && MIC_STT_GENERATION.load(Ordering::Relaxed) == my_gen
-            {
-                std::thread::sleep(std::time::Duration::from_millis(50));
+        match stream {
+            Ok(s) => {
+                if let Err(e) = s.play() {
+                    MIC_STT_RUNNING.store(false, Ordering::SeqCst);
+                    let _ = init_tx.send(Err(format!("Failed to start mic stream: {e}")));
+                    return;
+                }
+                let _ = init_tx.send(Ok(()));
+                while MIC_STT_RUNNING.load(Ordering::Relaxed)
+                    && MIC_STT_GENERATION.load(Ordering::Relaxed) == my_gen
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+            Err(e) => {
+                MIC_STT_RUNNING.store(false, Ordering::SeqCst);
+                let _ = init_tx.send(Err(format!("Failed to open mic device: {e}")));
             }
         }
     });
+
+    match tokio::time::timeout(std::time::Duration::from_secs(8), init_rx).await {
+        Ok(Ok(Ok(()))) => { MIC_STT_STATE.store(AUDIO_RUNNING_STATE, Ordering::SeqCst); }
+        Ok(Ok(Err(e))) => {
+            MIC_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+            return Err(e);
+        }
+        _ => {
+            MIC_STT_RUNNING.store(false, Ordering::SeqCst);
+            MIC_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+            return Err("Mic STT stream timed out".into());
+        }
+    }
 
     let app_c = app.clone();
     tokio::spawn(async move {
@@ -1541,6 +1596,7 @@ async fn start_mic_transcription(
 fn stop_mic_transcription() {
     MIC_STT_GENERATION.fetch_add(1, Ordering::SeqCst);
     MIC_STT_RUNNING.store(false, Ordering::SeqCst);
+    MIC_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
 }
 
 // ── Windows: WASAPI loopback → Deepgram (system audio) ───────────────────────
@@ -1556,16 +1612,28 @@ async fn start_system_audio_transcription(
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use tokio::sync::broadcast;
 
-    if SYSTEM_STT_RUNNING.load(Ordering::SeqCst) {
-        return Ok(());
+    // ── 3-state idempotency guard ─────────────────────────────────────────
+    match SYSTEM_STT_STATE.compare_exchange(
+        AUDIO_STOPPED, AUDIO_STARTING, Ordering::SeqCst, Ordering::SeqCst,
+    ) {
+        Ok(_) => {}
+        Err(AUDIO_STARTING) => return Err("system audio STT is already starting".into()),
+        Err(_) => return Ok(()),
     }
 
     let host = cpal::default_host();
-    let device = host.default_output_device().ok_or("No output device for loopback")?;;
-    let config = device.default_output_config().map_err(|e| e.to_string())?;
+    let device = host.default_output_device().ok_or_else(|| {
+        SYSTEM_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+        "No output device for loopback".to_string()
+    })?;
+    let config = device.default_output_config().map_err(|e| {
+        SYSTEM_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+        e.to_string()
+    })?;
     let sample_rate = config.sample_rate().0;
     let ch = config.channels() as usize;
 
+    let (init_tx, init_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
     let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(128);
     let tx_arc = Arc::new(tx);
     let tx_capture = tx_arc.clone();
@@ -1602,17 +1670,45 @@ async fn start_system_audio_transcription(
                     let _ = tx.send(Arc::new(pcm));
                 }, err_fn, None,
             ),
-            _ => return,
+            _ => {
+                SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
+                let _ = init_tx.send(Err("Unsupported sample format".into()));
+                return;
+            }
         };
-        if let Ok(s) = stream {
-            let _ = s.play();
-            while SYSTEM_STT_RUNNING.load(Ordering::Relaxed)
-                && SYSTEM_STT_GENERATION.load(Ordering::Relaxed) == my_gen
-            {
-                std::thread::sleep(std::time::Duration::from_millis(50));
+        match stream {
+            Ok(s) => {
+                if let Err(e) = s.play() {
+                    SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
+                    let _ = init_tx.send(Err(format!("Failed to start system audio stream: {e}")));
+                    return;
+                }
+                let _ = init_tx.send(Ok(()));
+                while SYSTEM_STT_RUNNING.load(Ordering::Relaxed)
+                    && SYSTEM_STT_GENERATION.load(Ordering::Relaxed) == my_gen
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+            Err(e) => {
+                SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
+                let _ = init_tx.send(Err(format!("Failed to open loopback device: {e}")));
             }
         }
     });
+
+    match tokio::time::timeout(std::time::Duration::from_secs(8), init_rx).await {
+        Ok(Ok(Ok(()))) => { SYSTEM_STT_STATE.store(AUDIO_RUNNING_STATE, Ordering::SeqCst); }
+        Ok(Ok(Err(e))) => {
+            SYSTEM_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+            return Err(e);
+        }
+        _ => {
+            SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
+            SYSTEM_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+            return Err("System audio STT stream timed out".into());
+        }
+    }
 
     let app_c = app.clone();
     tokio::spawn(async move {
@@ -1644,6 +1740,7 @@ async fn start_system_audio_transcription(
 fn stop_system_audio_transcription() {
     SYSTEM_STT_GENERATION.fetch_add(1, Ordering::SeqCst);
     SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
+    SYSTEM_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
 }
 
 // ── Windows: cpal mic input → Deepgram ───────────────────────────────────────
@@ -1659,16 +1756,28 @@ async fn start_mic_transcription(
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use tokio::sync::broadcast;
 
-    if MIC_STT_RUNNING.load(Ordering::SeqCst) {
-        return Ok(());
+    // ── 3-state idempotency guard ─────────────────────────────────────────
+    match MIC_STT_STATE.compare_exchange(
+        AUDIO_STOPPED, AUDIO_STARTING, Ordering::SeqCst, Ordering::SeqCst,
+    ) {
+        Ok(_) => {}
+        Err(AUDIO_STARTING) => return Err("mic STT is already starting".into()),
+        Err(_) => return Ok(()),
     }
 
     let host = cpal::default_host();
-    let device = host.default_input_device().ok_or("No microphone found")?;
-    let config = device.default_input_config().map_err(|e| e.to_string())?;
+    let device = host.default_input_device().ok_or_else(|| {
+        MIC_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+        "No microphone found".to_string()
+    })?;
+    let config = device.default_input_config().map_err(|e| {
+        MIC_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+        e.to_string()
+    })?;
     let sample_rate = config.sample_rate().0;
     let ch = config.channels() as usize;
 
+    let (init_tx, init_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
     let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(64);
     let tx_arc = Arc::new(tx);
     let tx_capture = tx_arc.clone();
@@ -1705,17 +1814,45 @@ async fn start_mic_transcription(
                     let _ = tx.send(Arc::new(pcm));
                 }, err_fn, None,
             ),
-            _ => return,
+            _ => {
+                MIC_STT_RUNNING.store(false, Ordering::SeqCst);
+                let _ = init_tx.send(Err("Unsupported sample format".into()));
+                return;
+            }
         };
-        if let Ok(s) = stream {
-            let _ = s.play();
-            while MIC_STT_RUNNING.load(Ordering::Relaxed)
-                && MIC_STT_GENERATION.load(Ordering::Relaxed) == my_gen
-            {
-                std::thread::sleep(std::time::Duration::from_millis(50));
+        match stream {
+            Ok(s) => {
+                if let Err(e) = s.play() {
+                    MIC_STT_RUNNING.store(false, Ordering::SeqCst);
+                    let _ = init_tx.send(Err(format!("Failed to start mic stream: {e}")));
+                    return;
+                }
+                let _ = init_tx.send(Ok(()));
+                while MIC_STT_RUNNING.load(Ordering::Relaxed)
+                    && MIC_STT_GENERATION.load(Ordering::Relaxed) == my_gen
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+            Err(e) => {
+                MIC_STT_RUNNING.store(false, Ordering::SeqCst);
+                let _ = init_tx.send(Err(format!("Failed to open mic device: {e}")));
             }
         }
     });
+
+    match tokio::time::timeout(std::time::Duration::from_secs(8), init_rx).await {
+        Ok(Ok(Ok(()))) => { MIC_STT_STATE.store(AUDIO_RUNNING_STATE, Ordering::SeqCst); }
+        Ok(Ok(Err(e))) => {
+            MIC_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+            return Err(e);
+        }
+        _ => {
+            MIC_STT_RUNNING.store(false, Ordering::SeqCst);
+            MIC_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+            return Err("Mic STT stream timed out".into());
+        }
+    }
 
     let app_c = app.clone();
     tokio::spawn(async move {
@@ -1747,6 +1884,7 @@ async fn start_mic_transcription(
 fn stop_mic_transcription() {
     MIC_STT_GENERATION.fetch_add(1, Ordering::SeqCst);
     MIC_STT_RUNNING.store(false, Ordering::SeqCst);
+    MIC_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
 }
 
 // ── Linux stubs for new STT commands ─────────────────────────────────────────
@@ -2191,6 +2329,10 @@ pub fn run() {
              Release: add it as a GitHub Actions secret and expose it in the \
              release workflow (VITE_DEEPGRAM_API_KEY: ${{{{ secrets.VITE_DEEPGRAM_API_KEY }}}})"
         );
+        // In release builds, abort immediately — a missing key means STT is
+        // completely broken and would confuse debugging with permission errors.
+        #[cfg(not(debug_assertions))]
+        panic!("Release build is missing VITE_DEEPGRAM_API_KEY — aborting to prevent silent STT failure.");
     }
 
     tauri::Builder::default()
