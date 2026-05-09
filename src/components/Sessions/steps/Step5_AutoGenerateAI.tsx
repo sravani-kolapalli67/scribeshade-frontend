@@ -42,7 +42,7 @@ export function Step5_AutoGenerateAI({ autoGenerate, onChange }: Step5Props) {
             <div className="space-y-1">
               <h3 className="font-bold text-lg">Instant AI Suggestions</h3>
               <p className="text-sm text-muted-foreground leading-relaxed">
-                When enabled, Craft Vita will process the interview audio or
+                When enabled, ScribeShade will process the interview audio or
                 text in real-time and provide you with high-quality, tailored
                 responses based on your resume and the job description.
               </p>

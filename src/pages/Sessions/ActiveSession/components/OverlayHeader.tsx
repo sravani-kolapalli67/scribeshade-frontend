@@ -9,7 +9,7 @@ interface OverlayHeaderProps {
 
 export const OverlayHeader = ({
   onClose = () => window.close(),
-  title = "Craft Vita Overlay",
+  title = "ScribeShade Overlay",
   className,
 }: OverlayHeaderProps) => {
   return (

@@ -215,7 +215,7 @@ export function ProjectReportView({
             ))}
             <div className="px-4 py-4 sm:px-6 flex flex-wrap items-center gap-2 text-xs text-muted-foreground/50 rounded-b-xl">
               <Sparkles className="h-3 w-3 text-[#458fff]" />
-              <span className="font-medium">Craft Vita AI</span>
+              <span className="font-medium">ScribeShade AI</span>
               <span>·</span>
               <span>AI-Generated Project Portfolio</span>
               {position && <><span>·</span><span>{position}</span></>}

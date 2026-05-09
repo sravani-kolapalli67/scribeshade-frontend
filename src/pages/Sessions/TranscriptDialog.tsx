@@ -19,7 +19,7 @@ import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
 
-// Standard Message Interface for Craft Vita
+// Standard Message Interface for ScribeShade
 export interface Message {
   id?: string;
   role: string; // AI_ASSISTANT | USER | INTERVIEWER

@@ -17,7 +17,7 @@ interface ChatHeaderProps {
 
 export const ChatHeader = ({
   onExit,
-  title = "Craft Vita",
+  title = "ScribeShade",
   isFullscreen = false,
   isFreeSession = false,
   isWarning = false,

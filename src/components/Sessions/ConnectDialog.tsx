@@ -326,7 +326,7 @@ export function ConnectDialog({
                   <span className="font-bold text-foreground">
                     mock interview
                   </span>{" "}
-                  on YouTube and test Craft Vita that way.
+                  on YouTube and test ScribeShade that way.
                 </p>
                 <button className="text-[12px] text-primary font-semibold hover:underline flex items-center gap-1">
                   Example video: Mock Interview
