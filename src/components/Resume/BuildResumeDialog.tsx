@@ -134,11 +134,35 @@ export function BuildResumeDialog() {
 
   // ── Processing ─────────────────────────────────────────────────────────────
 
+  /** Build a clean, short resume title from available data. Priority:
+   *  1. extracted fields.name + fields.role (most accurate)
+   *  2. JD jobTitle + company (truncated)
+   *  3. Fallback "My Resume"
+   */
+  function buildResumeTitle(fields?: Record<string, string>): string {
+    const cap = (s: string, max = 60) =>
+      s.length > max ? s.slice(0, max - 1).trimEnd() + "…" : s;
+
+    // Priority 1 — extracted name + role
+    const extractedName = fields?.name?.trim();
+    const extractedRole = fields?.role?.trim();
+    if (extractedName && extractedRole)
+      return cap(`${extractedName} – ${extractedRole}`);
+    if (extractedName) return cap(extractedName);
+
+    // Priority 2 — JD job title + company (first word of company to stay short)
+    const jobTitleClean = jdData.jobTitle?.trim()?.split("\n")?.[0]?.trim();
+    const companyClean  = jdData.company?.trim()?.split("\n")?.[0]?.trim()
+      ?.split(" ").slice(0, 3).join(" "); // max 3 words
+    if (jobTitleClean && companyClean)
+      return cap(`${jobTitleClean} – ${companyClean}`);
+    if (jobTitleClean) return cap(jobTitleClean);
+
+    return "My Resume";
+  }
+
   const navigateToEditor = React.useCallback(async (fields?: Record<string, string>) => {
-    const resumeTitle =
-      jdData.jobTitle && jdData.company
-        ? `${jdData.jobTitle} – ${jdData.company}`
-        : jdData.jobTitle || "My Resume";
+    const resumeTitle = buildResumeTitle(fields);
 
     // Save a draft record immediately so the editor can auto-save to the same ID
     // and the mark-complete flow has a resumeId to work with.

@@ -191,8 +191,7 @@ export default function ActiveSession() {
             toast.success("Session ended — no credits charged (under 5 min)");
           } else if (deductedCredits) {
             const mins = durationMinutes ?? 0;
-            const expected = (mins * CREDITS_PER_MINUTE).toFixed(1);
-            toast.info(`Session ended — ${deductedCredits} credits deducted (${mins} min × ${CREDITS_PER_MINUTE} credits/min = ${expected})`);
+            toast.info(`Session ended — ${deductedCredits} credits deducted (${mins} min × ${CREDITS_PER_MINUTE} credits/min)`);
           }
         }
       }
@@ -431,6 +430,7 @@ export default function ActiveSession() {
 
   const {
     aiChat,
+    setAiChat,
     inputMessage,
     setInputMessage,
     isAnalyzing,
@@ -439,6 +439,47 @@ export default function ActiveSession() {
     handleAiAnswer,
     handleCustomQuery,
   } = useAIChat();
+
+  // Restore persisted transcript + AI answers on mount (survives refresh / back-nav)
+  const historyLoadedRef = useRef(false);
+  useEffect(() => {
+    if (!id || historyLoadedRef.current) return;
+    historyLoadedRef.current = true;
+
+    fetch(`${import.meta.env.VITE_BACKEND_URL}/api/session/${id}`)
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => {
+        if (!data) return;
+        const sessionData = data.data ?? data;
+        const storedMessages: any[] = Array.isArray(sessionData.messages) ? sessionData.messages : [];
+        if (storedMessages.length === 0) return;
+
+        const transcriptMsgs: Message[] = [];
+        const aiMsgs: Message[] = [];
+
+        storedMessages.forEach((m: any, i: number) => {
+          const time = m.time || new Date(m.timestamp || Date.now()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+          if (m.role === "AI_ASSISTANT") {
+            // AI answer — show the answer text; prefix with detected question if present
+            const text = m.answer || m.question || "";
+            if (text) {
+              aiMsgs.push({ id: `hist-ai-${i}`, sender: "AI", text, time });
+            }
+          } else {
+            // USER or INTERVIEWER transcript line
+            const sender = m.role === "USER" ? "User" : "Interviewer";
+            const text = m.question || "";
+            if (text) {
+              transcriptMsgs.push({ id: `hist-${i}`, sender, text, time, timestamp: m.timestamp ? new Date(m.timestamp).getTime() : undefined });
+            }
+          }
+        });
+
+        if (transcriptMsgs.length > 0) setMessages(transcriptMsgs);
+        if (aiMsgs.length > 0) setAiChat(aiMsgs);
+      })
+      .catch((err) => console.error("[Session] Failed to restore history:", err));
+  }, [id, setAiChat]);
 
   const isExecutingRef = useRef(false);
 

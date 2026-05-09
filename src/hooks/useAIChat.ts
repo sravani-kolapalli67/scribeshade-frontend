@@ -263,6 +263,7 @@ export const useAIChat = () => {
 
   return {
     aiChat,
+    setAiChat,
     inputMessage,
     setInputMessage,
     isAnalyzing,

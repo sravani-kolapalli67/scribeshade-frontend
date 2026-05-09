@@ -337,13 +337,26 @@ function parseRawResume(text: string): ResumeData {
   return data;
 }
 
+function smartTitle(fields: Partial<ResumeFields>, fallback: string): string {
+  const cap = (s: string, max = 60) =>
+    s.length > max ? s.slice(0, max - 1).trimEnd() + "…" : s;
+  const name = fields.name?.trim();
+  const role = fields.role?.trim();
+  if (name && role) return cap(`${name} – ${role}`);
+  if (name) return cap(name);
+  if (role) return cap(role);
+  return fallback || "My Resume";
+}
+
 function configToFields(config: any): { fields: Partial<ResumeFields>; title: string } {
   // ── Path A: resume was previously saved via the builder ─────────────────
   // The API returns a flat `fields` object (same shape as ResumeFields) so we
   // can use it directly without going through parseRawResume.
   if (config.sourceType === "builder" && config.fields) {
+    const rawTitle = config.resumeTitle || config.title || "";
+    const isGeneric = !rawTitle || rawTitle === "My Resume";
     return {
-      title:  config.resumeTitle || config.title || "My Resume",
+      title:  isGeneric ? smartTitle(config.fields as Partial<ResumeFields>, rawTitle) : rawTitle,
       fields: config.fields as Partial<ResumeFields>,
     };
   }
@@ -362,9 +375,7 @@ function configToFields(config: any): { fields: Partial<ResumeFields>; title: st
       experiences: [], projects: [], education: [], publication: "",
     };
   }
-  return {
-    title: config.resumeTitle || "My Resume",
-    fields: {
+  const parsedFields: Partial<ResumeFields> = {
       name: d.name, role: d.role, email: d.email,
       phone: d.phone, links: d.links, summary: d.summary,
       experience: d.role,
@@ -373,7 +384,12 @@ function configToFields(config: any): { fields: Partial<ResumeFields>; title: st
       projects: d.projects.map((p) => `${p.title}\n${p.points.map((pt) => `• ${pt}`).join("\n")}`).join("\n\n"),
       education: d.education.map((e) => `${e.degree}\n${e.institute}\n${e.year}`).join("\n\n"),
       publications: d.publication,
-    },
+    };
+  const rawTitle = config.resumeTitle || "";
+  const isGeneric = !rawTitle || rawTitle === "My Resume";
+  return {
+    title: isGeneric ? smartTitle(parsedFields, rawTitle) : rawTitle,
+    fields: parsedFields,
   };
 }
 
@@ -3525,8 +3541,12 @@ export default function ResumeEditor() {
   useEffect(() => {
     if (!config) { setIsInitialized(true); return; }
     const { title, fields: parsedFields } = configToFields(config);
+    const rawConfigTitle = config.resumeTitle || config.title || title;
+    const finalTitle = (!rawConfigTitle || rawConfigTitle === "My Resume")
+      ? smartTitle(parsedFields, title)
+      : rawConfigTitle;
     dispatch(initFromConfig({
-      title:          config.resumeTitle || config.title || title,
+      title:          finalTitle,
       fields:         parsedFields,
       templateId:     config.templateId ?? "classic",
       lockedFields:   { name: true, email: true },

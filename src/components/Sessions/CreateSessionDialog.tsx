@@ -148,6 +148,14 @@ export default function CreateSessionDialog({
             },
           },
         });
+      } else if (response.status === 409 && (result.message ?? "").startsWith("ACTIVE_SESSION_EXISTS")) {
+        const existingId = (result.message as string).split(":")[1];
+        toast.error("You already have an active session. End it before starting a new one.", {
+          action: existingId
+            ? { label: "Go to session", actionButtonStyle: {}, onClick: () => navigate(`/sessions/${existingId}`) }
+            : undefined,
+          duration: 8000,
+        });
       } else {
         console.error("Failed to create session:", result.error);
         toast.error(result.error || "Failed to create session");

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
@@ -73,19 +74,27 @@ export function SessionAnalyticsDialog({
 
   useEffect(() => {
     if (isOpen && session?.id) {
-      // Pre-fill feedback from session data if analytics already exist
-      setFeedback(session.feedback ?? null);
-
-      // Fetch session messages for the interaction chart
-      const fetchMessages = async () => {
+      const load = async () => {
         setIsLoading(true);
         try {
-          const sessionRes = await fetch(
-            `${import.meta.env.VITE_BACKEND_URL}/api/session/${session.id}`,
-          );
+          // Fetch full session data (messages + feedback) in parallel
+          const [sessionRes, feedbackRes] = await Promise.all([
+            fetch(`${import.meta.env.VITE_BACKEND_URL}/api/session/${session.id}`),
+            fetch(`${import.meta.env.VITE_BACKEND_URL}/api/session/${session.id}/analytics/existing`),
+          ]);
+
           if (sessionRes.ok) {
             const data = await sessionRes.json();
-            setMessages(data.messages || []);
+            const sessionData = data.data ?? data;
+            setMessages(sessionData.messages || []);
+            // Use inline feedback from the full session response if available
+            if (sessionData.feedback) setFeedback(sessionData.feedback);
+          }
+
+          // Dedicated existing-analytics fetch (returns null / 404 if none)
+          if (feedbackRes.ok) {
+            const existing = await feedbackRes.json();
+            if (existing && existing.id) setFeedback(existing);
           }
         } catch (error) {
           console.error("Error fetching session data:", error);
@@ -93,7 +102,7 @@ export function SessionAnalyticsDialog({
           setIsLoading(false);
         }
       };
-      fetchMessages();
+      load();
     }
     if (!isOpen) {
       setMessages([]);
@@ -105,15 +114,31 @@ export function SessionAnalyticsDialog({
     if (!session?.id) return;
     setIsGenerating(true);
     try {
+      // 90-second timeout — AI generation can be slow
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 90_000);
+
       const analyticsRes = await fetch(
         `${import.meta.env.VITE_BACKEND_URL}/api/session/${session.id}/analytics`,
+        { signal: controller.signal },
       );
+      clearTimeout(timeoutId);
+
       if (analyticsRes.ok) {
         const data = await analyticsRes.json();
+        // GET endpoint returns the feedback object directly
         setFeedback(data);
+      } else {
+        const errData = await analyticsRes.json().catch(() => ({}));
+        toast.error(errData.error || "Failed to generate analytics. Please try again.");
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error generating analytics:", error);
+      if (error?.name === "AbortError") {
+        toast.error("Analytics generation timed out. Please try again.");
+      } else {
+        toast.error("Failed to generate analytics. Please try again.");
+      }
     } finally {
       setIsGenerating(false);
     }

@@ -218,6 +218,30 @@ const parseAIResponse = (raw: string): ParsedSection => {
   return { answer: text };
 };
 
+// Small inline copy button used within the answer area
+const InlineCopyButton: React.FC<{ text: string; label?: string }> = ({ text, label }) => {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = () => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    });
+  };
+  return (
+    <button
+      onClick={handleCopy}
+      title={label || "Copy"}
+      className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded ml-1.5 text-[9px] font-bold bg-white/10 hover:bg-white/20 text-white/60 hover:text-white transition-all active:scale-95 shrink-0"
+    >
+      {copied ? (
+        <><Check className="h-2.5 w-2.5 text-emerald-400" /><span className="text-emerald-400">OK</span></>
+      ) : (
+        <><Copy className="h-2.5 w-2.5" />{label && <span>{label}</span>}</>
+      )}
+    </button>
+  );
+};
+
 // Answer Area
 const AnswerArea: React.FC<{
   responses: AIDisplayResponse[];
@@ -253,6 +277,7 @@ const AnswerArea: React.FC<{
                     {parsed.question}
                   </span>
                 </div>
+                <InlineCopyButton text={parsed.question} label="COPY" />
               </div>
             )}
 
@@ -261,6 +286,9 @@ const AnswerArea: React.FC<{
               <span className="text-[13.5px] font-bold text-white">
                 Answer:
               </span>
+              {!resp.isStreaming && parsed.answer && (
+                <InlineCopyButton text={parsed.answer} label="COPY ALL" />
+              )}
             </div>
 
             {/* Markdown Content */}
@@ -297,6 +325,27 @@ const AnswerArea: React.FC<{
                       {children}
                     </h3>
                   ),
+                  li: ({ children }) => {
+                    const text = (() => {
+                      const extract = (node: any): string => {
+                        if (typeof node === "string") return node;
+                        if (Array.isArray(node)) return node.map(extract).join("");
+                        if (node?.props?.children) return extract(node.props.children);
+                        return "";
+                      };
+                      return extract(children);
+                    })();
+                    return (
+                      <li className="mb-0 marker:text-white/60 flex items-start gap-1 group/li">
+                        <span className="flex-1">{children}</span>
+                        {text && (
+                          <span className="opacity-0 group-hover/li:opacity-100 transition-opacity shrink-0 mt-0.5">
+                            <InlineCopyButton text={text} />
+                          </span>
+                        )}
+                      </li>
+                    );
+                  },
                   strong: ({ children }) => {
                     const text = String(children);
                     const config = getKeywordConfig(text);
@@ -939,6 +988,36 @@ useEffect(() => {
       }, 800);
     }
   }, [isAnalyzing, handleAnalyzeScreen]);
+
+  // ── Keyboard shortcuts ────────────────────────────────────────────────────
+  // ⌘G / Ctrl+G → AI Answer
+  // ⌘K / Ctrl+K → Analyze Screen
+  // These must live here (not in a child) so they fire even when no element is focused.
+  const handleAiAnswerClickRef = useRef(handleAiAnswerClick);
+  const handleAnalyzeScreenClickRef = useRef(handleAnalyzeScreenClick);
+  handleAiAnswerClickRef.current = handleAiAnswerClick;
+  handleAnalyzeScreenClickRef.current = handleAnalyzeScreenClick;
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // Ignore if typing in an input / textarea
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+
+      if (e.key.toLowerCase() === "g") {
+        e.preventDefault();
+        handleAiAnswerClickRef.current();
+      } else if (e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        handleAnalyzeScreenClickRef.current();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const handleSend = useCallback(async () => {
     if (!inputValue.trim() || !sessionInfoRef.current) return;
