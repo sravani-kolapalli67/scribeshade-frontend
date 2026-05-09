@@ -1,40 +1,93 @@
 "use client";
 
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@clerk/clerk-react";
 import { ColumnDef } from "@tanstack/react-table";
 import { DataTable } from "@/components/data-table/data-table";
 import type { ExportableData } from "@/components/data-table/utils/export-utils";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
+  DialogFooter,
 } from "@/components/ui/dialog";
-import { Loader2, Eye, Trash2 } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Badge } from "@/components/ui/badge";
+import { Loader2, Eye, Trash2, MoreVertical, Download, Edit2, CheckCircle2, AlertCircle, Clock } from "lucide-react";
 import ResumePreview from "./ResumePreview";
 import { DeleteResumeDialog } from "./DeleteResumeDialog";
+import UploadResumeDialog from "./UploadResumeDialog";
 import { toast } from "sonner";
 
 export interface Resume extends ExportableData {
   id: string;
   filename: string;
   uploadedAt: string;
+  updatedAt?: string;
   size?: number | string;
   score?: number;
   path?: string;
   ats?: boolean;
+  atsScore?: number;
   atsAnalysis?: any;
   source?: "uploaded" | "builder";
+  fileType?: string;
+  processingStatus?: "completed" | "processing" | "failed";
 }
 
 interface ListOfResumesProps {
   userId: string;
   onSelectResume: (resume: Resume) => void;
   selectedResumeId?: string;
+}
+
+// ── Helper: Format file size ────────────────────────────────────
+function formatFileSize(bytes?: number | string): string {
+  if (!bytes) return "—";
+  const num = typeof bytes === "string" ? parseInt(bytes, 10) : bytes;
+  if (num < 1024) return `${num} B`;
+  if (num < 1024 * 1024) return `${(num / 1024).toFixed(1)} KB`;
+  return `${(num / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// ── Helper: Get file extension ──────────────────────────────────
+function getFileExtension(filename: string): string {
+  return filename.split(".").pop()?.toUpperCase() || "FILE";
+}
+
+// ── Helper: Format date ────────────────────────────────────────
+function formatDate(dateStr?: string): string {
+  if (!dateStr) return "—";
+  return new Date(dateStr).toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  });
+}
+
+// ── Helper: ATS Score Badge ────────────────────────────────────
+function getATSScoreBadge(score?: number): { label: string; variant: string; color: string } {
+  if (score === undefined || score === null) {
+    return { label: "Not Analyzed", variant: "outline", color: "text-slate-500" };
+  }
+  if (score >= 80) return { label: "Excellent", variant: "default", color: "text-emerald-700" };
+  if (score >= 60) return { label: "Good", variant: "secondary", color: "text-blue-700" };
+  if (score >= 40) return { label: "Average", variant: "outline", color: "text-amber-700" };
+  return { label: "Poor", variant: "outline", color: "text-red-700" };
 }
 
 export default function ListOfResumes({
@@ -50,39 +103,92 @@ export default function ListOfResumes({
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [resumeToDelete, setResumeToDelete] = useState<Resume | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
-  const [refreshKey, setRefreshKey] = useState(0);
+  
+  const [isRenameDialogOpen, setIsRenameDialogOpen] = useState(false);
+  const [resumeToRename, setResumeToRename] = useState<Resume | null>(null);
+  const [newFilename, setNewFilename] = useState("");
+  const [isRenaming, setIsRenaming] = useState(false);
 
-  // Per-row ATS loading state: key = resumeId
-  const [atsLoadingIds, setAtsLoadingIds] = useState<Record<string, boolean>>(
-    {},
-  );
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [atsLoadingIds, setAtsLoadingIds] = useState<Record<string, boolean>>({});
+
+  // ✅ Listen for upload completion event
+  useEffect(() => {
+    const handleResumeUploaded = () => {
+      setRefreshKey((prev) => prev + 1);
+      toast.success("Resume uploaded successfully!");
+    };
+
+    window.addEventListener("resumeUploaded", handleResumeUploaded);
+    return () =>
+      window.removeEventListener("resumeUploaded", handleResumeUploaded);
+  }, []);
 
   // ✅ FETCH FUNCTION (DataTable format)
-  // Wrapped in useCallback so the reference only changes when userId changes,
-  // preventing DataTable from re-fetching on every parent render.
-  const fetchResumes = useCallback(async () => {
+  // ✅ async-parallel: Pre-compute all needed values before API call
+  // ✅ async-defer-await: Only await when data is actually needed
+  const fetchResumes = useCallback(async ({ search, from_date, to_date }: { search: string; from_date: string; to_date: string }) => {
+    // Check cheap conditions first before any async operations
     if (!userId) {
-      return { success: true, data: [], pagination: { page: 1, limit: 0, total_pages: 1, total_items: 0 } };
+      return {
+        success: true,
+        data: [],
+        pagination: { page: 1, limit: 0, total_pages: 1, total_items: 0 },
+      };
     }
-    const res = await fetch(
-      `${import.meta.env.VITE_BACKEND_URL}/api/resume/list?userId=${userId}`,
-    );
 
-    const data = await res.json();
+    try {
+      // Build parameters in parallel (non-async operations)
+      const params = new URLSearchParams();
+      params.set("userId", userId);
 
-    return {
-      success: true,
-      data,
-      pagination: {
-        page: 1,
-        limit: data.length,
-        total_pages: 1,
-        total_items: data.length,
-      },
-    };
+      if (search?.trim()) {
+        params.set("search", search.trim());
+      }
+
+      // Single defer point for all API calls
+      const url = `${import.meta.env.VITE_BACKEND_URL}/api/resume/list?${params.toString()}`;
+      const res = await fetch(url);
+
+      if (!res.ok) {
+        console.error("Resume fetch failed:", res.statusText);
+        throw new Error("Failed to fetch resumes");
+      }
+
+      const raw = await res.json();
+      let list: Resume[] = Array.isArray(raw) ? raw : [];
+
+      // Client-side date range filtering on uploadedAt
+      if (from_date || to_date) {
+        const from = from_date ? new Date(from_date).getTime() : -Infinity;
+        const to = to_date ? new Date(to_date + "T23:59:59").getTime() : Infinity;
+        list = list.filter((r) => {
+          const t = new Date(r.uploadedAt).getTime();
+          return t >= from && t <= to;
+        });
+      }
+
+      return {
+        success: true,
+        data: list,
+        pagination: {
+          page: 1,
+          limit: list.length || 0,
+          total_pages: 1,
+          total_items: list.length,
+        },
+      };
+    } catch (error) {
+      console.error("Resume fetch error:", error);
+      return {
+        success: false,
+        data: [],
+        pagination: { page: 1, limit: 0, total_pages: 1, total_items: 0 },
+      };
+    }
   }, [userId]);
 
-  // ✅ ATS
+  // ✅ ATS — Open ATS report for resume using resumeId
   const handleATS = async (resume: Resume) => {
     setAtsLoadingIds((prev) => ({ ...prev, [resume.id]: true }));
 
@@ -101,6 +207,7 @@ export default function ListOfResumes({
               analysis: {
                 ...existing.atsAnalysis,
                 filename: resume.filename,
+                resumeId: resume.id,
               },
             },
           });
@@ -129,6 +236,7 @@ export default function ListOfResumes({
           analysis: {
             ...data,
             filename: resume.filename,
+            resumeId: resume.id,
           },
         },
       });
@@ -137,6 +245,52 @@ export default function ListOfResumes({
       toast.error(error.message || "Something went wrong");
     } finally {
       setAtsLoadingIds((prev) => ({ ...prev, [resume.id]: false }));
+    }
+  };
+
+  // ✅ RENAME
+  const handleOpenRename = (resume: Resume) => {
+    setResumeToRename(resume);
+    setNewFilename(resume.filename);
+    setIsRenameDialogOpen(true);
+  };
+
+  const confirmRename = async () => {
+    if (!resumeToRename || !newFilename.trim()) {
+      toast.error("Please enter a valid filename");
+      return;
+    }
+
+    if (newFilename === resumeToRename.filename) {
+      setIsRenameDialogOpen(false);
+      return;
+    }
+
+    setIsRenaming(true);
+    try {
+      const res = await fetch(
+        `${import.meta.env.VITE_BACKEND_URL}/api/resume/${resumeToRename.id}/rename`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ filename: newFilename.trim() }),
+        },
+      );
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Failed to rename resume");
+      }
+
+      setIsRenameDialogOpen(false);
+      setResumeToRename(null);
+      setRefreshKey((prev) => prev + 1);
+      toast.success("Resume renamed successfully");
+    } catch (error: any) {
+      console.error("Rename error:", error);
+      toast.error(error.message || "Failed to rename resume");
+    } finally {
+      setIsRenaming(false);
     }
   };
 
@@ -182,40 +336,128 @@ export default function ListOfResumes({
     }
   };
 
-  // ✅ COLUMNS — memoized so DataTable's getColumns dep doesn't bust on every render
+  // ✅ COLUMNS — Comprehensive resume management columns
   const columns: ColumnDef<Resume>[] = useMemo(() => [
     {
       accessorKey: "filename",
       header: "Resume Name",
       cell: ({ row }) => {
         const resume = row.original;
-
         return (
-          <div
-            onClick={() => onSelectResume(resume)}
-            className={cn(
-              "cursor-pointer font-medium",
-              selectedResumeId === resume.id && "text-primary",
-            )}
-          >
-            {resume.filename}
+          <div className="min-w-0 flex-1">
+            <div
+              onClick={() => onSelectResume(resume)}
+              className={cn(
+                "cursor-pointer font-medium text-sm truncate",
+                selectedResumeId === resume.id && "text-primary",
+              )}
+              title={resume.filename}
+            >
+              {resume.filename}
+            </div>
           </div>
         );
       },
     },
+
+    {
+      accessorKey: "atsScore",
+      header: "ATS Score",
+      cell: ({ row }) => {
+        const resume = row.original;
+        const score = resume.atsScore;
+        const badge = getATSScoreBadge(score);
+
+        if (score === undefined || score === null) {
+          return (
+            <Badge variant="outline" className="text-xs">
+              Not Analyzed
+            </Badge>
+          );
+        }
+
+        return (
+          <div className="flex items-center gap-2">
+            <Badge variant="secondary" className={`text-xs font-semibold`}>
+              {score}% — {badge.label}
+            </Badge>
+            <div className="w-16 h-1.5 bg-slate-200 rounded-full overflow-hidden">
+              <div
+                className={cn(
+                  "h-full rounded-full transition-all",
+                  score >= 80 && "bg-emerald-500",
+                  score >= 60 && score < 80 && "bg-blue-500",
+                  score >= 40 && score < 60 && "bg-amber-500",
+                  score < 40 && "bg-red-500",
+                )}
+                style={{ width: `${Math.min(score, 100)}%` }}
+              />
+            </div>
+          </div>
+        );
+      },
+    },
+
     {
       accessorKey: "uploadedAt",
-      header: "Uploaded Date",
-      cell: ({ row }) =>
-        new Date(row.getValue("uploadedAt")).toLocaleDateString(),
+      header: "Upload Date",
+      cell: ({ row }) => (
+        <span className="text-sm text-slate-600">{formatDate(row.getValue("uploadedAt"))}</span>
+      ),
     },
+
+    {
+      accessorKey: "updatedAt",
+      header: "Last Updated",
+      cell: ({ row }) => (
+        <span className="text-sm text-slate-600">{formatDate(row.getValue("updatedAt"))}</span>
+      ),
+    },
+
     {
       accessorKey: "size",
       header: "Size",
-      cell: ({ row }) => row.getValue("size") || "—",
+      cell: ({ row }) => (
+        <span className="text-sm text-slate-600 tabular-nums">{formatFileSize(row.getValue("size"))}</span>
+      ),
     },
 
-    // 🔥 ACTIONS
+    {
+      accessorKey: "fileType",
+      header: "Type",
+      cell: ({ row }) => {
+        const resume = row.original;
+        const fileType = resume.fileType || getFileExtension(resume.filename);
+        return (
+          <Badge variant="outline" className="text-xs font-medium">
+            {fileType}
+          </Badge>
+        );
+      },
+    },
+
+    {
+      accessorKey: "processingStatus",
+      header: "Status",
+      cell: ({ row }) => {
+        const status = row.getValue("processingStatus") || "completed";
+        const statusConfig = {
+          completed: { icon: CheckCircle2, color: "text-emerald-600", bg: "bg-emerald-50", label: "Ready" },
+          processing: { icon: Clock, color: "text-amber-600", bg: "bg-amber-50", label: "Processing" },
+          failed: { icon: AlertCircle, color: "text-red-600", bg: "bg-red-50", label: "Failed" },
+        };
+        const config = statusConfig[status as keyof typeof statusConfig] || statusConfig.completed;
+        const Icon = config.icon;
+
+        return (
+          <div className={`inline-flex items-center gap-1.5 rounded-full ${config.bg} px-2.5 py-1.5`}>
+            <Icon className={`h-3.5 w-3.5 ${config.color}`} />
+            <span className={`text-xs font-medium ${config.color}`}>{config.label}</span>
+          </div>
+        );
+      },
+    },
+
     {
       id: "actions",
       header: "Actions",
@@ -223,8 +465,8 @@ export default function ListOfResumes({
         const resume = row.original;
 
         return (
-          <div className="flex gap-2 justify-end">
-            {/* VIEW */}
+          <div className="flex items-center justify-end gap-1">
+            {/* QUICK VIEW */}
             <Button
               size="icon"
               variant="ghost"
@@ -232,51 +474,91 @@ export default function ListOfResumes({
                 setPreviewResume(resume);
                 setIsPreviewOpen(true);
               }}
-              className="h-8 w-8 text-muted-foreground hover:text-foreground transition-colors"
-              title="View Resume"
+              className="h-8 w-8"
+              title="Preview Resume"
             >
               <Eye className="h-4 w-4" />
             </Button>
 
-            {/* ATS */}
-            <Button
-              size="sm"
-              variant={resume.ats ? "outline" : "secondary"}
-              onClick={() => handleATS(resume)}
-              disabled={atsLoadingIds[resume.id]}
-              className="h-8 px-3 font-semibold"
-              title={
-                resume.ats ? "View existing ATS result" : "Run ATS analysis"
-              }
-            >
-              {atsLoadingIds[resume.id] ? (
-                <>
-                  <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" />
-                  Analyzing...
-                </>
-              ) : resume.ats ? (
-                "View ATS"
-              ) : (
-                "ATS"
-              )}
-            </Button>
+            {/* MORE ACTIONS */}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-8 w-8"
+                  title="More actions"
+                >
+                  <MoreVertical className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-48">
+                {resume.atsScore !== undefined && resume.atsScore !== null ? (
+                  <DropdownMenuItem
+                    onClick={() => handleATS(resume)}
+                    className="gap-2"
+                  >
+                    <CheckCircle2 className="h-4 w-4" />
+                    <span>View ATS Report</span>
+                  </DropdownMenuItem>
+                ) : (
+                  <DropdownMenuItem
+                    onClick={() => handleATS(resume)}
+                    disabled={atsLoadingIds[resume.id]}
+                    className="gap-2"
+                  >
+                    {atsLoadingIds[resume.id] ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        <span>Analyzing...</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="h-4 w-4" />
+                        <span>Run ATS Analysis</span>
+                      </>
+                    )}
+                  </DropdownMenuItem>
+                )}
 
-            {/* DELETE */}
-            <Button
-              size="icon"
-              variant="ghost"
-              onClick={() => handleDelete(resume)}
-              className="h-8 w-8 text-destructive hover:text-destructive hover:bg-destructive/10 transition-colors"
-              title="Delete Resume"
-            >
-              <Trash2 className="h-4 w-4" />
-            </Button>
+                <DropdownMenuItem
+                  onClick={() => handleOpenRename(resume)}
+                  className="gap-2"
+                >
+                  <Edit2 className="h-4 w-4" />
+                  <span>Rename Resume</span>
+                </DropdownMenuItem>
+
+                <DropdownMenuSeparator />
+
+                <DropdownMenuItem
+                  onClick={() => {
+                    const url = `${import.meta.env.VITE_BACKEND_URL}${resume.path || "/uploads/resumes/" + resume.id}`;
+                    window.open(url, "_blank");
+                  }}
+                  className="gap-2"
+                >
+                  <Download className="h-4 w-4" />
+                  <span>Download</span>
+                </DropdownMenuItem>
+
+                <DropdownMenuSeparator />
+
+                <DropdownMenuItem
+                  onClick={() => handleDelete(resume)}
+                  className="gap-2 text-destructive focus:text-destructive"
+                >
+                  <Trash2 className="h-4 w-4" />
+                  <span>Delete</span>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         );
       },
     },
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [onSelectResume, selectedResumeId, atsLoadingIds, handleATS, handleDelete]);
+  ], [onSelectResume, selectedResumeId, atsLoadingIds, handleATS]);
 
   return (
     <div className="space-y-4">
@@ -292,9 +574,16 @@ export default function ListOfResumes({
         fetchDataFn={fetchResumes}
         fetchByIdsFn={async () => []}
         idField="id"
+        renderToolbarContent={() => (
+          <UploadResumeDialog
+            userId={userId}
+            triggerClassName="h-9 rounded-md"
+          />
+        )}
         config={{
-          enableSearch: false,
+          enableSearch: true,
           enableRowSelection: false,
+          searchPlaceholder: "Search by resume name, JD, or keywords...",
         }}
       />
 
@@ -319,6 +608,59 @@ export default function ListOfResumes({
         resumeName={resumeToDelete?.filename || ""}
         isDeleting={isDeleting}
       />
+
+      {/* ✅ RENAME DIALOG */}
+      <Dialog open={isRenameDialogOpen} onOpenChange={setIsRenameDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Rename Resume</DialogTitle>
+          </DialogHeader>
+
+          <div className="space-y-4 py-4">
+            <div>
+              <label className="text-sm font-medium text-slate-700 block mb-2">
+                New Filename
+              </label>
+              <Input
+                autoFocus
+                value={newFilename}
+                onChange={(e) => setNewFilename(e.target.value)}
+                placeholder="Enter new resume name"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") confirmRename();
+                }}
+                className="rounded-lg border-slate-200 focus-visible:ring-1 focus-visible:ring-brand"
+              />
+              <p className="text-xs text-slate-500 mt-1.5">
+                The filename will be updated, but the resume ID remains unchanged for internal tracking.
+              </p>
+            </div>
+          </div>
+
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              variant="outline"
+              onClick={() => setIsRenameDialogOpen(false)}
+              disabled={isRenaming}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={confirmRename}
+              disabled={isRenaming || !newFilename.trim() || newFilename === resumeToRename?.filename}
+            >
+              {isRenaming ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" />
+                  Renaming...
+                </>
+              ) : (
+                "Rename"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

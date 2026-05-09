@@ -34,6 +34,8 @@ interface RazorpayOptions {
   prefill?: Record<string, string>;
   theme?: { color?: string };
   modal?: { ondismiss?: () => void };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  "payment_failed"?: (response: { error: { code: string; description: string; reason: string; source: string; step: string; metadata: { order_id: string; payment_id: string } } }) => void;
 }
 
 interface RazorpayResponse {
@@ -155,7 +157,51 @@ export function BuyCreditsDialog({
           description: `${selectedPlan.name} — ${selectedPlan.credits} credits`,
           order_id: order.orderId,
           theme: { color: "#458fff" },
-          modal: { ondismiss: () => reject(new Error("DISMISSED")) },
+          modal: {
+            ondismiss: () => {
+              // Mark PENDING order as FAILED when user closes the modal without paying
+              getToken().then((failToken) => {
+                fetch(`${import.meta.env.VITE_BACKEND_URL}/api/credits/purchase/fail`, {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${failToken}`,
+                  },
+                  body: JSON.stringify({
+                    razorpay_order_id: order.orderId,
+                    failure_reason: "cancelled_by_user",
+                  }),
+                }).catch(() => { /* best-effort */ });
+              }).catch(() => { /* best-effort */ });
+              reject(new Error("DISMISSED"));
+            },
+          },
+          "payment_failed": async (response) => {
+            // Notify backend so the PENDING record is marked FAILED
+            try {
+              const failToken = await getToken();
+              await fetch(
+                `${import.meta.env.VITE_BACKEND_URL}/api/credits/purchase/fail`,
+                {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${failToken}`,
+                  },
+                  body: JSON.stringify({
+                    razorpay_order_id: order.orderId,
+                    failure_reason: response?.error?.description ?? response?.error?.reason,
+                  }),
+                },
+              );
+            } catch {
+              // best-effort — don't block the UI
+            }
+            toast.error("Payment failed", {
+              description: response?.error?.description ?? "Please try a different payment method.",
+            });
+            reject(new Error("PAYMENT_FAILED"));
+          },
           handler: async (response: RazorpayResponse) => {
             try {
               const verifyToken = await getToken();
@@ -201,6 +247,8 @@ export function BuyCreditsDialog({
     } catch (err: unknown) {
       if (err instanceof Error && err.message === "DISMISSED") {
         // silent — user closed modal
+      } else if (err instanceof Error && err.message === "PAYMENT_FAILED") {
+        // already toasted in payment_failed callback
       } else if (err instanceof Error && err.message !== "VERIFY_FAILED") {
         toast.error("Payment failed. Please try again.");
       }

@@ -27,6 +27,8 @@ const UserQuestions = () => {
         const questions = await res.json();
 
         const search = (params.search || "").toLowerCase();
+        const from = params.from_date ? new Date(params.from_date).getTime() : -Infinity;
+        const to = params.to_date ? new Date(params.to_date + "T23:59:59").getTime() : Infinity;
 
         const filtered = questions.filter((q: any) => {
           const matchesSearch =
@@ -36,12 +38,16 @@ const UserQuestions = () => {
             difficulty === "all" || q.difficulty === difficulty;
           const matchesIndustry = industry === "all" || q.industry === industry;
           const matchesLanguage = language === "all" || q.language === language;
+          const matchesDate = !params.from_date && !params.to_date
+            ? true
+            : (() => { const t = new Date(q.createdAt).getTime(); return t >= from && t <= to; })();
 
           return (
             matchesSearch &&
             matchesDifficulty &&
             matchesIndustry &&
-            matchesLanguage
+            matchesLanguage &&
+            matchesDate
           );
         });
 

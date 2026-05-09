@@ -15,11 +15,18 @@ const AllQuestions = () => {
       const companies = await res.json();
 
       const search = (params.search || "").toLowerCase();
-      const filtered = companies.filter(
-        (c: any) =>
+      const from = params.from_date ? new Date(params.from_date).getTime() : -Infinity;
+      const to = params.to_date ? new Date(params.to_date + "T23:59:59").getTime() : Infinity;
+
+      const filtered = companies.filter((c: any) => {
+        const matchesSearch =
           c.name.toLowerCase().includes(search) ||
-          (c.description && c.description.toLowerCase().includes(search)),
-      );
+          (c.description && c.description.toLowerCase().includes(search));
+        const matchesDate = !params.from_date && !params.to_date
+          ? true
+          : (() => { const t = new Date(c.createdAt).getTime(); return t >= from && t <= to; })();
+        return matchesSearch && matchesDate;
+      });
 
       return {
         success: true,

@@ -15,7 +15,15 @@ import { cn } from "@/lib/utils";
 const isTauri = () => typeof window !== "undefined" && "__TAURI__" in window;
 const API = import.meta.env.VITE_BACKEND_URL || "";
 
-export default function UploadResumeDialog({ userId }: { userId: string }) {
+interface UploadResumeDialogProps {
+  userId: string;
+  triggerClassName?: string;
+}
+
+export default function UploadResumeDialog({
+  userId,
+  triggerClassName,
+}: UploadResumeDialogProps) {
   const [open, setOpen] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
@@ -144,8 +152,8 @@ export default function UploadResumeDialog({ userId }: { userId: string }) {
       }
 
       console.log("Uploaded:", data);
+      // Dispatch event for ListOfResumes to listen and refresh
       window.dispatchEvent(new Event("resumeUploaded"));
-      window.location.reload();
       setOpen(false);
       resetState();
     } catch (error: any) {
@@ -161,7 +169,12 @@ export default function UploadResumeDialog({ userId }: { userId: string }) {
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
-        <Button className="gap-2 px-6 py-6 rounded-xl bg-black dark:bg-white text-white dark:text-black hover:opacity-90 transition-all font-semibold shadow-lg">
+        <Button
+          className={cn(
+            "gap-2 border border-primary bg-primary text-primary-foreground shadow-sm hover:bg-primary/90 hover:text-primary-foreground",
+            triggerClassName,
+          )}
+        >
           <UploadIcon className="h-4 w-4" />
           Upload Resume
         </Button>
@@ -248,7 +261,7 @@ export default function UploadResumeDialog({ userId }: { userId: string }) {
           <Button
             onClick={uploadToServer}
             disabled={!file || loading}
-            className="bg-black dark:bg-white text-white dark:text-black hover:opacity-90 transition-all font-semibold rounded-xl px-6 h-10 shadow-md"
+            className="font-semibold rounded-xl px-6 h-10 shadow-md"
           >
             {loading ? "Uploading..." : "Upload"}
           </Button>

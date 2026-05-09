@@ -24,6 +24,8 @@ interface RazorpayOptions {
   prefill?: Record<string, string>;
   theme?: { color?: string };
   modal?: { ondismiss?: () => void };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  "payment_failed"?: (response: { error: { code: string; description: string; reason: string; source: string; step: string; metadata: { order_id: string; payment_id: string } } }) => void;
 }
 interface RazorpayResponse {
   razorpay_order_id: string;
@@ -113,7 +115,46 @@ export function CreditPlansSection({ onSuccess }: CreditPlansSectionProps) {
           description: `${plan.name} — ${plan.credits} credits`,
           order_id: order.orderId,
           theme: { color: "#458fff" },
-          modal: { ondismiss: () => reject(new Error("DISMISSED")) },
+          modal: {
+            ondismiss: () => {
+              getToken().then((failToken) => {
+                fetch(`${import.meta.env.VITE_BACKEND_URL}/api/credits/purchase/fail`, {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${failToken}`,
+                  },
+                  body: JSON.stringify({
+                    razorpay_order_id: order.orderId,
+                    failure_reason: "cancelled_by_user",
+                  }),
+                }).catch(() => { /* best-effort */ });
+              }).catch(() => { /* best-effort */ });
+              reject(new Error("DISMISSED"));
+            },
+          },
+          "payment_failed": async (response) => {
+            try {
+              const failToken = await getToken();
+              await fetch(
+                `${import.meta.env.VITE_BACKEND_URL}/api/credits/purchase/fail`,
+                {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json", Authorization: `Bearer ${failToken}` },
+                  body: JSON.stringify({
+                    razorpay_order_id: order.orderId,
+                    failure_reason: response?.error?.description ?? response?.error?.reason,
+                  }),
+                },
+              );
+            } catch {
+              // best-effort
+            }
+            toast.error("Payment failed", {
+              description: response?.error?.description ?? "Please try a different payment method.",
+            });
+            reject(new Error("PAYMENT_FAILED"));
+          },
           handler: async (response: RazorpayResponse) => {
             try {
               const verifyToken = await getToken();
@@ -151,6 +192,8 @@ export function CreditPlansSection({ onSuccess }: CreditPlansSectionProps) {
     } catch (err: unknown) {
       if (err instanceof Error && err.message === "DISMISSED") {
         // silent — user closed Razorpay modal
+      } else if (err instanceof Error && err.message === "PAYMENT_FAILED") {
+        // already toasted in payment_failed callback
       } else if (err instanceof Error && err.message !== "VERIFY_FAILED") {
         toast.error("Payment failed. Please try again.");
       }
@@ -160,19 +203,19 @@ export function CreditPlansSection({ onSuccess }: CreditPlansSectionProps) {
   }, [getToken, onSuccess]);
 
   return (
-    <section className="space-y-8">
+    <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_12px_32px_rgba(15,23,42,0.03)] space-y-6">
 
       {/* ── Header ── */}
-      <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2 mb-2">
-            <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-brand/10 text-brand">
+      <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand/10 text-brand">
               <Coins className="h-4 w-4" />
             </span>
-            <h2 className="text-2xl font-extrabold tracking-tight">Buy Credits</h2>
+            <h2 className="text-lg font-semibold tracking-tight text-slate-950">Buy credits</h2>
           </div>
-          <p className="text-sm text-muted-foreground max-w-md">
-            One-time purchases — credits never expire and roll over forever.
+          <p className="max-w-xl text-sm leading-6 text-slate-600">
+            One-time credit packs for teams and individual users. Structured pricing, persistent balances, and quick checkout.
           </p>
         </div>
 
@@ -185,7 +228,7 @@ export function CreditPlansSection({ onSuccess }: CreditPlansSectionProps) {
           ].map((t) => (
             <span
               key={t.label}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-muted/60 border border-border/50 text-[11px] font-medium text-muted-foreground"
+              className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] font-medium text-slate-500"
             >
               <span className="text-brand">{t.icon}</span>
               {t.label}
@@ -195,16 +238,16 @@ export function CreditPlansSection({ onSuccess }: CreditPlansSectionProps) {
       </div>
 
       {/* ── Currency switcher ── */}
-      <div className="inline-flex rounded-2xl bg-muted/50 p-1.5 gap-1 border border-border/40 shadow-inner">
+      <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">
         {(["INR", "USD", "GBP"] as SupportedCurrency[]).map((c) => (
           <button
             key={c}
             type="button"
             onClick={() => { setCurrency(c); setSelectedPlan(null); }}
-            className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand ${
+            className={`inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-xs font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand ${
               currency === c
-                ? "bg-white shadow-md text-foreground scale-105"
-                : "text-muted-foreground hover:text-foreground hover:bg-white/40"
+                ? "bg-white text-slate-950 shadow-sm"
+                : "text-slate-500 hover:bg-white hover:text-slate-900"
             }`}
           >
             <span className="text-sm">{CURRENCY_FLAGS[c]}</span>
@@ -215,19 +258,19 @@ export function CreditPlansSection({ onSuccess }: CreditPlansSectionProps) {
 
       {/* ── Plan grid ── */}
       {isLoading ? (
-        <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
           {Array.from({ length: 6 }).map((_, i) => (
-            <div key={i} className="h-40 rounded-2xl bg-muted animate-pulse" />
+            <div key={i} className="h-48 rounded-lg bg-slate-100 animate-pulse" />
           ))}
         </div>
       ) : plans.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-20 text-center text-muted-foreground">
-          <Coins className="h-10 w-10 mb-4 opacity-30" />
+        <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-slate-200 py-20 text-center text-slate-500">
+          <Coins className="mb-4 h-10 w-10 opacity-30" />
           <p className="text-sm font-medium">No plans available right now.</p>
-          <p className="text-xs mt-1">Please try a different currency or check back later.</p>
+          <p className="mt-1 text-xs">Please try a different currency or check back later.</p>
         </div>
       ) : (
-        <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
           {plans.map((plan) => {
             const isSelected  = selectedPlan?.code === plan.code;
             const isPopular   = plan.code === POPULAR_CODE;
@@ -239,18 +282,18 @@ export function CreditPlansSection({ onSuccess }: CreditPlansSectionProps) {
               <div
                 key={plan.code}
                 onClick={() => setSelectedPlan(isSelected ? null : plan)}
-                className={`relative rounded-2xl border p-5 cursor-pointer group transition-all duration-300 hover:scale-[1.02] active:scale-[0.98] flex flex-col gap-3 ${
+                className={`relative flex cursor-pointer flex-col gap-4 rounded-lg border p-5 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_8px_24px_rgba(15,23,42,0.06)] ${
                   isSelected
-                    ? "border-brand bg-brand/[0.04] ring-2 ring-brand/20 shadow-xl shadow-brand/10"
+                    ? "border-brand/50 bg-brand/[0.03] shadow-[0_10px_24px_rgba(69,143,255,0.08)]"
                     : isPopular
-                    ? "border-brand/40 bg-brand/[0.02] hover:border-brand/60 hover:shadow-lg hover:shadow-brand/5"
-                    : "border-border/60 bg-card hover:border-brand/30 hover:shadow-md"
+                    ? "border-slate-300 bg-slate-50/60"
+                    : "border-slate-200 bg-white"
                 }`}
               >
                 {/* Badge */}
                 {(isPopular || isBestValue) && (
-                  <span className={`absolute -top-2.5 left-3 text-[10px] font-bold px-2.5 py-0.5 rounded-full shadow-sm ${
-                    isBestValue ? "bg-emerald-500 text-white" : "bg-brand text-white"
+                  <span className={`absolute left-4 top-0 -translate-y-1/2 rounded-md px-2 py-1 text-[10px] font-medium ${
+                    isBestValue ? "border border-emerald-200 bg-emerald-50 text-emerald-700" : "border border-brand/20 bg-brand/[0.08] text-brand"
                   }`}>
                     {isBestValue ? "Best Value" : "Popular"}
                   </span>
@@ -262,36 +305,44 @@ export function CreditPlansSection({ onSuccess }: CreditPlansSectionProps) {
                 )}
 
                 {/* Credits pill */}
-                <div className="flex items-center gap-1.5">
-                  <Zap className={`h-3.5 w-3.5 ${isSelected ? "text-brand" : "text-muted-foreground"}`} />
-                  <span className={`text-[11px] font-bold tabular-nums ${isSelected ? "text-brand" : "text-muted-foreground"}`}>
+                <div className="flex items-center gap-1.5 pt-2">
+                  <Zap className={`h-3.5 w-3.5 ${isSelected ? "text-brand" : "text-slate-400"}`} />
+                  <span className={`text-[11px] font-medium tabular-nums ${isSelected ? "text-brand" : "text-slate-500"}`}>
                     {plan.credits} credits
                   </span>
                 </div>
 
                 {/* Name + price */}
                 <div>
-                  <p className="text-sm font-semibold text-foreground/80 leading-tight">{plan.name}</p>
-                  <p className={`text-3xl font-black tabular-nums tracking-tight mt-1 ${isSelected ? "text-brand" : "text-foreground"}`}>
+                  <p className="text-sm font-medium leading-tight text-slate-700">{plan.name}</p>
+                  <div className="mt-2 flex items-end justify-between gap-3">
+                    <p className={`text-3xl font-semibold tabular-nums tracking-tight ${isSelected ? "text-brand" : "text-slate-950"}`}>
                     {sym}{plan.amountMajor}
-                  </p>
+                    </p>
+                    <div className="text-right">
+                      <p className="text-[11px] uppercase tracking-[0.16em] text-slate-400">Value</p>
+                      <p className="text-sm font-medium text-slate-700">{valuePercent}%</p>
+                    </div>
+                  </div>
                 </div>
 
                 {/* Feature blurb */}
                 {plan.feature && (
-                  <p className="text-[11px] text-muted-foreground leading-snug line-clamp-2">{plan.feature}</p>
+                  <p className="min-h-10 text-[12px] leading-5 text-slate-500 line-clamp-2">{plan.feature}</p>
                 )}
 
                 {/* Value bar */}
-                <div className="mt-auto pt-1 flex items-center gap-1.5">
-                  <TrendingUp className="h-2.5 w-2.5 text-muted-foreground/50 shrink-0" />
-                  <div className="flex-1 h-1 rounded-full bg-muted overflow-hidden">
+                <div className="mt-auto space-y-2 pt-1">
+                  <div className="flex items-center justify-between text-[11px] text-slate-500">
+                    <span className="inline-flex items-center gap-1.5"><TrendingUp className="h-3 w-3" /> efficiency</span>
+                    <span>{valuePercent}%</span>
+                  </div>
+                  <div className="h-1.5 overflow-hidden rounded-full bg-slate-100">
                     <div
-                      className={`h-full rounded-full transition-all duration-500 ${isSelected ? "bg-brand" : "bg-muted-foreground/25 group-hover:bg-brand/40"}`}
+                      className={`h-full rounded-full transition-all duration-300 ${isSelected ? "bg-brand" : isBestValue ? "bg-emerald-500/70" : "bg-slate-300"}`}
                       style={{ width: `${valuePercent}%` }}
                     />
                   </div>
-                  <span className="text-[9px] text-muted-foreground/50 tabular-nums">{valuePercent}%</span>
                 </div>
               </div>
             );
@@ -301,18 +352,18 @@ export function CreditPlansSection({ onSuccess }: CreditPlansSectionProps) {
 
       {/* ── Buy CTA ── */}
       {selectedPlan ? (
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 rounded-2xl border border-brand/20 bg-brand/[0.03] px-6 py-4">
+        <div className="flex flex-col gap-4 rounded-lg border border-slate-200 bg-slate-50 px-5 py-5 lg:flex-row lg:items-center lg:justify-between">
           <div className="space-y-0.5">
-            <p className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground">Selected pack</p>
-            <p className="text-lg font-extrabold text-foreground">
+            <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-slate-500">Selected pack</p>
+            <p className="text-lg font-semibold text-slate-950">
               {selectedPlan.credits} credits — {sym}{selectedPlan.amountMajor}
             </p>
-            <p className="text-xs text-muted-foreground">{selectedPlan.name}</p>
+            <p className="text-xs text-slate-500">{selectedPlan.name}</p>
           </div>
           <Button
             onClick={() => handlePay(selectedPlan)}
             disabled={paying}
-            className="gap-2.5 bg-brand hover:bg-brand/90 text-white font-bold h-12 px-8 rounded-2xl shadow-lg shadow-brand/20 active:scale-95 transition-all shrink-0 disabled:opacity-60"
+            className="h-11 shrink-0 rounded-lg bg-brand px-6 font-medium text-white transition-all duration-200 hover:bg-brand/90 disabled:opacity-60"
           >
             {paying ? <Loader2 className="h-5 w-5 animate-spin" /> : <Coins className="h-5 w-5" />}
             {paying ? "Processing…" : `Buy Now — ${sym}${selectedPlan.amountMajor}`}
@@ -320,7 +371,7 @@ export function CreditPlansSection({ onSuccess }: CreditPlansSectionProps) {
         </div>
       ) : (
         !isLoading && plans.length > 0 && (
-          <p className="text-sm text-muted-foreground text-center py-2">
+          <p className="py-2 text-center text-sm text-slate-500">
             ↑ Select a pack above to purchase
           </p>
         )

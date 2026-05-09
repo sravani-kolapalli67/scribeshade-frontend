@@ -11,9 +11,16 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { FilePlus, ChevronLeft, ChevronRight } from "lucide-react";
+import { FilePlus, ChevronLeft, ChevronRight, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ENDPOINTS } from "@/lib/endpoints";
+import {
+  postCreditedAi,
+  createIdempotencyKey,
+  InsufficientCreditsError,
+} from "@/lib/creditedAi";
+import { useCreditsBalance, setOptimisticBalance } from "@/hooks/useCreditsBalance";
+import { toast } from "sonner";
 
 // Step sub-components
 import { SourceSelectionStep } from "./BuildResume/SourceSelectionStep";
@@ -64,7 +71,8 @@ const EXTRACTION_FIELDS = [
 
 export function BuildResumeDialog() {
   const navigate = useNavigate();
-  const { getToken } = useAuth();
+  const { getToken, userId: clerkUserId } = useAuth();
+  const { refresh: refreshBalance } = useCreditsBalance();
   const [open, setOpen] = React.useState(false);
 
   // Step machine
@@ -136,7 +144,7 @@ export function BuildResumeDialog() {
     // and the mark-complete flow has a resumeId to work with.
     let savedResumeId: string | null = null;
     try {
-      const userId = localStorage.getItem("userId");
+      const userId = localStorage.getItem("userId") ?? clerkUserId;
       const token = await getToken();
       const defaultSections = [
         { id: "personalInfo",   label: "Personal Info",   required: true,  enabled: true  },
@@ -216,37 +224,39 @@ export function BuildResumeDialog() {
     }
 
     try {
-      const userId = localStorage.getItem("userId");
+      const userId = localStorage.getItem("userId") ?? clerkUserId;
       const token = await getToken();
+      const idempotencyKey = createIdempotencyKey();
 
-      const res = await fetch(ENDPOINTS.resumeBuilderExtractFields(), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          userId,
-          resumeContext,
-          jobDescription: jdData.jobDescription || undefined,
-          jobTitle:       jdData.jobTitle       || undefined,
-          company:        jdData.company        || undefined,
-        }),
-      });
+      const { data, creditsUsed, creditsRemaining, cached } =
+        await postCreditedAi<{ fields: Record<string, string> }>(
+          ENDPOINTS.resumeBuilderExtractFields(),
+          {
+            userId,
+            resumeContext,
+            jobDescription: jdData.jobDescription || undefined,
+            jobTitle:       jdData.jobTitle       || undefined,
+            company:        jdData.company        || undefined,
+          },
+          { token, idempotencyKey },
+        );
 
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data.error ?? "AI extraction failed");
+      if (!cached && creditsUsed > 0) {
+        toast.success(
+          `Resume parsed · ${creditsUsed} credit${creditsUsed === 1 ? "" : "s"} used · ${creditsRemaining.toFixed(2)} remaining`,
+        );
       }
-
-      await navigateToEditor(data.fields);
+      if (!isNaN(creditsRemaining)) setOptimisticBalance(creditsRemaining);
+      refreshBalance();
+      await navigateToEditor(data.fields as never);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Something went wrong";
+      const message = err instanceof InsufficientCreditsError
+        ? "Not enough credits to parse this resume—top up to continue."
+        : err instanceof Error ? err.message : "Something went wrong";
       setProcessingStatus("error");
       setProcessingError(message);
     }
-  }, [getToken, sourceType, selectedResume, jdData, navigateToEditor]);
+  }, [getToken, sourceType, selectedResume, jdData, navigateToEditor, refreshBalance]);
 
   // ── Reset ──────────────────────────────────────────────────────────────────
 
@@ -286,40 +296,60 @@ export function BuildResumeDialog() {
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
-        <Button className="gap-2 px-6 py-6 rounded-xl bg-black dark:bg-white text-white dark:text-black hover:opacity-90 transition-all font-semibold shadow-lg">
-          <FilePlus className="h-5 w-5" />
+        <Button className="gap-2 px-5 py-2.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800 transition-all duration-150 font-medium text-sm shadow-sm">
+          <FilePlus className="h-4 w-4" />
           Build Resume
         </Button>
       </DialogTrigger>
 
-      <DialogContent className="sm:max-w-2xl border-none shadow-2xl rounded-2xl p-0 overflow-hidden bg-background">
-        <DialogHeader className="pt-6 px-8 pb-2">
-          <div className="flex items-center justify-between">
-            <DialogTitle className="text-2xl font-bold tracking-tight">
-              {title}
-            </DialogTitle>
+      <DialogContent className="sm:max-w-[520px] border border-slate-200/80 shadow-[0_8px_40px_rgba(0,0,0,0.10)] rounded-[18px] p-0 overflow-hidden bg-white gap-0 [&>button]:hidden flex flex-col max-h-[min(90vh,720px)]">
+        {/* ── Header ──────────────────────────────────────────────────── */}
+        <div className="px-7 pt-6 pb-5 shrink-0">
+          <div className="flex items-start justify-between mb-1">
+            <div>
+              <DialogTitle className="text-[17px] font-semibold tracking-tight text-slate-900 leading-snug">
+                {title}
+              </DialogTitle>
+              <p className="mt-0.5 text-[13px] text-slate-400 font-normal leading-snug">
+                {stepId === "source" && "Choose how you want to create your resume"}
+                {stepId === "extract" && "Select the data to pull from your file"}
+                {stepId === "jd" && "Tell us about the role you're targeting"}
+                {stepId === "template" && "Pick a layout for your resume"}
+                {stepId === "processing" && "AI is analyzing and generating your resume structure"}
+              </p>
+            </div>
+            <button
+              onClick={() => handleOpenChange(false)}
+              className="mt-0.5 ml-4 flex items-center justify-center h-7 w-7 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors duration-150 shrink-0"
+              aria-label="Close"
+            >
+              <X className="h-4 w-4" />
+            </button>
           </div>
 
-          {/* Progress indicator */}
-          <div className="flex items-center gap-2 mb-4">
-            {progressSteps.map((s, i) => (
-              <div
-                key={s}
-                className={cn(
-                  "h-1.5 rounded-full transition-all duration-300",
-                  i === progressIndex
-                    ? "w-8 bg-primary"
-                    : i < progressIndex
-                    ? "w-4 bg-primary/50"
-                    : "w-4 bg-muted",
-                )}
-              />
-            ))}
-          </div>
-        </DialogHeader>
+          {/* Segmented progress bar */}
+          {stepId !== "processing" && (
+            <div className="flex items-center gap-1.5 mt-4">
+              {progressSteps.map((s, i) => (
+                <div
+                  key={s}
+                  className={cn(
+                    "h-[3px] flex-1 rounded-full transition-all duration-300",
+                    i <= progressIndex
+                      ? "bg-blue-500"
+                      : "bg-slate-200",
+                  )}
+                />
+              ))}
+            </div>
+          )}
+        </div>
 
-        {/* Step content */}
-        <div className="px-8 pb-8 pt-2">
+        {/* Divider */}
+        <div className="h-px bg-slate-100 shrink-0" />
+
+        {/* ── Step content ────────────────────────────────────────────── */}
+        <div className="px-7 py-5 flex-1 min-h-0 overflow-y-auto">
           {stepId === "source" && (
             <SourceSelectionStep
               sourceType={sourceType}
@@ -357,44 +387,44 @@ export function BuildResumeDialog() {
               onSkip={() => { void navigateToEditor(); }}
             />
           )}
+        </div>
 
-          {/* Footer nav */}
-          {showFooter && (
-            <div className="flex items-center justify-between pt-6 border-t mt-6">
-              <Button
-                variant="ghost"
+        {/* ── Footer ──────────────────────────────────────────────────── */}
+        {showFooter && (
+          <>
+            <div className="h-px bg-slate-100 shrink-0" />
+            <div className="flex items-center justify-between px-7 py-4 shrink-0">
+              <button
                 onClick={goBack}
                 disabled={stepIndex === 0}
-                className="rounded-xl gap-2 h-11 px-4"
+                className="flex items-center gap-1.5 text-[13px] font-medium text-slate-400 hover:text-slate-700 disabled:opacity-0 disabled:pointer-events-none transition-colors duration-150"
               >
-                <ChevronLeft className="h-4 w-4" />
+                <ChevronLeft className="h-3.5 w-3.5" />
                 Back
-              </Button>
+              </button>
 
-              <div className="flex items-center gap-3">
-                {/* Skip button for JD step */}
+              <div className="flex items-center gap-2">
                 {stepId === "jd" && (
-                  <Button
-                    variant="ghost"
+                  <button
                     onClick={goNext}
-                    className="rounded-xl h-11 px-4 text-muted-foreground hover:text-foreground"
+                    className="text-[13px] font-medium text-slate-400 hover:text-slate-600 transition-colors duration-150 px-3 py-1.5"
                   >
-                    Skip →
-                  </Button>
+                    Skip
+                  </button>
                 )}
 
-                <Button
+                <button
                   onClick={goNext}
                   disabled={isNextDisabled()}
-                  className="rounded-xl gap-2 h-11 px-8 bg-black dark:bg-white text-white dark:text-black font-semibold hover:opacity-90"
+                  className="flex items-center gap-1.5 px-5 py-2 rounded-lg bg-slate-900 text-white text-[13px] font-medium hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-150 active:scale-[0.98]"
                 >
                   {stepId === "template" ? "Generate Resume" : "Continue"}
-                  <ChevronRight className="h-4 w-4" />
-                </Button>
+                  <ChevronRight className="h-3.5 w-3.5" />
+                </button>
               </div>
             </div>
-          )}
-        </div>
+          </>
+        )}
       </DialogContent>
     </Dialog>
   );

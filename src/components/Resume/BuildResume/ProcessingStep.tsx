@@ -1,7 +1,7 @@
 "use client";
 
+import * as React from "react";
 import { Sparkles, AlertTriangle, RefreshCw } from "lucide-react";
-import { Button } from "@/components/ui/button";
 
 export type ProcessingStatus = "loading" | "success" | "error";
 
@@ -12,42 +12,85 @@ interface ProcessingStepProps {
   onSkip?: () => void;
 }
 
+const AI_STATES = [
+  "Extracting resume content",
+  "Analyzing experience & skills",
+  "Structuring resume sections",
+  "Optimizing content flow",
+  "Preparing final layout",
+];
+
+// Smooth shimmer progress that advances to ~85% over ~20s then stays
+function useSimulatedProgress() {
+  const [progress, setProgress] = React.useState(2);
+  React.useEffect(() => {
+    const interval = setInterval(() => {
+      setProgress((p) => {
+        if (p >= 85) { clearInterval(interval); return p; }
+        // Slow down as it approaches 85
+        const step = p < 40 ? 2.5 : p < 65 ? 1.2 : 0.5;
+        return Math.min(p + step, 85);
+      });
+    }, 400);
+    return () => clearInterval(interval);
+  }, []);
+  return progress;
+}
+
 export function ProcessingStep({
   status = "loading",
   error = null,
   onRetry,
   onSkip,
 }: ProcessingStepProps) {
+  // Cycling AI state label
+  const [stateIdx, setStateIdx] = React.useState(0);
+  const [fadeIn, setFadeIn] = React.useState(true);
+  const progress = useSimulatedProgress();
+
+  React.useEffect(() => {
+    if (status !== "loading") return;
+    const timer = setInterval(() => {
+      setFadeIn(false);
+      setTimeout(() => {
+        setStateIdx((i) => (i + 1) % AI_STATES.length);
+        setFadeIn(true);
+      }, 200);
+    }, 2600);
+    return () => clearInterval(timer);
+  }, [status]);
+
   if (status === "error") {
     return (
-      <div className="flex flex-col items-center justify-center py-12 text-center space-y-6 animate-in fade-in zoom-in duration-300">
-        <div className="h-20 w-20 rounded-full bg-destructive/10 border-2 border-destructive/20 flex items-center justify-center">
-          <AlertTriangle className="h-9 w-9 text-destructive" />
+      <div className="flex flex-col items-center justify-center py-10 text-center gap-5">
+        <div className="h-14 w-14 rounded-full bg-red-50 border border-red-100 flex items-center justify-center">
+          <AlertTriangle className="h-6 w-6 text-red-400" />
         </div>
-        <div className="space-y-2">
-          <h3 className="text-xl font-bold tracking-tight text-destructive">AI Extraction Failed</h3>
-          <p className="text-muted-foreground text-sm max-w-xs mx-auto leading-relaxed">
+        <div className="space-y-1.5">
+          <h3 className="text-[15px] font-semibold text-slate-800 tracking-tight">
+            Generation failed
+          </h3>
+          <p className="text-[13px] text-slate-400 max-w-[260px] mx-auto leading-relaxed">
             {error ?? "Something went wrong while processing your resume."}
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2.5 mt-1">
           {onRetry && (
-            <Button
-              variant="outline"
+            <button
               onClick={onRetry}
-              className="rounded-xl gap-2"
+              className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-slate-200 bg-white text-[13px] font-medium text-slate-600 hover:bg-slate-50 hover:border-slate-300 transition-colors duration-150"
             >
               <RefreshCw className="h-3.5 w-3.5" />
-              Try Again
-            </Button>
+              Try again
+            </button>
           )}
           {onSkip && (
-            <Button
+            <button
               onClick={onSkip}
-              className="rounded-xl bg-black dark:bg-white text-white dark:text-black hover:opacity-90"
+              className="px-4 py-2 rounded-lg bg-slate-900 text-white text-[13px] font-medium hover:bg-slate-700 transition-colors duration-150"
             >
-              Continue Without AI
-            </Button>
+              Continue without AI
+            </button>
           )}
         </div>
       </div>
@@ -55,33 +98,58 @@ export function ProcessingStep({
   }
 
   return (
-    <div className="flex flex-col items-center justify-center py-12 text-center space-y-6 animate-in fade-in zoom-in duration-500">
-      <div className="relative">
-        <div className="h-24 w-24 border-4 border-muted rounded-full" />
-        <div className="absolute inset-0 h-24 w-24 border-4 border-primary border-t-transparent rounded-full animate-spin" />
-        <div className="absolute inset-0 m-auto h-10 w-10 bg-primary/10 rounded-full flex items-center justify-center">
-          <Sparkles className="h-6 w-6 text-primary animate-pulse" />
+    <div className="flex flex-col items-center py-8 text-center gap-0">
+
+      {/* ── Premium soft spinner ── */}
+      <div className="relative flex items-center justify-center h-[72px] w-[72px] mb-7">
+        {/* Outer static ring */}
+        <div className="absolute inset-0 rounded-full border border-slate-200" />
+        {/* Slow spinning arc */}
+        <div
+          className="absolute inset-0 rounded-full border-[1.5px] border-t-slate-400/70 border-r-slate-300/40 border-b-transparent border-l-transparent animate-spin"
+          style={{ animationDuration: "2.4s", animationTimingFunction: "linear" }}
+        />
+        {/* Counter-rotating inner arc */}
+        <div
+          className="absolute inset-[10px] rounded-full border border-t-transparent border-r-transparent border-b-slate-300/50 border-l-slate-200/60 animate-spin"
+          style={{
+            animationDuration: "3.6s",
+            animationTimingFunction: "linear",
+            animationDirection: "reverse",
+          }}
+        />
+        {/* Center icon */}
+        <div className="relative z-10 flex items-center justify-center h-8 w-8 rounded-full bg-white border border-slate-100 shadow-[0_1px_4px_rgba(0,0,0,0.06)]">
+          <Sparkles className="h-3.5 w-3.5 text-slate-500" />
         </div>
       </div>
-      <div className="space-y-3">
-        <h3 className="text-2xl font-bold tracking-tight">
-          Crafting Your Resume
-        </h3>
-        <p className="text-muted-foreground text-sm max-w-75 mx-auto leading-relaxed">
-          <span className="animate-pulse">
-            AI is extracting and structuring your resume data into the chosen
-            template…
-          </span>
+
+      {/* ── Title ── */}
+      <h3 className="text-[17px] font-semibold text-slate-800 tracking-tight leading-snug mb-1.5">
+        Crafting Your Resume
+      </h3>
+
+      {/* ── Description ── */}
+      <p className="text-[13px] text-slate-400 max-w-[260px] leading-relaxed mb-6">
+        Our AI is extracting, analyzing, and structuring your information into a professional layout.
+      </p>
+
+      {/* ── Cycling AI state label ── */}
+      <div className="h-5 mb-5">
+        <p
+          className="text-[12px] font-medium text-slate-500 tracking-wide transition-opacity duration-200"
+          style={{ opacity: fadeIn ? 1 : 0 }}
+        >
+          {AI_STATES[stateIdx]}…
         </p>
       </div>
-      <div className="flex gap-1.5 pt-2">
-        {[0, 1, 2].map((i) => (
-          <div
-            key={i}
-            className="h-1.5 w-1.5 rounded-full bg-primary/40 animate-bounce"
-            style={{ animationDelay: `${i * 0.15}s` }}
-          />
-        ))}
+
+      {/* ── Animated progress bar ── */}
+      <div className="w-[220px] h-[2px] rounded-full bg-slate-100 overflow-hidden">
+        <div
+          className="h-full rounded-full bg-slate-400/70 transition-all duration-500 ease-out"
+          style={{ width: `${progress}%` }}
+        />
       </div>
     </div>
   );

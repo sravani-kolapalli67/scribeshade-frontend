@@ -46,12 +46,8 @@ const data = {
       isActive: false,
       items: [
         {
-          title: "All Resumes",
+          title: "Resume",
           url: "/resume/all",
-        },
-        {
-          title: "ATS Analysis",
-          url: "/resume/ats-analysis",
         },
         {
           title: "Build Resume",

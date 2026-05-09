@@ -1,20 +1,11 @@
 import { useLocation, useSearchParams, useNavigate } from "react-router-dom";
 import { useEffect } from "react";
-import UploadResumeDialog from "@/components/Resume/UploadResumeDialog";
 import { ATSAnalysisDialog } from "./Resume/ATSAnalysisDialog";
 import { BuildResumeDialog } from "./Resume/BuildResumeDialog";
 import CreateSessionDialog from "@/components/Sessions/CreateSessionDialog";
 import UploadDocumentDialog from "@/components/Document/UploadDocumentDialog";
-import { useCreditsBalance } from "@/hooks/useCreditsBalance";
-import { Coins, AlertCircle } from "lucide-react";
-import { Link } from "react-router-dom";
+import { CreditsBadge } from "@/components/CreditsBadge";
 import { SidebarTrigger } from "@/components/ui/sidebar";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 
 const routeConfig: Record<string, string> = {
   "/dashboard": "Dashboard",
@@ -36,14 +27,12 @@ const Navbar = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { balance } = useCreditsBalance();
   const title =
     Object.entries(routeConfig)
       .sort((a, b) => b[0].length - a[0].length)
       .find(([route]) => location.pathname.startsWith(route))?.[1] ||
     "Craft Vita";
 
-  const isResumePage = location.pathname.startsWith("/resume/all");
   const isATSAnalysisPage = location.pathname.startsWith(
     "/resume/ats-analysis",
   );
@@ -90,38 +79,12 @@ const Navbar = () => {
             />
           </>
         )}
-        {isResumePage && <UploadResumeDialog userId={userId} />}
         {isATSAnalysisPage && <ATSAnalysisDialog />}
         {isBuildResumePage && <BuildResumeDialog />}
         {isDocumentPage && <UploadDocumentDialog userId={userId} />}
 
         {/* Credit balance badge */}
-        {balance && (
-          <TooltipProvider delayDuration={200}>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Link
-                  to="/billing"
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-brand/8 hover:bg-brand/15 border border-brand/20 transition-colors group"
-                >
-                  <Coins className="h-3.5 w-3.5 text-brand" />
-                  <span className="text-sm font-bold text-brand tabular-nums">
-                    {balance.totalAvailable}
-                  </span>
-                  {parseFloat(balance.heldCredits) > 0 && (
-                    <AlertCircle className="h-3 w-3 text-amber-500" />
-                  )}
-                </Link>
-              </TooltipTrigger>
-              <TooltipContent side="bottom" className="text-xs">
-                <p className="font-semibold">{balance.totalAvailable} credits available</p>
-                {parseFloat(balance.heldCredits) > 0 && (
-                  <p className="text-amber-500">{balance.heldCredits} held by active session</p>
-                )}
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-        )}
+        <CreditsBadge />
       </div>
     </nav>
   );

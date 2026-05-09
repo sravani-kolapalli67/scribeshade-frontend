@@ -29,6 +29,8 @@ const CLASSIC_HTML = `<!DOCTYPE html>
   h1{font-size:22px;font-weight:700;letter-spacing:-0.3px}
   .role{font-size:13px;color:#555;margin-top:2px}
   .contact{font-size:11px;color:#777;margin-top:6px}
+  .contact a{color:#555;text-decoration:none}
+  .contact a:hover{text-decoration:underline}
   hr{border:none;border-top:2px solid #1a1a1a;margin:16px 0 10px}
   h2{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;color:#1a1a1a;margin-bottom:8px}
   section{margin-bottom:18px}
@@ -40,6 +42,13 @@ const CLASSIC_HTML = `<!DOCTYPE html>
   .exp-meta{font-size:11px;color:#666}
   ul{padding-left:16px;margin-top:4px}
   li{font-size:12px;line-height:1.5;color:#333;margin-bottom:2px}
+  /* ── Pagination ── */
+  section{break-inside:avoid;page-break-inside:avoid}
+  h2{break-after:avoid;page-break-after:avoid;orphans:2;widows:2}
+  hr{break-after:avoid;page-break-after:avoid}
+  .proj-item,.edu-item{break-inside:avoid;page-break-inside:avoid;orphans:2;widows:2}
+  ul,ol{break-inside:avoid;page-break-inside:avoid;orphans:2;widows:2}
+  li{break-inside:avoid;page-break-inside:avoid}
 </style>
 </head>
 <body>
@@ -48,7 +57,7 @@ const CLASSIC_HTML = `<!DOCTYPE html>
   <div class="contact">
     <span data-field="email">email@example.com</span>
     <span> · </span><span data-field="phone">+1 (555) 000-0000</span>
-    <span> · </span><span data-field="links">linkedin.com/in/yourprofile</span>
+    <span> · </span><span class="links-inline" data-field="links">linkedin.com/in/yourprofile</span>
   </div>
   <hr/>
   <section>
@@ -97,6 +106,7 @@ const MODERN_HTML = `<!DOCTYPE html>
   .sidebar .role{font-size:11px;color:#94a3b8;margin-top:4px}
   .sidebar h2{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1.5px;color:#64748b;margin:20px 0 8px}
   .sidebar p,.sidebar span{font-size:11px;color:#cbd5e1;line-height:1.5;display:block;margin-bottom:2px}
+  .sidebar a{color:#cbd5e1;text-decoration:none}
   .sidebar .skill-chip{background:#1e293b;border-radius:3px;padding:2px 8px;font-size:10.5px;color:#e2e8f0;margin-bottom:4px}
   .main{flex:1;padding:28px 24px}
   section{margin-bottom:18px}
@@ -107,6 +117,14 @@ const MODERN_HTML = `<!DOCTYPE html>
   ul{padding-left:16px;margin-top:4px}
   li{font-size:12px;line-height:1.5;color:#333;margin-bottom:2px}
   .summary{font-size:12px;line-height:1.6;color:#444}
+  /* ── Pagination ── */
+  section{break-inside:avoid;page-break-inside:avoid}
+  .section-title{break-after:avoid;page-break-after:avoid;orphans:2;widows:2}
+  .proj-item,.edu-item{break-inside:avoid;page-break-inside:avoid;orphans:2;widows:2}
+  ul,ol{break-inside:avoid;page-break-inside:avoid;orphans:2;widows:2}
+  li{break-inside:avoid;page-break-inside:avoid}
+  .sidebar{break-inside:avoid;page-break-inside:avoid}
+  .sidebar h2{break-after:avoid;page-break-after:avoid}
 </style>
 </head>
 <body>
@@ -116,7 +134,7 @@ const MODERN_HTML = `<!DOCTYPE html>
     <h2>Contact</h2>
     <span data-field="email">email@example.com</span>
     <span data-field="phone">+1 000-0000</span>
-    <span data-field="links">linkedin</span>
+    <span class="links-block" data-field="links">linkedin</span>
     <h2>Skills</h2>
     <span class="skill-chip" data-field="languages">Languages</span>
     <span class="skill-chip" data-field="frameworks">Frameworks</span>
@@ -160,6 +178,7 @@ const MINIMAL_HTML = `<!DOCTYPE html>
   h1{font-size:24px;font-weight:400;letter-spacing:2px;text-transform:uppercase;text-align:center}
   .role{font-size:11px;color:#888;text-align:center;letter-spacing:1.5px;text-transform:uppercase;margin-top:4px}
   .contact{text-align:center;font-size:11px;color:#888;margin-top:6px}
+  .contact a{color:#666;text-decoration:none}
   .divider{border:none;border-top:1px solid #ccc;margin:18px 0 12px}
   h2{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:2px;color:#888;margin-bottom:8px}
   section{margin-bottom:20px}
@@ -173,6 +192,13 @@ const MINIMAL_HTML = `<!DOCTYPE html>
   .item-meta{font-size:11px;color:#888}
   ul{padding-left:18px;margin-top:4px}
   li{font-size:12px;line-height:1.6;color:#444;margin-bottom:2px}
+  /* ── Pagination ── */
+  section{break-inside:avoid;page-break-inside:avoid}
+  h2{break-after:avoid;page-break-after:avoid;orphans:2;widows:2}
+  hr.divider{break-after:avoid;page-break-after:avoid}
+  .proj-item,.edu-item{break-inside:avoid;page-break-inside:avoid;orphans:2;widows:2}
+  ul,ol{break-inside:avoid;page-break-inside:avoid;orphans:2;widows:2}
+  li{break-inside:avoid;page-break-inside:avoid}
 </style>
 </head>
 <body>
@@ -181,7 +207,7 @@ const MINIMAL_HTML = `<!DOCTYPE html>
   <div class="contact">
     <span data-field="email">email@example.com</span> &nbsp;·&nbsp;
     <span data-field="phone">Phone</span> &nbsp;·&nbsp;
-    <span data-field="links">Links</span>
+    <span class="links-inline" data-field="links">Links</span>
   </div>
   <hr class="divider"/>
   <section>
@@ -382,7 +408,7 @@ export function TemplateSelectionStep({
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-3 gap-3 max-h-[480px] overflow-y-auto pr-1 pb-1 no-scrollbar">
+      <div className="grid grid-cols-3 gap-3 max-h-[360px] overflow-y-auto pr-1 pb-1 no-scrollbar">
         {templates.map((tpl) => (
           <TemplateCard
             key={tpl.id}

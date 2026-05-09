@@ -78,6 +78,25 @@ export interface SectionQuality {
   isValidating: boolean;
 }
 
+/** Single AI action recorded in the editor's session activity log. */
+export interface AiActivityEntry {
+  id: string;
+  operation:
+    | "resume_enhance_section"
+    | "resume_tailor"
+    | "resume_extract_fields"
+    | "resume_generate"
+    | "resume_validate"
+    | (string & {});
+  /** Optional human label (e.g. "Work Experience") for nicer UI. */
+  label?: string;
+  creditsUsed: number;
+  cached: boolean;
+  status: "success" | "error";
+  errorMessage?: string;
+  createdAt: string;
+}
+
 export interface ResumeBuilderState {
   resumeTitle: string;
   templateId: TemplateId;
@@ -112,6 +131,23 @@ export interface ResumeBuilderState {
   company: string;
   /** Per-section quality data returned by the validate-section API. */
   sectionValidation: Record<string, SectionQuality>;
+  // JD tailoring outcome (last successful tailor call)
+  /** Sections whose content was rewritten by the most recent JD tailor run. */
+  tailoredSections: string[];
+  /** ISO timestamp of the most recent JD tailor success. */
+  lastTailoredAt: string | null;
+  /** Last keyword-match score returned by the tailor endpoint (0–100). */
+  lastTailorMatchScore: number | null;
+  /** Keywords found / missing from the most recent tailor diff. */
+  lastTailorKeywordsMatched: string[];
+  lastTailorKeywordsMissing: string[];
+  /** Snapshot of fields BEFORE the last tailor run — enables before/after diff. */
+  preTailorSnapshot: Partial<ResumeFields> | null;
+  /** Recent AI actions taken in this editor session (newest first, capped). */
+  aiActivityLog: AiActivityEntry[];
+  /** Latest populated resume HTML (template + fields). Lifted from RightPanel
+   *  so TopBar can use it for real PDF export without reaching into props. */
+  populatedHtml: string;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -177,6 +213,14 @@ const initialState: ResumeBuilderState = {
   jobTitle: "",
   company: "",
   sectionValidation: {},
+  tailoredSections: [],
+  lastTailoredAt: null,
+  lastTailorMatchScore: null,
+  lastTailorKeywordsMatched: [],
+  lastTailorKeywordsMissing: [],
+  preTailorSnapshot: null,
+  aiActivityLog: [],
+  populatedHtml: "",
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -352,6 +396,107 @@ const resumeBuilderSlice = createSlice({
       state.aiSectionId = null;
     },
 
+    /**
+     * Bulk-apply a tailored-fields payload returned by `/resume/builder/tailor`.
+     * Snapshots prior values so the user can revert (before/after diff). Only
+     * fields present in the payload are touched — empty/undefined entries are
+     * skipped so the AI cannot accidentally erase user content.
+     */
+    applyTailoredFields(
+      state,
+      action: PayloadAction<{
+        tailoredFields: Partial<ResumeFields>;
+        keywordsMatched?: string[];
+        keywordsMissing?: string[];
+        matchScore?: number;
+      }>,
+    ) {
+      const { tailoredFields, keywordsMatched, keywordsMissing, matchScore } = action.payload;
+      pushHistory(state);
+
+      // Snapshot only the fields we are about to overwrite so revert is exact.
+      const snapshot: Partial<ResumeFields> = {};
+      const touched: string[] = [];
+      const FIELD_TO_SECTION: Record<string, string> = {
+        summary:           "summary",
+        experience:        "experience",
+        skillsLanguages:   "skills",
+        skillsFrameworks:  "skills",
+        skillsDatabases:   "skills",
+        skillsTools:       "skills",
+        projects:          "projects",
+        education:         "education",
+        certifications:    "certifications",
+        publications:      "publications",
+      };
+
+      (Object.keys(tailoredFields) as Array<keyof ResumeFields>).forEach((key) => {
+        const next = tailoredFields[key];
+        if (typeof next !== "string" || next.trim() === "") return;
+        if (state.lockedFields[key]) return;
+        snapshot[key] = state.fields[key];
+        state.fields[key] = next;
+        const sectionId = FIELD_TO_SECTION[key as string];
+        if (sectionId && !touched.includes(sectionId)) touched.push(sectionId);
+      });
+
+      state.preTailorSnapshot = snapshot;
+      state.tailoredSections = touched;
+      state.lastTailoredAt = new Date().toISOString();
+      state.lastTailorMatchScore = typeof matchScore === "number" ? matchScore : null;
+      state.lastTailorKeywordsMatched = keywordsMatched ?? [];
+      state.lastTailorKeywordsMissing = keywordsMissing ?? [];
+      state.isDirty = true;
+    },
+
+    /** Revert the most recent tailor run, restoring snapshotted field values. */
+    revertTailor(state) {
+      if (!state.preTailorSnapshot) return;
+      pushHistory(state);
+      (Object.keys(state.preTailorSnapshot) as Array<keyof ResumeFields>).forEach((key) => {
+        const prev = state.preTailorSnapshot![key];
+        if (typeof prev === "string") state.fields[key] = prev;
+      });
+      state.preTailorSnapshot = null;
+      state.tailoredSections = [];
+      state.isDirty = true;
+    },
+
+    /** Clear the tailor success banner without touching the resume content. */
+    clearTailorOutcome(state) {
+      state.tailoredSections = [];
+      state.lastTailoredAt = null;
+      state.lastTailorMatchScore = null;
+      state.lastTailorKeywordsMatched = [];
+      state.lastTailorKeywordsMissing = [];
+      state.preTailorSnapshot = null;
+    },
+
+    /**
+     * Append an AI action to the editor's session activity log. Capped at 50
+     * entries (oldest dropped) to keep the drawer snappy. Persisted across
+     * tab navigations within a session but cleared on `initFromConfig`.
+     */
+    recordAiActivity(state, action: PayloadAction<Omit<AiActivityEntry, "id" | "createdAt">>) {
+      const entry: AiActivityEntry = {
+        id: typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `ai-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        createdAt: new Date().toISOString(),
+        ...action.payload,
+      };
+      state.aiActivityLog = [entry, ...state.aiActivityLog].slice(0, 50);
+    },
+
+    clearAiActivity(state) {
+      state.aiActivityLog = [];
+    },
+
+    /** RightPanel writes the rendered preview HTML here so TopBar can export it. */
+    setPopulatedHtml(state, action: PayloadAction<string>) {
+      state.populatedHtml = action.payload;
+    },
+
     /** Step back one change in history. */
     undo(state) {
       if (state.past.length === 0) return;
@@ -491,6 +636,13 @@ const resumeBuilderSlice = createSlice({
       state.jobTitle = jobTitle ?? "";
       state.company = company ?? "";
       state.customSectionDefs = customSectionDefs ?? [];
+      state.aiActivityLog = [];
+      state.tailoredSections = [];
+      state.lastTailoredAt = null;
+      state.lastTailorMatchScore = null;
+      state.lastTailorKeywordsMatched = [];
+      state.lastTailorKeywordsMissing = [];
+      state.preTailorSnapshot = null;
     },
   },
 });
@@ -508,6 +660,12 @@ export const {
   setIsEnhancing,
   applyAiSuggestion,
   discardAiSuggestion,
+  applyTailoredFields,
+  revertTailor,
+  clearTailorOutcome,
+  recordAiActivity,
+  clearAiActivity,
+  setPopulatedHtml,
   undo,
   redo,
   setAutoSaveStatus,

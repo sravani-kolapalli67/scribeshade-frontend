@@ -30,6 +30,7 @@ export function useSyncUser() {
           const data = await response.json();
           if (data && data.id) {
             localStorage.setItem("userId", data.id);
+            window.dispatchEvent(new CustomEvent("userSynced", { detail: { userId: data.id } }));
           }
         } else {
           console.error("Failed to fetch user profile", await response.text());

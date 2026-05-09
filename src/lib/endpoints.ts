@@ -20,6 +20,14 @@ export const ENDPOINTS = {
   creditsPurchaseOrder: () => `${api()}/api/credits/purchase/order`,
   creditsPurchaseVerify: () => `${api()}/api/credits/purchase/verify`,
   creditsPurchases:     () => `${api()}/api/credits/purchases`,
+  creditsUsage: (page = 1, limit = 20, operation?: string) => {
+    const url = new URL(`${api()}/api/credits/usage`);
+    url.searchParams.set("page", String(page));
+    url.searchParams.set("limit", String(limit));
+    if (operation) url.searchParams.set("operation", operation);
+    return url.toString();
+  },
+  creditsFeatureCosts:  () => `${api()}/api/credits/feature-costs`,
 
   // ── Sessions ────────────────────────────────────────────────────────────
   sessionCreate:      () => `${api()}/api/session/create-session`,
@@ -64,6 +72,7 @@ export const ENDPOINTS = {
   resumeBuilderExtractFields:  () => `${api()}/api/resume/builder/extract-fields`,
   resumeBuilderEnhanceSection: () => `${api()}/api/resume/builder/enhance-section`,
   resumeBuilderValidateSection: () => `${api()}/api/resume/builder/validate-section`,
+  resumeBuilderAtsScore:        () => `${api()}/api/resume/builder/ats-score`,
   resumeBuilderTailor:         () => `${api()}/api/resume/builder/tailor`,
   resumeBuilderExportPdf:      () => `${api()}/api/resume/builder/export-pdf`,
 

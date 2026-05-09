@@ -29,11 +29,21 @@ const CoverLetter = lazy(() => import("./pages/Resume/CoverLetter/page"));
 const ATSResult = lazy(() => import("./pages/Resume/ATSResult/page"));
 const Analytics = lazy(() => import("./pages/Analytics/page"));
 const DocumentPage = lazy(() => import("./pages/Document/page"));
-const AllQuestions = lazy(() => import("./pages/QuestionBank/All Questions/page"));
-const UserQuestions = lazy(() => import("./pages/QuestionBank/User Questions/page"));
-const UserQuestionDetails = lazy(() => import("./pages/QuestionBank/UserQuestionDetails/page"));
-const CompanyQuestions = lazy(() => import("./pages/QuestionBank/CompanyQuestions/page"));
-const QuestionDetails = lazy(() => import("./pages/QuestionBank/QuestionDetails/page"));
+const AllQuestions = lazy(
+  () => import("./pages/QuestionBank/All Questions/page"),
+);
+const UserQuestions = lazy(
+  () => import("./pages/QuestionBank/User Questions/page"),
+);
+const UserQuestionDetails = lazy(
+  () => import("./pages/QuestionBank/UserQuestionDetails/page"),
+);
+const CompanyQuestions = lazy(
+  () => import("./pages/QuestionBank/CompanyQuestions/page"),
+);
+const QuestionDetails = lazy(
+  () => import("./pages/QuestionBank/QuestionDetails/page"),
+);
 const ActiveSession = lazy(() => import("./pages/Sessions/ActiveSession/page"));
 const BuildResume = lazy(() => import("./pages/Resume/BuildResume/page"));
 const ResumeEditor = lazy(() => import("./pages/Resume/ResumeEditor/page"));
@@ -42,7 +52,9 @@ const SignUpPage = lazy(() => import("./pages/Auth/SignUp/page"));
 const SSOCallbackPage = lazy(() => import("./pages/Auth/SSOCallback/page"));
 const BillingPage = lazy(() => import("./pages/Billing/page"));
 const AIProjects = lazy(() => import("./pages/AIProjects/page"));
-const ProjectRecommendations = lazy(() => import("./pages/AIProjects/ProjectRecommendations/page"));
+const ProjectRecommendations = lazy(
+  () => import("./pages/AIProjects/ProjectRecommendations/page"),
+);
 
 function PageLoader() {
   return (
@@ -198,7 +210,10 @@ function App() {
             <Suspense fallback={<PageLoader />}>
               <Routes>
                 <Route path="/resume/editor" element={<ResumeEditor />} />
-                <Route path="*" element={<Navigate to="/resume/editor" replace />} />
+                <Route
+                  path="*"
+                  element={<Navigate to="/resume/editor" replace />}
+                />
               </Routes>
             </Suspense>
           </div>
@@ -216,40 +231,46 @@ function App() {
         <div className="flex-1 overflow-y-auto p-4 md:p-8">
           <div className="max-w-7xl mx-auto">
             <Suspense fallback={<PageLoader />}>
-            <Routes>
-              <Route path="/" element={<Navigate to="/dashboard" replace />} />
-              <Route path="/dashboard" element={<Dashboard />} />
-              <Route path="/sessions" element={<Sessions />} />
-              <Route path="/resume/all" element={<AllResumes />} />
-              <Route path="/resume/ats-analysis" element={<ATSAnalysis />} />
-              <Route path="/resume/build" element={<BuildResume />} />
-              <Route path="/resume/editor" element={<ResumeEditor />} />
-              <Route path="/resume/cover-letter" element={<CoverLetter />} />
-              <Route path="/resume/ats-result" element={<ATSResult />} />
-              <Route path="/ai-projects" element={<AIProjects />} />
-              <Route
-                path="/ai-projects/:projectId"
-                element={<ProjectRecommendations />}
-              />
-              <Route path="/analytics" element={<Analytics />} />
-              <Route path="/document" element={<DocumentPage />} />
-              <Route path="/billing" element={<BillingPage />} />
-              <Route path="/questions/all" element={<AllQuestions />} />
-              <Route path="/questions/user" element={<UserQuestions />} />
-              <Route
-                path="/questions/user/question/:questionId"
-                element={<UserQuestionDetails />}
-              />
-              <Route
-                path="/questions/company/:companyId"
-                element={<CompanyQuestions />}
-              />
-              <Route
-                path="/questions/company/:companyId/question/:questionId"
-                element={<QuestionDetails />}
-              />
-              <Route path="*" element={<Navigate to="/dashboard" replace />} />
-            </Routes>
+              <Routes>
+                <Route
+                  path="/"
+                  element={<Navigate to="/dashboard" replace />}
+                />
+                <Route path="/dashboard" element={<Dashboard />} />
+                <Route path="/sessions" element={<Sessions />} />
+                <Route path="/resume/all" element={<AllResumes />} />
+                <Route path="/resume/ats-analysis" element={<ATSAnalysis />} />
+                <Route path="/resume/build" element={<BuildResume />} />
+                <Route path="/resume/editor" element={<ResumeEditor />} />
+                <Route path="/resume/cover-letter" element={<CoverLetter />} />
+                <Route path="/resume/ats-result" element={<ATSResult />} />
+                <Route path="/ai-projects" element={<AIProjects />} />
+                <Route
+                  path="/ai-projects/:projectId"
+                  element={<ProjectRecommendations />}
+                />
+                <Route path="/analytics" element={<Analytics />} />
+                <Route path="/document" element={<DocumentPage />} />
+                <Route path="/billing" element={<BillingPage />} />
+                <Route path="/questions/all" element={<AllQuestions />} />
+                <Route path="/questions/user" element={<UserQuestions />} />
+                <Route
+                  path="/questions/user/question/:questionId"
+                  element={<UserQuestionDetails />}
+                />
+                <Route
+                  path="/questions/company/:companyId"
+                  element={<CompanyQuestions />}
+                />
+                <Route
+                  path="/questions/company/:companyId/question/:questionId"
+                  element={<QuestionDetails />}
+                />
+                <Route
+                  path="*"
+                  element={<Navigate to="/dashboard" replace />}
+                />
+              </Routes>
             </Suspense>
           </div>
         </div>

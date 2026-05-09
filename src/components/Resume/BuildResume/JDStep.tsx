@@ -93,7 +93,7 @@ export function JDStep({ data, onChange }: JDStepProps) {
               update({ jobDescription: e.target.value.slice(0, MAX_JD_CHARS) })
             }
             placeholder="Paste the full job description here. We'll analyse keywords and pre-fill the JD Tailor tab in the editor for you…"
-            className="min-h-[180px] resize-none rounded-xl border-border/60 text-sm leading-relaxed focus-visible:border-primary focus-visible:ring-primary/20"
+            className="min-h-[180px] max-h-[320px] resize-none rounded-xl border-border/60 text-sm leading-relaxed focus-visible:border-primary focus-visible:ring-primary/20 overflow-y-auto"
           />
           <p className="text-[11px] text-muted-foreground leading-relaxed">
             The JD is stored locally and pre-fills the{" "}

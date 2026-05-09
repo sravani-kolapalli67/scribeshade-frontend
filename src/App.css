@@ -336,6 +336,7 @@
   animation: ai-icon-glow 2.5s ease-in-out infinite;
 }
 
+
 @utility no-scrollbar {
   &::-webkit-scrollbar {
     display: none;
