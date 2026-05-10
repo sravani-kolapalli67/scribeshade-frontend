@@ -316,7 +316,7 @@ export function BuildResumeDialog() {
       return;
     }
 
-    // ── Path A (resume): call AI extract-fields endpoint ──
+    // ── Path A (resume): extract factual anchors → full JD-rewrite if role/JD provided ──
     const resumeContext = selectedResume?.resumeContext;
     if (!resumeContext) {
       // Fallback: no resume text available, navigate without AI-extracted fields.
@@ -327,32 +327,107 @@ export function BuildResumeDialog() {
     try {
       const userId = localStorage.getItem("userId") ?? clerkUserId;
       const token = await getToken();
-      const idempotencyKey = createIdempotencyKey();
 
-      const { data, creditsUsed, creditsRemaining, cached } =
-        await postCreditedAi<{ fields: Record<string, string> }>(
-          ENDPOINTS.resumeBuilderExtractFields(),
+      // ── Step 1: Parse uploaded resume into structured fields (factual anchors) ──
+      const extractKey = createIdempotencyKey();
+      const {
+        data: extractData,
+        creditsUsed: extractCredits,
+        creditsRemaining: extractRemaining,
+        cached: extractCached,
+      } = await postCreditedAi<{ fields: Record<string, string> }>(
+        ENDPOINTS.resumeBuilderExtractFields(),
+        {
+          userId,
+          resumeContext,
+          // Pass JD context so the extractor can orient the summary, but this
+          // is a weak hint only — the full rewrite happens in step 2 below.
+          jobDescription: jdData.jobDescription || undefined,
+          jobTitle:       jdData.jobTitle.trim() || undefined,
+          company:        jdData.company.trim()  || undefined,
+        },
+        { token, idempotencyKey: extractKey },
+      );
+
+      const extractedFields = extractData.fields as Record<string, string>;
+      console.log("[wizard] ✅ extracted role:", extractedFields.role);
+
+      if (!isNaN(extractRemaining)) setOptimisticBalance(extractRemaining);
+      refreshBalance();
+
+      // ── Step 2: Full JD-based rewrite when target role or JD is provided ──
+      // This is the core ScribeShade feature: extraction gives us the factual
+      // skeleton (companies, dates, degrees) and the tailor engine rewrites
+      // every editable field (role, summary, bullets, skills, projects)
+      // for the exact target role. Never skip this step when job context exists.
+      const hasJobContext =
+        jdData.jobTitle.trim().length > 0 ||
+        jdData.jobDescription.trim().length >= 50;
+
+      if (hasJobContext) {
+        console.log("[wizard] 🔄 running full rewrite for target role:", jdData.jobTitle);
+        // Re-fetch the token — extract-fields can take 60-120 seconds and the
+        // short-lived Clerk JWT may have expired by the time tailor is called.
+        const tailorToken = await getToken();
+        const tailorKey = createIdempotencyKey();
+        const {
+          data: tailorData,
+          creditsUsed: tailorCredits,
+          creditsRemaining: tailorRemaining,
+        } = await postCreditedAi<{ tailoredFields: Record<string, string> }>(
+          ENDPOINTS.resumeBuilderTailor(),
           {
             userId,
-            resumeContext,
-            jobDescription: jdData.jobDescription || undefined,
-            jobTitle:       jdData.jobTitle       || undefined,
-            company:        jdData.company        || undefined,
+            // No resumeId — pass extracted fields inline so tailor treats them
+            // as the source resume and rewrites editable sections for the JD.
+            fields:         extractedFields,
+            jobDescription: jdData.jobDescription.trim() || jdData.jobTitle.trim(),
+            // Always send as strings — never undefined — so the backend audit log
+            // shows actual values and resolvedJobTitle extraction from JD works correctly.
+            jobTitle:       jdData.jobTitle.trim(),
+            company:        jdData.company.trim(),
           },
-          { token, idempotencyKey },
+          { token: tailorToken, idempotencyKey: tailorKey },
         );
 
-      if (!cached && creditsUsed > 0) {
+        const totalCredits = extractCredits + tailorCredits;
+        if (totalCredits > 0) {
+          toast.success(
+            `Resume built · ${totalCredits} credit${totalCredits === 1 ? "" : "s"} used · ${tailorRemaining.toFixed(2)} remaining`,
+          );
+        }
+        if (!isNaN(tailorRemaining)) setOptimisticBalance(tailorRemaining);
+        refreshBalance();
+
+        const tailoredFields = tailorData.tailoredFields as Record<string, string>;
+        console.log("[wizard] ✅ tailor returned role:", tailoredFields.role);
+
+        // Merge: rewritten editable fields from tailor, factual personal info
+        // (name, email, phone, location) force-kept from extraction so they
+        // are never hallucinated by the AI.
+        const finalFields: Record<string, string> = {
+          ...extractedFields,
+          ...tailoredFields,
+          name:     extractedFields.name     || tailoredFields.name     || "",
+          email:    extractedFields.email    || tailoredFields.email    || "",
+          phone:    extractedFields.phone    || tailoredFields.phone    || "",
+          location: extractedFields.location || tailoredFields.location || "",
+        };
+
+        await navigateToEditor(finalFields);
+        return;
+      }
+
+      // No job context — open editor with raw extracted fields (user fills role manually)
+      if (!extractCached && extractCredits > 0) {
         toast.success(
-          `Resume parsed · ${creditsUsed} credit${creditsUsed === 1 ? "" : "s"} used · ${creditsRemaining.toFixed(2)} remaining`,
+          `Resume parsed · ${extractCredits} credit${extractCredits === 1 ? "" : "s"} used · ${extractRemaining.toFixed(2)} remaining`,
         );
       }
-      if (!isNaN(creditsRemaining)) setOptimisticBalance(creditsRemaining);
-      refreshBalance();
-      await navigateToEditor(data.fields as never);
+      await navigateToEditor(extractedFields);
     } catch (err) {
       const message = err instanceof InsufficientCreditsError
-        ? "Not enough credits to parse this resume—top up to continue."
+        ? "Not enough credits to process this resume — top up to continue."
         : err instanceof Error ? err.message : "Something went wrong";
       setProcessingStatus("error");
       setProcessingError(message);
@@ -486,7 +561,13 @@ export function BuildResumeDialog() {
               error={processingError}
               onRetry={() => startProcessing()}
               onSkip={() => { void navigateToEditor(); }}
-              mode={sourceType === "scratch" ? "scratch" : "extract"}
+              mode={
+                sourceType === "scratch" ||
+                (sourceType === "resume" &&
+                  (jdData.jobTitle.trim().length > 0 || jdData.jobDescription.trim().length >= 50))
+                  ? "scratch"
+                  : "extract"
+              }
             />
           )}
         </div>

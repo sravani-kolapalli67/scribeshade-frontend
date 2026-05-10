@@ -478,6 +478,17 @@ const resumeBuilderSlice = createSlice({
       state.preTailorSnapshot = null;
     },
 
+    /** Update target-job context (role / company / JD text) used by JD Tailor. */
+    setJobContext(
+      state,
+      action: PayloadAction<{ jobTitle?: string; company?: string; jobDescription?: string }>,
+    ) {
+      const { jobTitle, company, jobDescription } = action.payload;
+      if (typeof jobTitle === "string")       state.jobTitle = jobTitle;
+      if (typeof company === "string")        state.company = company;
+      if (typeof jobDescription === "string") state.jobDescription = jobDescription;
+    },
+
     /**
      * Append an AI action to the editor's session activity log. Capped at 50
      * entries (oldest dropped) to keep the drawer snappy. Persisted across
@@ -669,6 +680,7 @@ export const {
   applyTailoredFields,
   revertTailor,
   clearTailorOutcome,
+  setJobContext,
   recordAiActivity,
   clearAiActivity,
   setPopulatedHtml,

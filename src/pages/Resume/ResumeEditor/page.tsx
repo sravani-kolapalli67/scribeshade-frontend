@@ -34,6 +34,7 @@ import {
   applyTailoredFields,
   revertTailor,
   clearTailorOutcome,
+  setJobContext,
   recordAiActivity,
   clearAiActivity,
   setPopulatedHtml as setPopulatedHtml_action,
@@ -2733,6 +2734,10 @@ function JDTailorPanel() {
         userId,
         jobDescription: jdText,
       };
+      // Always send target role + company so the backend prompt has its PRIMARY
+      // signals. Even empty strings are better than undefined (backend uses ?? fallback).
+      payload.jobTitle = (jobTitle ?? "").trim();
+      payload.company  = (company  ?? "").trim();
       if (savedResumeId) {
         payload.resumeId = savedResumeId;
       } else {
@@ -2792,7 +2797,7 @@ function JDTailorPanel() {
     } finally {
       setIsTailoring(false);
     }
-  }, [isTailoring, charCount, getToken, savedResumeId, fields, jdText, refreshBalance, tailorCost, dispatch]);
+  }, [isTailoring, charCount, getToken, savedResumeId, fields, jdText, jobTitle, company, refreshBalance, tailorCost, dispatch]);
 
   const sectionLabelMap: Record<string, string> = {
     summary: "Summary",
@@ -2836,19 +2841,39 @@ function JDTailorPanel() {
           </div>
         )}
 
-        {/* Context card — pre-filled from wizard if available */}
-        {(jobTitle || company) && (
-          <div className="bg-background rounded-2xl border border-border px-5 py-4 flex items-center gap-4 shadow-sm">
-            <div className="h-9 w-9 rounded-xl bg-muted flex items-center justify-center shrink-0">
-              <Briefcase className="h-4.5 w-4.5 text-muted-foreground" />
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-semibold truncate">{jobTitle || "Role not set"}</p>
-              <p className="text-xs text-muted-foreground truncate">{company || "Company not set"}</p>
-            </div>
-            <span className="text-[10px] font-medium text-muted-foreground bg-muted px-2 py-0.5 rounded-md shrink-0">From wizard</span>
+        {/* Target Role + Company — REQUIRED inputs that drive the AI rewrite.
+            Pre-filled from wizard if available, but always editable. */}
+        <div className="bg-background rounded-2xl border border-border px-5 py-4 shadow-sm space-y-3">
+          <div className="flex items-center gap-2">
+            <Briefcase className="h-4 w-4 text-violet-600" />
+            <p className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Target Role <span className="text-destructive normal-case font-semibold tracking-normal">(required)</span></p>
           </div>
-        )}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="text-[11px] font-semibold text-muted-foreground mb-1 block">Job Title</label>
+              <input
+                type="text"
+                value={jobTitle}
+                onChange={(e) => dispatch(setJobContext({ jobTitle: e.target.value }))}
+                placeholder="e.g. Senior Data Engineer"
+                className="w-full h-9 px-3 text-sm bg-background border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-500/30 focus:border-violet-500"
+              />
+            </div>
+            <div>
+              <label className="text-[11px] font-semibold text-muted-foreground mb-1 block">Company</label>
+              <input
+                type="text"
+                value={company}
+                onChange={(e) => dispatch(setJobContext({ company: e.target.value }))}
+                placeholder="e.g. Netflix"
+                className="w-full h-9 px-3 text-sm bg-background border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-500/30 focus:border-violet-500"
+              />
+            </div>
+          </div>
+          <p className="text-[11px] text-muted-foreground leading-relaxed">
+            The AI rewrites your <strong>summary, experience bullets, skills, and project descriptions</strong> based on these fields + the JD below. Company names, job titles, and dates from your existing resume are preserved.
+          </p>
+        </div>
 
         {/* JD input */}
         <div className="bg-background rounded-2xl border border-border overflow-hidden shadow-sm">
@@ -2869,10 +2894,10 @@ function JDTailorPanel() {
           <div className="flex items-center gap-3">
             <button
               onClick={handleTailor}
-              disabled={charCount < 50 || isTailoring}
+              disabled={charCount < 50 || isTailoring || !jobTitle.trim()}
               className={cn(
                 "flex items-center gap-2 px-6 h-10 rounded-xl text-sm font-semibold transition-all shadow-sm",
-                charCount >= 50 && !isTailoring
+                charCount >= 50 && !isTailoring && jobTitle.trim()
                   ? "bg-violet-600 hover:bg-violet-700 text-white"
                   : "bg-muted text-muted-foreground cursor-not-allowed"
               )}
@@ -2880,7 +2905,12 @@ function JDTailorPanel() {
               {isTailoring ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
               {isTailoring ? "Tailoring entire resume…" : hasOutcome ? "Regenerate (free)" : "Tailor My Resume"}
             </button>
-            {charCount > 0 && charCount < 50 && !isTailoring && (
+            {!jobTitle.trim() && (
+              <p className="text-xs text-muted-foreground">
+                Enter the target job title to continue
+              </p>
+            )}
+            {jobTitle.trim() && charCount > 0 && charCount < 50 && !isTailoring && (
               <p className="text-xs text-muted-foreground">
                 Paste at least 50 characters to continue
               </p>
