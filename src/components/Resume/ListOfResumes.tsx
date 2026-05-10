@@ -546,13 +546,21 @@ export default function ListOfResumes({
 
                 <DropdownMenuItem
                   onClick={() => {
-                    const url = `${import.meta.env.VITE_BACKEND_URL}${resume.path || "/uploads/resumes/" + resume.id}`;
-                    window.open(url, "_blank");
+                    if (resume.source === "builder") {
+                      navigate("/resume/editor", {
+                        state: {
+                          config: { sourceType: "builder", resumeId: resume.id },
+                        },
+                      });
+                    } else {
+                      const url = `${import.meta.env.VITE_BACKEND_URL}${resume.path || "/uploads/resumes/" + resume.id}`;
+                      window.open(url, "_blank");
+                    }
                   }}
                   className="gap-2"
                 >
                   <Download className="h-4 w-4" />
-                  <span>Download</span>
+                  <span>{resume.source === "builder" ? "Open in Editor" : "Download"}</span>
                 </DropdownMenuItem>
 
                 <DropdownMenuSeparator />

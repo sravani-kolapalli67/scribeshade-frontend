@@ -46,14 +46,10 @@ export default function UploadResumeDialog({
 
   // ── Validate File ──────────────────────────
   const validateFile = (file: File) => {
-    const allowed = [
-      "application/pdf",
-      "application/msword",
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ];
+    const allowed = ["application/pdf"];
 
     if (!allowed.includes(file.type)) {
-      alert("Only PDF, DOC, DOCX allowed");
+      alert("Only PDF files are allowed");
       return false;
     }
 
@@ -79,7 +75,7 @@ export default function UploadResumeDialog({
 
     const selected = await tauriOpen({
       multiple: false,
-      filters: [{ name: "Resume", extensions: ["pdf", "doc", "docx"] }],
+      filters: [{ name: "Resume", extensions: ["pdf"] }],
     });
 
     if (!selected) return;
@@ -195,7 +191,7 @@ export default function UploadResumeDialog({
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".pdf,.doc,.docx"
+                accept=".pdf"
                 className="hidden"
                 onChange={handleWebUpload}
               />
@@ -219,7 +215,7 @@ export default function UploadResumeDialog({
                     Drop files here or click to upload
                   </p>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    PDF, DOCX &bull; Max 10 MB
+                    PDF &bull; Max 10 MB
                   </p>
                 </div>
               </div>

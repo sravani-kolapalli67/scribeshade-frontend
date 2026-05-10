@@ -143,17 +143,22 @@ export function BuildResumeDialog() {
     const cap = (s: string, max = 60) =>
       s.length > max ? s.slice(0, max - 1).trimEnd() + "…" : s;
 
-    // Priority 1 — extracted name + role
+    // Priority 1 — AI-extracted name + role (most accurate)
     const extractedName = fields?.name?.trim();
     const extractedRole = fields?.role?.trim();
     if (extractedName && extractedRole)
       return cap(`${extractedName} – ${extractedRole}`);
+    if (extractedRole) return cap(extractedRole);
     if (extractedName) return cap(extractedName);
 
-    // Priority 2 — JD job title + company (first word of company to stay short)
-    const jobTitleClean = jdData.jobTitle?.trim()?.split("\n")?.[0]?.trim();
+    // Priority 2 — JD job title + company
+    // Guard: if jobTitle > 120 chars the user pasted a JD there — skip it
+    const rawJobTitle = jdData.jobTitle?.trim();
+    const jobTitleClean = rawJobTitle && rawJobTitle.length <= 120
+      ? rawJobTitle.split("\n")[0].trim()
+      : undefined;
     const companyClean  = jdData.company?.trim()?.split("\n")?.[0]?.trim()
-      ?.split(" ").slice(0, 3).join(" "); // max 3 words
+      ?.split(" ").slice(0, 3).join(" ");
     if (jobTitleClean && companyClean)
       return cap(`${jobTitleClean} – ${companyClean}`);
     if (jobTitleClean) return cap(jobTitleClean);
@@ -186,6 +191,12 @@ export function BuildResumeDialog() {
         skillsDatabases: "", skillsTools: "", projects: "", education: "",
         certifications: "", publications: "",
       };
+      // Sanitize: if jobTitle > 120 chars user pasted JD there — use AI-extracted role or skip
+      const sanitizedJobTitle = (() => {
+        const raw = jdData.jobTitle?.trim() ?? "";
+        if (!raw || raw.length > 120) return fields?.role?.trim() || undefined;
+        return raw || undefined;
+      })();
       const res = await fetch(ENDPOINTS.resumeBuilderSave(), {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
@@ -196,7 +207,7 @@ export function BuildResumeDialog() {
           fields:         fields ?? emptyFields,
           sections:       defaultSections,
           jobDescription: jdData.jobDescription || undefined,
-          jobTitle:       jdData.jobTitle       || undefined,
+          jobTitle:       sanitizedJobTitle,
           company:        jdData.company        || undefined,
           status:         "draft",
         }),
