@@ -12,6 +12,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { emit, listen } from "@tauri-apps/api/event";
 import { useSyncUser } from "@/hooks/useSyncUser";
 import { isTauri } from "@/lib/utils";
+import ResumeEditorV2 from "@/components/Resume/ResumeEditorV2";
 import "./App.css";
 import { AppSidebar } from "@/components/app-sidebar";
 import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
@@ -197,6 +198,11 @@ function App() {
   }
 
   //Routes
+
+  // ── Temporary design preview — remove once ResumeEditorV2 is wired up ──
+  if (location.pathname === "/resume/editor-v2") {
+    return <ResumeEditorV2 />;
+  }
 
   // Full-bleed editor layout — no padding wrapper, no max-width constraint
   if (location.pathname === "/resume/editor") {

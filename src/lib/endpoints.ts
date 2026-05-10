@@ -75,6 +75,10 @@ export const ENDPOINTS = {
   resumeBuilderAtsScore:        () => `${api()}/api/resume/builder/ats-score`,
   resumeBuilderTailor:         () => `${api()}/api/resume/builder/tailor`,
   resumeBuilderExportPdf:      () => `${api()}/api/resume/builder/export-pdf`,
+  resumeBuilderRewrite:        () => `${api()}/api/resume/builder/rewrite`,
+  resumeBuilderInjectSkills:   () => `${api()}/api/resume/builder/inject-skills`,
+  resumeBuilderInjectKeywords: () => `${api()}/api/resume/builder/inject-keywords`,
+  resumeBuilderKeywordMatch:   () => `${api()}/api/resume/builder/keyword-match`,
 
   // ── Documents ────────────────────────────────────────────────────────────
   documentUpload:           () => `${api()}/api/document/upload`,

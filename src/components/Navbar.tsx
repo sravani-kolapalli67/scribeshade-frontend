@@ -36,7 +36,6 @@ const Navbar = () => {
   const isATSAnalysisPage = location.pathname.startsWith(
     "/resume/ats-analysis",
   );
-  const isBuildResumePage = location.pathname.startsWith("/resume/build");
   const isSessionsPage = location.pathname === "/sessions";
 
   // Conditions from the widget are passed as URL query params by the Rust
@@ -80,7 +79,6 @@ const Navbar = () => {
           </>
         )}
         {isATSAnalysisPage && <ATSAnalysisDialog />}
-        {isBuildResumePage && <BuildResumeDialog />}
         {isDocumentPage && <UploadDocumentDialog userId={userId} />}
 
         {/* Credit balance badge */}

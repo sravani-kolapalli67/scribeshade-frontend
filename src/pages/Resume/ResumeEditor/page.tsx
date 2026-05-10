@@ -5,6 +5,9 @@ import { useAuth } from "@clerk/clerk-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
@@ -51,6 +54,13 @@ import {
   updateCustomField,
   setSectionValidating,
   setSectionQuality,
+  setIsRewriting,
+  setIsInjectingSkills,
+  setIsInjectingKeywords,
+  setIsMatchingKeywords,
+  setKeywordMatchResult,
+  applyRewrittenFields,
+  applyInjectedSkills,
 } from "@/store/resumeBuilderSlice";
 import type {
   SectionId,
@@ -104,27 +114,16 @@ import {
   Zap,
   XCircle,
   Trash2,
+  Tag,
+  Search,
+  RefreshCw,
+  PenLine,
 } from "lucide-react";
 
 // ─── Legacy ResumeData type (required by populateTemplate) ────────────────────
 
-interface ResumeData {
-  name: string;
-  role: string;
-  email: string;
-  phone: string;
-  links: string;
-  summary: string;
-  languages: string;
-  frameworks: string;
-  database: string;
-  tools: string;
-  /** Work experience entries — maps to data-list="experiences" in templates */
-  experiences: Array<{ company: string; title: string; dates: string; points: string[] }>;
-  projects: Array<{ title: string; points: string[] }>;
-  education: Array<{ degree: string; institute: string; year: string }>;
-  publication: string;
-}
+import type { ResumeData } from "@/lib/resumeTemplate";
+import { populateTemplate, fieldsToResumeData, parseProjectsText, parseEducationText, parseExperienceForTemplate } from "@/lib/resumeTemplate";
 
 /** Available template fetched from the API — cached at editor mount. */
 interface TemplateItem {
@@ -225,53 +224,8 @@ function mockAIEnhance(id: SectionId, text: string): string {
   }
 }
 
-function parseProjectsText(text: string): Array<{ title: string; points: string[] }> {
-  if (!text.trim()) return [];
-  return text.split(/\n\n+/).map((block) => {
-    const lines = block.split("\n").filter((l) => l.trim());
-    return { title: lines[0] ?? "Project", points: lines.slice(1).map((l) => l.replace(/^[•\-*]\s*/, "")) };
-  });
-}
-
-function parseEducationText(text: string): Array<{ degree: string; institute: string; year: string }> {
-  if (!text.trim()) return [];
-  return text.split(/\n\n+/).map((block) => {
-    const lines = block.split("\n").filter((l) => l.trim());
-    return { degree: lines[0] ?? "", institute: lines[1] ?? "", year: lines[2] ?? "" };
-  });
-}
-
-function parseExperienceForTemplate(
-  raw: string,
-): Array<{ company: string; title: string; dates: string; points: string[] }> {
-  const blocks = raw.split(/\n\n+/).map((b) => b.trim()).filter(Boolean);
-  return blocks.map((block) => {
-    const lines = block.split("\n").map((l) => l.trim()).filter(Boolean);
-    const header = lines[0] ?? "";
-    const parts  = header.split("|").map((p) => p.trim());
-    const points = lines.slice(1).map((l) => l.replace(/^[•\-*]\s*/, "")).filter(Boolean);
-    return { company: parts[0] ?? "", title: parts[1] ?? "", dates: parts[2] ?? "", points };
-  });
-}
-
-function fieldsToResumeData(fields: ResumeFields): ResumeData {
-  return {
-    name: fields.name || "Your Name",
-    role: fields.role || "Professional Role",
-    email: fields.email || "email@example.com",
-    phone: fields.phone || "",
-    links: fields.links || "",
-    summary: fields.summary || "",
-    languages: fields.skillsLanguages || "",
-    frameworks: fields.skillsFrameworks || "",
-    database: fields.skillsDatabases || "",
-    tools: fields.skillsTools || "",
-    experiences: parseExperienceForTemplate(fields.experience),
-    projects: parseProjectsText(fields.projects),
-    education: parseEducationText(fields.education),
-    publication: fields.publications || "",
-  };
-}
+// parseProjectsText, parseEducationText, parseExperienceForTemplate, fieldsToResumeData
+// are imported from @/lib/resumeTemplate above.
 
 // ─── Legacy resume text parser ────────────────────────────────────────────────
 
@@ -398,113 +352,7 @@ function configToFields(config: any): { fields: Partial<ResumeFields>; title: st
 }
 
 // ─── populateTemplate ─────────────────────────────────────────────────────────
-
-/**
- * Parse the pipe-separated links string into an array of {label, url} pairs.
- * Handles formats:
- *   "GitHub: https://github.com/user | LinkedIn: https://linkedin.com/in/user"
- *   "github.com/user | linkedin.com/in/user"
- */
-function parseLinksString(raw: string): { label: string; url: string }[] {
-  if (!raw.trim()) return [];
-  return raw
-    .split("|")
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map((entry) => {
-      const colonIdx = entry.indexOf(":");
-      if (colonIdx > 0 && colonIdx < 25) {
-        const label = entry.slice(0, colonIdx).trim();
-        const rest  = entry.slice(colonIdx + 1).trim();
-        // Disambiguate "https://..." — only treat as label:url if the label has no slashes
-        if (!label.includes("/") && rest) {
-          const url = rest.startsWith("http") ? rest : `https://${rest}`;
-          return { label, url };
-        }
-      }
-      // No platform label — bare URL
-      const url = entry.startsWith("http") ? entry : `https://${entry}`;
-      return { label: inferPlatformLabel(url), url };
-    });
-}
-
-function inferPlatformLabel(url: string): string {
-  const lower = url.toLowerCase();
-  if (lower.includes("linkedin.com"))     return "LinkedIn";
-  if (lower.includes("github.com"))       return "GitHub";
-  if (lower.includes("leetcode.com"))     return "LeetCode";
-  if (lower.includes("hackerrank.com"))   return "HackerRank";
-  if (lower.includes("behance.net"))      return "Behance";
-  if (lower.includes("dribbble.com"))     return "Dribbble";
-  if (lower.includes("medium.com"))       return "Medium";
-  if (lower.includes("codepen.io"))       return "CodePen";
-  if (lower.includes("stackoverflow.com")) return "Stack Overflow";
-  if (lower.includes("twitter.com") || lower.includes("x.com")) return "Twitter/X";
-  if (lower.includes("dev.to"))           return "Dev.to";
-  return "Portfolio";
-}
-
-function populateTemplate(html: string, data: ResumeData, options: Record<string, boolean>) {
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  const optMap: Record<string, string> = { name: "personalInfo", role: "personalInfo", email: "personalInfo", phone: "personalInfo", links: "personalInfo", summary: "summary", languages: "skills", frameworks: "skills", database: "skills", tools: "skills", publication: "certifications" };
-  doc.querySelectorAll("[data-field]").forEach((el) => {
-    const f = el.getAttribute("data-field");
-    if (!f) return;
-    const v = data[f as keyof ResumeData];
-    if (typeof v === "string") {
-      // Special handling: render links as anchor elements
-      if (f === "links") {
-        const parsed = parseLinksString(v);
-        if (parsed.length === 0) {
-          el.textContent = "";
-        } else {
-          // Use class name to detect layout: links-block = sidebar stacked, links-inline = inline contact row
-          const isBlock = el.classList.contains("links-block")
-            || el.closest(".sidebar") !== null;
-
-          el.innerHTML = parsed.map(({ label, url }, i) => {
-            const a = `<a href="${url}" style="color:inherit;text-decoration:none;">${label}</a>`;
-            if (isBlock) return `<span style="display:block;margin-bottom:2px;">${a}</span>`;
-            return (i > 0 ? " · " : "") + a;
-          }).join("");
-        }
-        if (optMap[f] && options[optMap[f]] === false) (el as HTMLElement).style.display = "none";
-        return;
-      }
-      el.textContent = v;
-      if (optMap[f] && options[optMap[f]] === false) (el as HTMLElement).style.display = "none";
-    }
-  });
-  doc.querySelectorAll("[data-list]").forEach((container) => {
-    const listName = container.getAttribute("data-list");
-    const listData = data[listName as keyof ResumeData];
-    const listOptMap: Record<string, string> = { projects: "projects", education: "education" };
-    if (listOptMap[listName ?? ""] && options[listOptMap[listName ?? ""]] === false) { (container as HTMLElement).style.display = "none"; return; }
-    if (!Array.isArray(listData) || !container.firstElementChild) return;
-    const tpl = container.firstElementChild.cloneNode(true) as HTMLElement;
-    container.innerHTML = "";
-    (listData as Record<string, unknown>[]).forEach((item) => {
-      const clone = tpl.cloneNode(true) as HTMLElement;
-      Object.entries(item).forEach(([key, val]) => {
-        clone.querySelectorAll(`[data-field="${key}"]`).forEach((el) => { el.textContent = val as string; });
-        if (key === "points" && Array.isArray(val)) {
-          const pts = clone.querySelector('[data-list="points"]');
-          if (pts?.firstElementChild) {
-            const ptTpl = pts.firstElementChild.cloneNode(true) as HTMLElement;
-            pts.innerHTML = "";
-            (val as string[]).forEach((pt) => {
-              const c = ptTpl.cloneNode(true) as HTMLElement;
-              (c.querySelector('[data-field="point"]') || c).textContent = pt;
-              pts.appendChild(c);
-            });
-          }
-        }
-      });
-      container.appendChild(clone);
-    });
-  });
-  return doc.documentElement.outerHTML;
-}
+// Imported from @/lib/resumeTemplate — see import at top of file.
 
 const SESSION_CONFIG_KEY = "resume_editor_config";
 
@@ -638,6 +486,10 @@ function TopBar() {
       a.remove();
       setTimeout(() => URL.revokeObjectURL(blobUrl), 4000);
       _dbg("download triggered — done");
+      // Clear staged-progress timers BEFORE updating the toast so neither
+      // timer can overwrite the success message if it fires at the same tick.
+      clearTimeout(stage2);
+      clearTimeout(stage3);
       toast.success("PDF downloaded", { id: exportToast });
 
       // Mark the resume as complete once it has been exported AND there
@@ -655,13 +507,13 @@ function TopBar() {
       }
     } catch (err) {
       console.error("[TopBar] PDF export error:", err);
+      clearTimeout(stage2);
+      clearTimeout(stage3);
       toast.error(err instanceof Error ? err.message : "PDF export failed", {
         id: exportToast,
         action: { label: "Retry", onClick: () => handleExportPdf() },
       });
     } finally {
-      clearTimeout(stage2);
-      clearTimeout(stage3);
       setIsExporting(false);
     }
   }, [getToken, savedResumeId, isDirty, populatedHtml, resumeTitle, isExporting]);
@@ -2428,11 +2280,68 @@ function ATSPanel() {
     sectionScores: Record<string, number>;
   };
 
-  const [result, setResult]       = React.useState<AtsResult | null>(null);
-  const [isScoring, setIsScoring] = React.useState(false);
-  const [scoreError, setScoreError] = React.useState<string | null>(null);
-  const [lastCheckedAt, setLastCheckedAt] = React.useState<string | null>(null);
+  // ── localStorage helpers (keyed per resume) ──────────────────────────────
+  const lsKey = savedResumeId ? `ats_cache_${savedResumeId}` : null;
 
+  const readCache = React.useCallback((): { result: AtsResult; checkedAt: string } | null => {
+    if (!lsKey) return null;
+    try {
+      const raw = localStorage.getItem(lsKey);
+      return raw ? JSON.parse(raw) : null;
+    } catch { return null; }
+  }, [lsKey]);
+
+  const writeCache = React.useCallback((result: AtsResult, checkedAt: string) => {
+    if (!lsKey) return;
+    try { localStorage.setItem(lsKey, JSON.stringify({ result, checkedAt })); } catch { /* quota */ }
+  }, [lsKey]);
+
+  // ── State ─────────────────────────────────────────────────────────────────
+  const [result, setResult]           = React.useState<AtsResult | null>(null);
+  const [isScoring, setIsScoring]     = React.useState(false);
+  const [scoreError, setScoreError]   = React.useState<string | null>(null);
+  const [lastCheckedAt, setLastCheckedAt] = React.useState<string | null>(null);
+  const [isLoadingExisting, setIsLoadingExisting] = React.useState(false);
+
+  // ── Load existing result: localStorage first (instant), then DB ───────────
+  React.useEffect(() => {
+    if (!savedResumeId) return;
+    let cancelled = false;
+
+    // 1. Instant load from localStorage
+    const cached = readCache();
+    if (cached) {
+      setResult(cached.result);
+      setLastCheckedAt(cached.checkedAt);
+      return; // no need to hit the network
+    }
+
+    // 2. Fallback: fetch from DB (works after server restart persists lastAtsResult)
+    let isFetching = true;
+    setIsLoadingExisting(true);
+    (async () => {
+      try {
+        const token = await getToken();
+        const res = await fetch(ENDPOINTS.resumeBuilderGet(savedResumeId), {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok || cancelled) return;
+        const json = await res.json();
+        const resume = json.data ?? json;
+        if (resume.lastAtsResult && !cancelled) {
+          const at = resume.lastAtsAt ?? resume.updatedAt ?? new Date().toISOString();
+          setResult(resume.lastAtsResult as AtsResult);
+          setLastCheckedAt(at);
+          // Back-fill localStorage so next open is instant
+          writeCache(resume.lastAtsResult as AtsResult, at);
+        }
+      } catch { /* silently ignore — user can always run a fresh scan */ }
+      finally { if (!cancelled && isFetching) setIsLoadingExisting(false); }
+    })();
+    return () => { cancelled = true; isFetching = false; };
+  }, [savedResumeId, getToken, readCache, writeCache]);
+
+  // ── Run scan ──────────────────────────────────────────────────────────────
   const handleRunScan = React.useCallback(async () => {
     if (!savedResumeId || isScoring) return;
     setIsScoring(true);
@@ -2446,16 +2355,19 @@ function ATSPanel() {
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || "ATS scan failed");
-      setResult(json.data as AtsResult);
-      setLastCheckedAt(new Date().toISOString());
-      toast.success(`ATS score: ${json.data.score}/100`);
+      const data = json.data as AtsResult;
+      const at = new Date().toISOString();
+      setResult(data);
+      setLastCheckedAt(at);
+      writeCache(data, at);
+      toast.success(`ATS score: ${data.score}/100`);
     } catch (err) {
       setScoreError(err instanceof Error ? err.message : "ATS scan failed");
       toast.error("ATS scan failed");
     } finally {
       setIsScoring(false);
     }
-  }, [savedResumeId, isScoring, getToken]);
+  }, [savedResumeId, isScoring, getToken, writeCache]);
 
   const score = result?.score ?? 0;
   const ringColor =
@@ -2477,31 +2389,42 @@ function ATSPanel() {
   };
 
   return (
-    <main className="flex-1 overflow-y-auto bg-slate-50/60">
-      <div className="max-w-2xl mx-auto px-8 py-8 space-y-5">
-        {/* Header */}
-        <div className="flex items-center justify-between">
+    <div className="flex flex-col flex-1 min-h-0">
+
+      {/* ── Fixed top: header + scan card ── */}
+      <div className="shrink-0 bg-background px-6 pt-6 pb-5 space-y-5 border-b border-border/50">
+        {/* Header row */}
+        <div className="flex items-start justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="h-10 w-10 rounded-2xl bg-emerald-100 border border-emerald-200/60 flex items-center justify-center shrink-0">
-              <FileSearch className="h-5 w-5 text-emerald-600" />
+            <div className="h-8 w-8 rounded-lg bg-slate-100 border border-border flex items-center justify-center shrink-0">
+              <FileSearch className="h-4 w-4 text-slate-600" />
             </div>
             <div>
-              <h2 className="text-lg font-bold tracking-tight">ATS Score</h2>
-              <p className="text-xs text-muted-foreground">Applicant Tracking System analysis</p>
+              <h2 className="text-base font-semibold tracking-tight">ATS Score</h2>
+              <p className="text-[12px] text-muted-foreground mt-0.5">Applicant Tracking System analysis</p>
             </div>
           </div>
-          <span className="text-[10px] font-bold px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-700 uppercase tracking-wide border border-emerald-200/60">Free</span>
+          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200/80 shrink-0 mt-0.5">Free</span>
         </div>
 
-        {/* Score ring + CTA */}
-        <div className="bg-background rounded-2xl border border-border p-6 flex items-center gap-8 shadow-sm">
+        {!savedResumeId && (
+          <div className="flex items-start gap-2.5 bg-amber-50 border border-amber-200/60 rounded-xl px-4 py-3">
+            <AlertTriangle className="h-3.5 w-3.5 text-amber-600 shrink-0 mt-0.5" />
+            <p className="text-[12px] text-amber-800 leading-relaxed">
+              <span className="font-semibold">Save your resume first</span> — ATS scanning requires a saved file. Hit <strong>Save</strong> in the top bar, then return here.
+            </p>
+          </div>
+        )}
+
+        {/* Scan card — flat, no heavy background */}
+        <div className="flex items-center gap-5">
           <div className="relative shrink-0">
-            <svg width="88" height="88" viewBox="0 0 88 88">
-              <circle cx="44" cy="44" r="36" fill="none" stroke="#e5e7eb" strokeWidth="8" />
+            <svg width="72" height="72" viewBox="0 0 88 88">
+              <circle cx="44" cy="44" r="36" fill="none" stroke="hsl(var(--border))" strokeWidth="7" />
               <circle
                 cx="44" cy="44" r="36" fill="none"
-                stroke={result ? ringColor : "#e5e7eb"}
-                strokeWidth="8"
+                stroke={result ? ringColor : "hsl(var(--border))"}
+                strokeWidth="7"
                 strokeDasharray={`${2 * Math.PI * 36}`}
                 strokeDashoffset={`${2 * Math.PI * 36 * (1 - (result ? score : 0) / 100)}`}
                 strokeLinecap="round"
@@ -2510,91 +2433,102 @@ function ATSPanel() {
               />
             </svg>
             <div className="absolute inset-0 flex flex-col items-center justify-center">
-              <span className="text-2xl font-black text-foreground leading-none tabular-nums">
-                {result ? score : "—"}
-              </span>
-              <span className="text-[10px] text-muted-foreground font-medium mt-0.5">
-                {result ? result.grade : "score"}
-              </span>
+              <span className="text-lg font-bold text-foreground leading-none tabular-nums">{result ? score : "—"}</span>
+              <span className="text-[9px] text-muted-foreground font-medium mt-0.5">{result ? result.grade : "score"}</span>
             </div>
           </div>
-
-          <div className="flex-1 space-y-3">
-            <p className="text-sm text-muted-foreground leading-relaxed">
-              {result?.summary
-                ? result.summary
-                : "Run a scan to find keywords, formatting issues, and quick wins to boost your match rate with ATS systems."}
+          <div className="flex-1 space-y-3 min-w-0">
+            <p className="text-[13px] text-muted-foreground leading-relaxed line-clamp-2">
+              {result?.summary ?? "Run a scan to see keyword gaps, formatting issues, and quick wins to boost your ATS match rate."}
             </p>
             <div className="flex items-center gap-3 flex-wrap">
               <button
                 onClick={handleRunScan}
-                disabled={!savedResumeId || isScoring}
+                disabled={!savedResumeId || isScoring || isLoadingExisting}
                 title={!savedResumeId ? "Save your resume first" : "Run ATS scan"}
-                className="flex items-center gap-2 px-5 h-9 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                className="flex items-center gap-2 px-4 h-8 rounded-lg bg-slate-900 hover:bg-slate-700 text-white text-[13px] font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                {isScoring
-                  ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  : <FileSearch className="h-3.5 w-3.5" />}
-                {result ? "Re-scan" : "Run ATS Scan"}
+                {isScoring ? <Loader2 className="h-3 w-3 animate-spin" /> : <FileSearch className="h-3 w-3" />}
+                {result ? "Rescan" : "Run ATS Scan"}
               </button>
               {lastCheckedAt && (
-                <span className="text-[11px] text-slate-500">
-                  Last checked {formatRelative(lastCheckedAt)}
-                  {isDirty && <span className="ml-1.5 text-amber-600 font-semibold">· stale</span>}
+                <span className="text-[11px] text-muted-foreground">
+                  {formatRelative(lastCheckedAt)}
+                  {isDirty && <span className="ml-1.5 text-amber-600 font-medium">· stale</span>}
                 </span>
               )}
             </div>
             {scoreError && (
-              <div className="text-[11.5px] text-rose-700 bg-rose-50 border border-rose-200/70 rounded-md px-2.5 py-1.5 flex items-start gap-1.5">
-                <AlertCircle className="h-3 w-3 mt-0.5 shrink-0" />
-                <span>{scoreError}</span>
-              </div>
+              <p className="text-[12px] text-destructive flex items-center gap-1.5">
+                <AlertCircle className="h-3 w-3 shrink-0" />{scoreError}
+              </p>
             )}
           </div>
         </div>
+      </div>
 
-        {!result && !isScoring && (
-          <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-6 py-8 text-center">
-            <div className="mx-auto h-10 w-10 rounded-full bg-slate-100 flex items-center justify-center mb-2.5">
-              <FileSearch className="h-4 w-4 text-slate-400" />
+      {/* ── Scrollable results ── */}
+      <div className="flex-1 overflow-y-auto min-h-0 bg-slate-50/40 px-6 py-5 space-y-3">
+
+        {/* Loading skeleton */}
+        {(isScoring || isLoadingExisting) && (
+          <div className="space-y-3 animate-pulse">
+            <div className="bg-white rounded-xl border border-border p-4 space-y-3">
+              <div className="h-2.5 bg-slate-200 rounded-full w-2/5" />
+              <div className="h-2 bg-slate-100 rounded-full w-full" />
+              <div className="h-2 bg-slate-100 rounded-full w-3/4" />
+              <div className="h-2 bg-slate-100 rounded-full w-4/5" />
             </div>
-            <p className="text-[13px] font-semibold text-slate-700">No scan run yet</p>
-            <p className="text-[11.5px] text-slate-500 mt-1 leading-relaxed max-w-sm mx-auto">
-              ATS scans only run when you click the button — your edits won't be re-analysed automatically.
+            <div className="grid grid-cols-2 gap-3">
+              {[0, 1].map((i) => (
+                <div key={i} className="bg-white rounded-xl border border-border p-4 space-y-2">
+                  <div className="h-2.5 bg-slate-200 rounded-full w-1/2" />
+                  <div className="h-2 bg-slate-100 rounded-full w-full" />
+                  <div className="h-2 bg-slate-100 rounded-full w-4/5" />
+                  <div className="h-2 bg-slate-100 rounded-full w-3/5" />
+                </div>
+              ))}
+            </div>
+            <div className="bg-white rounded-xl border border-border p-4 space-y-3">
+              <div className="h-2.5 bg-slate-200 rounded-full w-1/3" />
+              <div className="flex flex-wrap gap-1.5">
+                {[48, 64, 52, 72, 48, 60, 56, 44].map((w, i) => (
+                  <div key={i} className="h-5 bg-slate-100 rounded-md" style={{ width: w }} />
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Empty state */}
+        {!result && !isScoring && !isLoadingExisting && (
+          <div className="flex flex-col items-center justify-center min-h-[200px] text-center py-8">
+            <div className="h-10 w-10 rounded-xl bg-slate-100 border border-border flex items-center justify-center mb-3">
+              <FileSearch className="h-4.5 w-4.5 text-slate-400" />
+            </div>
+            <p className="text-[13px] font-medium text-slate-700">No scan run yet</p>
+            <p className="text-[12px] text-muted-foreground mt-1.5 leading-relaxed max-w-xs mx-auto">
+              Scans run on demand — your edits won't be re-analysed automatically.
             </p>
           </div>
         )}
 
-        {/* Section scores */}
         {result && sectionEntries.length > 0 && (
-          <div className="bg-background rounded-2xl border border-border overflow-hidden shadow-sm">
-            <div className="px-5 py-3 border-b border-border bg-muted/30">
-              <span className="text-xs font-bold uppercase tracking-widest text-muted-foreground">
-                Section Scores
-              </span>
+          <div className="bg-white rounded-xl border border-border overflow-hidden">
+            <div className="px-4 py-3 border-b border-border/60">
+              <span className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">Section Scores</span>
             </div>
-            <div className="divide-y divide-border">
+            <div className="divide-y divide-border/60">
               {sectionEntries.map(([key, val]) => {
                 const pct = Math.max(0, Math.min(100, val));
-                const barColor =
-                  pct >= 85 ? "bg-emerald-500" :
-                  pct >= 70 ? "bg-blue-500" :
-                  pct >= 55 ? "bg-amber-500" :
-                  "bg-rose-500";
+                const barColor = pct >= 85 ? "bg-emerald-500" : pct >= 70 ? "bg-blue-500" : pct >= 55 ? "bg-amber-500" : "bg-rose-500";
                 return (
-                  <div key={key} className="px-5 py-2.5 flex items-center gap-3">
-                    <span className="text-[12px] font-medium text-slate-700 w-32 shrink-0">
-                      {SECTION_LABEL[key] ?? key}
-                    </span>
-                    <div className="flex-1 h-1.5 rounded-full bg-slate-100 overflow-hidden">
-                      <div
-                        className={cn("h-full rounded-full transition-all duration-500", barColor)}
-                        style={{ width: `${pct}%` }}
-                      />
+                  <div key={key} className="px-4 py-2.5 flex items-center gap-3">
+                    <span className="text-[12px] font-medium text-foreground w-32 shrink-0">{SECTION_LABEL[key] ?? key}</span>
+                    <div className="flex-1 h-1 rounded-full bg-slate-100 overflow-hidden">
+                      <div className={cn("h-full rounded-full transition-all duration-500", barColor)} style={{ width: `${pct}%` }} />
                     </div>
-                    <span className="text-[12px] font-semibold tabular-nums text-slate-800 w-10 text-right">
-                      {pct}
-                    </span>
+                    <span className="text-[12px] font-semibold tabular-nums text-foreground w-8 text-right">{pct}</span>
                   </div>
                 );
               })}
@@ -2602,38 +2536,33 @@ function ATSPanel() {
           </div>
         )}
 
-        {/* Strengths + Weaknesses */}
         {result && (result.strengths.length > 0 || result.weaknesses.length > 0) && (
           <div className="grid grid-cols-2 gap-3">
             {result.strengths.length > 0 && (
-              <div className="bg-emerald-50/40 rounded-2xl border border-emerald-200/60 p-4">
+              <div className="bg-white rounded-xl border border-border p-4">
                 <div className="flex items-center gap-1.5 mb-2.5">
                   <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
-                  <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-700">
-                    Strengths
-                  </span>
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-emerald-700">Strengths</span>
                 </div>
                 <ul className="space-y-1.5">
                   {result.strengths.slice(0, 5).map((s, i) => (
-                    <li key={i} className="text-[12px] text-slate-700 leading-snug flex items-start gap-1.5">
-                      <span className="text-emerald-500 mt-0.5">•</span><span>{s}</span>
+                    <li key={i} className="text-[12px] text-foreground leading-snug flex items-start gap-1.5">
+                      <span className="text-emerald-500 mt-0.5 shrink-0">·</span><span>{s}</span>
                     </li>
                   ))}
                 </ul>
               </div>
             )}
             {result.weaknesses.length > 0 && (
-              <div className="bg-amber-50/40 rounded-2xl border border-amber-200/60 p-4">
+              <div className="bg-white rounded-xl border border-border p-4">
                 <div className="flex items-center gap-1.5 mb-2.5">
-                  <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />
-                  <span className="text-[11px] font-bold uppercase tracking-wider text-amber-700">
-                    Weaknesses
-                  </span>
+                  <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-amber-700">Weaknesses</span>
                 </div>
                 <ul className="space-y-1.5">
                   {result.weaknesses.slice(0, 5).map((w, i) => (
-                    <li key={i} className="text-[12px] text-slate-700 leading-snug flex items-start gap-1.5">
-                      <span className="text-amber-500 mt-0.5">•</span><span>{w}</span>
+                    <li key={i} className="text-[12px] text-foreground leading-snug flex items-start gap-1.5">
+                      <span className="text-amber-500 mt-0.5 shrink-0">·</span><span>{w}</span>
                     </li>
                   ))}
                 </ul>
@@ -2642,43 +2571,24 @@ function ATSPanel() {
           </div>
         )}
 
-        {/* Missing keywords */}
         {result && result.missingKeywords.length > 0 && (
-          <div className="bg-background rounded-2xl border border-border p-5 shadow-sm">
-            <div className="flex items-center gap-2 mb-3">
-              <Wand2 className="h-3.5 w-3.5 text-violet-600" />
-              <span className="text-xs font-bold uppercase tracking-widest text-muted-foreground">
-                Missing Keywords
-              </span>
-            </div>
+          <div className="bg-white rounded-xl border border-border p-4">
+            <p className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground mb-2.5">Missing Keywords</p>
             <div className="flex flex-wrap gap-1.5">
               {result.missingKeywords.slice(0, 18).map((kw, i) => (
-                <span
-                  key={i}
-                  className="text-[11px] font-medium px-2 py-0.5 rounded-md bg-amber-50 border border-amber-200/70 text-amber-800"
-                >
-                  {kw}
-                </span>
+                <span key={i} className="text-[11px] font-medium px-2 py-0.5 rounded-md bg-slate-50 border border-border text-slate-700">{kw}</span>
               ))}
             </div>
           </div>
         )}
 
-        {/* Suggestions */}
         {result && result.suggestions.length > 0 && (
-          <div className="bg-background rounded-2xl border border-border p-5 shadow-sm">
-            <div className="flex items-center gap-2 mb-3">
-              <Sparkles className="h-3.5 w-3.5 text-violet-600" />
-              <span className="text-xs font-bold uppercase tracking-widest text-muted-foreground">
-                Improvement suggestions
-              </span>
-            </div>
+          <div className="bg-white rounded-xl border border-border p-4">
+            <p className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground mb-2.5">Suggestions</p>
             <ul className="space-y-2">
               {result.suggestions.slice(0, 6).map((s, i) => (
-                <li key={i} className="text-[12.5px] text-slate-700 leading-relaxed flex items-start gap-2">
-                  <span className="h-4 w-4 rounded-full bg-violet-100 text-violet-600 text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5">
-                    {i + 1}
-                  </span>
+                <li key={i} className="text-[12.5px] text-foreground leading-relaxed flex items-start gap-2">
+                  <span className="h-4 w-4 rounded-full bg-slate-100 border border-border text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5 text-slate-600">{i + 1}</span>
                   <span>{s}</span>
                 </li>
               ))}
@@ -2686,13 +2596,13 @@ function ATSPanel() {
           </div>
         )}
       </div>
-    </main>
+    </div>
   );
 }
 
 // ─── CenterPanel — JD Tailor ─────────────────────────────────────────────────
 
-function JDTailorPanel() {
+function JDTailorPanel({ onDone }: { onDone?: () => void } = {}) {
   const dispatch       = useDispatch<AppDispatch>();
   const jobDescription = useSelector((s: RootState) => s.resumeBuilder.jobDescription);
   const jobTitle       = useSelector((s: RootState) => s.resumeBuilder.jobTitle);
@@ -2813,191 +2723,169 @@ function JDTailorPanel() {
   const isManualResume = !savedResumeId;
 
   return (
-    <main className="flex-1 overflow-y-auto bg-slate-50/60">
-      <div className="max-w-2xl mx-auto px-8 py-8 space-y-5">
-        {/* Header */}
-        <div className="flex items-center gap-3">
-          <div className="h-10 w-10 rounded-2xl bg-violet-100 border border-violet-200/60 flex items-center justify-center shrink-0">
-            <Wand2 className="h-5 w-5 text-violet-600" />
+    <div className="flex flex-col flex-1 min-h-0">
+
+      {/* ── Fixed top: header + inputs + JD textarea + action ── */}
+      <div className="shrink-0 bg-background px-6 pt-6 pb-5 space-y-5 border-b border-border/50">
+
+        {/* Header row */}
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="h-8 w-8 rounded-lg bg-slate-100 border border-border flex items-center justify-center shrink-0">
+              <Wand2 className="h-4 w-4 text-slate-600" />
+            </div>
+            <div>
+              <h2 className="text-base font-semibold tracking-tight">JD Tailor</h2>
+              <p className="text-[12px] text-muted-foreground mt-0.5">
+                {isManualResume ? "Build a complete resume tailored to the target job" : "Rewrite every section to match a specific job posting"}
+              </p>
+            </div>
           </div>
-          <div>
-            <h2 className="text-lg font-bold tracking-tight">JD Tailor</h2>
-            <p className="text-xs text-muted-foreground">
-              {isManualResume
-                ? "Craft a complete resume from scratch — tailored to your target job"
-                : "Rewrite your entire resume to match a specific job description"}
-            </p>
-          </div>
-          <span className="ml-auto text-[10px] font-bold px-2.5 py-1 rounded-full bg-violet-100 text-violet-700 border border-violet-200/60 uppercase tracking-wide">{tailorCost} credit{tailorCost === 1 ? "" : "s"} · regen free</span>
+          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-violet-50 text-violet-700 border border-violet-200/80 shrink-0 mt-0.5 whitespace-nowrap">{tailorCost} cr · regen free</span>
         </div>
 
-        {/* Manual resume info banner */}
         {isManualResume && (
-          <div className="flex items-start gap-3 bg-violet-50 border border-violet-200/70 rounded-2xl px-4 py-3">
-            <Sparkles className="h-4 w-4 text-violet-600 shrink-0 mt-0.5" />
-            <p className="text-xs text-violet-800 leading-relaxed">
-              <span className="font-semibold">Building from scratch.</span> Paste the job description and AI will craft a complete, ATS-optimised resume for you — summary, experience, skills, projects and more.
+          <div className="flex items-start gap-2.5 bg-slate-50 border border-border rounded-xl px-4 py-3">
+            <Sparkles className="h-3.5 w-3.5 text-slate-500 shrink-0 mt-0.5" />
+            <p className="text-[12px] text-muted-foreground leading-relaxed">
+              <span className="font-medium text-foreground">Building from scratch.</span> AI will craft a complete, ATS-optimised resume from the job description — summary, experience, skills, projects and more.
             </p>
           </div>
         )}
 
-        {/* Target Role + Company — REQUIRED inputs that drive the AI rewrite.
-            Pre-filled from wizard if available, but always editable. */}
-        <div className="bg-background rounded-2xl border border-border px-5 py-4 shadow-sm space-y-3">
-          <div className="flex items-center gap-2">
-            <Briefcase className="h-4 w-4 text-violet-600" />
-            <p className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Target Role <span className="text-destructive normal-case font-semibold tracking-normal">(required)</span></p>
-          </div>
+        {/* Target role inputs — clean, no heavy card bg */}
+        <div className="space-y-3">
+          <p className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">Target Role</p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <label className="text-[11px] font-semibold text-muted-foreground mb-1 block">Job Title</label>
+              <label className="text-[11px] text-muted-foreground mb-1.5 block">Job Title <span className="text-destructive">*</span></label>
               <input
                 type="text"
                 value={jobTitle}
                 onChange={(e) => dispatch(setJobContext({ jobTitle: e.target.value }))}
                 placeholder="e.g. Senior Data Engineer"
-                className="w-full h-9 px-3 text-sm bg-background border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-500/30 focus:border-violet-500"
+                className={cn(
+                  "w-full h-9 px-3 text-[13px] bg-background border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring/30 focus:border-ring transition-colors",
+                  !jobTitle.trim() ? "border-destructive/40" : "border-border"
+                )}
               />
+              {!jobTitle.trim() && <p className="text-[11px] text-destructive mt-1">Required to tailor your resume</p>}
             </div>
             <div>
-              <label className="text-[11px] font-semibold text-muted-foreground mb-1 block">Company</label>
+              <label className="text-[11px] text-muted-foreground mb-1.5 block">Company</label>
               <input
                 type="text"
                 value={company}
                 onChange={(e) => dispatch(setJobContext({ company: e.target.value }))}
                 placeholder="e.g. Netflix"
-                className="w-full h-9 px-3 text-sm bg-background border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-500/30 focus:border-violet-500"
+                className="w-full h-9 px-3 text-[13px] bg-background border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring/30 focus:border-ring transition-colors"
               />
             </div>
           </div>
-          <p className="text-[11px] text-muted-foreground leading-relaxed">
-            The AI rewrites your <strong>summary, experience bullets, skills, and project descriptions</strong> based on these fields + the JD below. Company names, job titles, and dates from your existing resume are preserved.
+          <p className="text-[11.5px] text-muted-foreground leading-relaxed">
+            Rewrites <strong className="text-foreground font-medium">summary, experience, skills, and projects</strong>. Company names, titles, and dates are preserved.
           </p>
         </div>
 
-        {/* JD input */}
-        <div className="bg-background rounded-2xl border border-border overflow-hidden shadow-sm">
-          <div className="px-5 py-3.5 border-b border-border bg-muted/30 flex items-center justify-between">
-            <span className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Job Description</span>
-            <span className="text-[10px] text-muted-foreground">{charCount > 0 ? `${charCount} chars` : "Paste JD below"}</span>
+        {/* JD textarea — borderless inner, clean outer container */}
+        <div className="rounded-xl border border-border overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-border/60 bg-muted/20 flex items-center justify-between">
+            <span className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">Job Description</span>
+            <span className="text-[10px] text-muted-foreground">{charCount > 0 ? `${charCount} chars` : "Paste JD"}</span>
           </div>
           <Textarea
             value={jdText}
             onChange={(e) => setJdText(e.target.value)}
             placeholder="Paste the full job description here. We'll analyse keywords, extract requirements, and rewrite your resume sections to maximise ATS match rate…"
-            className="border-none rounded-none min-h-[220px] resize-none text-sm bg-background focus-visible:ring-0 focus-visible:ring-offset-0 px-5 py-4 placeholder:text-muted-foreground/40 leading-relaxed"
+            className="border-none rounded-none min-h-[110px] max-h-[190px] overflow-y-auto resize-none text-[13px] bg-background focus-visible:ring-0 focus-visible:ring-offset-0 px-4 py-3.5 placeholder:text-muted-foreground/40 leading-relaxed"
           />
         </div>
 
-        {/* Action */}
+        {/* CTA row */}
         <div className="flex flex-col gap-2">
           <div className="flex items-center gap-3">
             <button
               onClick={handleTailor}
               disabled={charCount < 50 || isTailoring || !jobTitle.trim()}
               className={cn(
-                "flex items-center gap-2 px-6 h-10 rounded-xl text-sm font-semibold transition-all shadow-sm",
+                "flex items-center gap-2 px-5 h-9 rounded-lg text-[13px] font-semibold transition-colors",
                 charCount >= 50 && !isTailoring && jobTitle.trim()
-                  ? "bg-violet-600 hover:bg-violet-700 text-white"
+                  ? "bg-slate-900 hover:bg-slate-700 text-white"
                   : "bg-muted text-muted-foreground cursor-not-allowed"
               )}
             >
-              {isTailoring ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
-              {isTailoring ? "Tailoring entire resume…" : hasOutcome ? "Regenerate (free)" : "Tailor My Resume"}
+              {isTailoring ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
+              {isTailoring ? "Tailoring…" : hasOutcome ? "Regenerate (free)" : "Tailor My Resume"}
             </button>
-            {!jobTitle.trim() && (
-              <p className="text-xs text-muted-foreground">
-                Enter the target job title to continue
-              </p>
-            )}
+            {!jobTitle.trim() && <p className="text-[12px] text-muted-foreground">Enter a job title to continue</p>}
             {jobTitle.trim() && charCount > 0 && charCount < 50 && !isTailoring && (
-              <p className="text-xs text-muted-foreground">
-                Paste at least 50 characters to continue
-              </p>
+              <p className="text-[12px] text-muted-foreground">Paste at least 50 characters</p>
             )}
           </div>
           {tailorError && (
-            <p className="text-xs text-destructive flex items-center gap-1.5">
+            <p className="text-[12px] text-destructive flex items-center gap-1.5">
               <AlertTriangle className="h-3.5 w-3.5 shrink-0" />{tailorError}
             </p>
           )}
         </div>
+      </div>
 
-        {/* Tailoring outcome — only shown after a successful run */}
+      {/* ── Scrollable results: outcome + how-it-works ── */}
+      <div className="flex-1 overflow-y-auto min-h-0 bg-slate-50/40 px-6 py-5 space-y-3">
         {hasOutcome && (
-          <div className="rounded-2xl border border-emerald-200/70 bg-gradient-to-br from-emerald-50/80 to-violet-50/40 p-5 space-y-4 shadow-sm">
+          <div className="rounded-xl border border-border bg-white p-5 space-y-4">
             <div className="flex items-start gap-3">
-              <div className="h-9 w-9 rounded-xl bg-emerald-100 border border-emerald-200/70 flex items-center justify-center shrink-0">
-                <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+              <div className="h-8 w-8 rounded-lg bg-slate-100 border border-border flex items-center justify-center shrink-0">
+                <CheckCircle2 className="h-4 w-4 text-emerald-600" />
               </div>
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold text-slate-900">Resume tailored to job description</p>
-                <p className="text-[11px] text-slate-500 mt-0.5">
+                <p className="text-[13px] font-semibold text-foreground">Resume tailored to job description</p>
+                <p className="text-[11px] text-muted-foreground mt-0.5">
                   {lastTailoredAt ? `Updated ${new Date(lastTailoredAt).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}` : ""}
                 </p>
               </div>
               {typeof lastTailorMatchScore === "number" && (
                 <div className="text-right shrink-0">
-                  <p className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Match</p>
-                  <p className="text-2xl font-bold tabular-nums text-violet-700">{Math.round(lastTailorMatchScore)}%</p>
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Match</p>
+                  <p className="text-xl font-bold tabular-nums text-foreground">{Math.round(lastTailorMatchScore)}%</p>
                 </div>
               )}
             </div>
-
-            {/* Per-section indicators */}
             <div className="flex flex-wrap gap-1.5">
               {tailoredSections.map((sid) => (
-                <span key={sid} className="inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-full bg-white text-emerald-700 border border-emerald-200">
-                  <CheckCircle2 className="h-3 w-3" />
-                  {sectionLabelMap[sid] ?? sid}
+                <span key={sid} className="inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-md bg-slate-50 text-slate-700 border border-border">
+                  <CheckCircle2 className="h-3 w-3 text-emerald-500" />{sectionLabelMap[sid] ?? sid}
                 </span>
               ))}
             </div>
-
-            {/* Keyword diff */}
             {(keywordsMatched.length > 0 || keywordsMissing.length > 0) && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {keywordsMatched.length > 0 && (
-                  <div className="rounded-xl bg-white/80 border border-emerald-200/60 p-3">
-                    <p className="text-[10px] uppercase tracking-wider font-bold text-emerald-700 mb-1.5">
-                      Matched keywords ({keywordsMatched.length})
-                    </p>
+                  <div className="rounded-lg bg-slate-50 border border-border p-3">
+                    <p className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground mb-1.5">Matched ({keywordsMatched.length})</p>
                     <div className="flex flex-wrap gap-1">
                       {keywordsMatched.slice(0, 12).map((k) => (
-                        <span key={k} className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700">{k}</span>
+                        <span key={k} className="text-[10px] px-1.5 py-0.5 rounded bg-white border border-border text-slate-600">{k}</span>
                       ))}
-                      {keywordsMatched.length > 12 && (
-                        <span className="text-[10px] px-1.5 py-0.5 text-slate-500">+{keywordsMatched.length - 12}</span>
-                      )}
+                      {keywordsMatched.length > 12 && <span className="text-[10px] text-muted-foreground">+{keywordsMatched.length - 12}</span>}
                     </div>
                   </div>
                 )}
                 {keywordsMissing.length > 0 && (
-                  <div className="rounded-xl bg-white/80 border border-amber-200/60 p-3">
-                    <p className="text-[10px] uppercase tracking-wider font-bold text-amber-700 mb-1.5">
-                      Still missing ({keywordsMissing.length})
-                    </p>
+                  <div className="rounded-lg bg-slate-50 border border-border p-3">
+                    <p className="text-[10px] uppercase tracking-wider font-semibold text-amber-700 mb-1.5">Still missing ({keywordsMissing.length})</p>
                     <div className="flex flex-wrap gap-1">
                       {keywordsMissing.slice(0, 12).map((k) => (
-                        <span key={k} className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">{k}</span>
+                        <span key={k} className="text-[10px] px-1.5 py-0.5 rounded bg-white border border-amber-200 text-amber-700">{k}</span>
                       ))}
-                      {keywordsMissing.length > 12 && (
-                        <span className="text-[10px] px-1.5 py-0.5 text-slate-500">+{keywordsMissing.length - 12}</span>
-                      )}
+                      {keywordsMissing.length > 12 && <span className="text-[10px] text-muted-foreground">+{keywordsMissing.length - 12}</span>}
                     </div>
                   </div>
                 )}
               </div>
             )}
-
-            {/* Action row */}
             <div className="flex items-center gap-2 pt-1">
-              <button
-                onClick={() => dispatch(setActiveBottomTab("editor"))}
-                className="text-xs font-semibold px-3 h-8 rounded-lg bg-slate-900 text-white hover:bg-slate-700 transition-colors"
-              >
-                Review changes in editor
-              </button>
+              <button onClick={() => onDone?.()} className="text-[12px] font-semibold px-3 h-8 rounded-lg bg-slate-900 text-white hover:bg-slate-700 transition-colors">Done</button>
               {preTailorSnapshot && Object.keys(preTailorSnapshot).length > 0 && (
                 <button
                   onClick={() => {
@@ -3006,25 +2894,19 @@ function JDTailorPanel() {
                       toast.success("Tailored changes reverted");
                     }
                   }}
-                  className="text-xs font-semibold px-3 h-8 rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 transition-colors"
+                  className="text-[12px] font-semibold px-3 h-8 rounded-lg border border-border bg-white text-foreground hover:bg-slate-50 transition-colors"
                 >
                   Revert
                 </button>
               )}
-              <button
-                onClick={() => dispatch(clearTailorOutcome())}
-                className="text-xs font-semibold px-3 h-8 rounded-lg text-slate-500 hover:text-slate-900 transition-colors ml-auto"
-              >
-                Dismiss
-              </button>
+              <button onClick={() => dispatch(clearTailorOutcome())} className="text-[12px] text-muted-foreground hover:text-foreground transition-colors ml-auto">Dismiss</button>
             </div>
           </div>
         )}
 
-        {/* How it works */}
         {!hasOutcome && (
-          <div className="rounded-2xl border border-border bg-background p-5 space-y-3 shadow-sm">
-            <p className="text-xs font-bold uppercase tracking-widest text-muted-foreground">How it works</p>
+          <div className="rounded-xl border border-border bg-white p-5 space-y-3">
+            <p className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">How it works</p>
             <div className="space-y-2.5">
               {[
                 { n: "1", text: "Paste the job description from any job board" },
@@ -3033,17 +2915,18 @@ function JDTailorPanel() {
                 { n: "4", text: "Review per-section badges + keyword match score" },
               ].map((step) => (
                 <div key={step.n} className="flex items-start gap-3">
-                  <span className="text-[11px] font-black text-[var(--color-brand)] bg-[var(--color-brand-muted)] w-5 h-5 rounded-full flex items-center justify-center shrink-0 mt-0.5">{step.n}</span>
-                  <p className="text-sm text-muted-foreground leading-snug">{step.text}</p>
+                  <span className="text-[11px] font-bold text-slate-600 bg-slate-100 border border-border w-5 h-5 rounded-full flex items-center justify-center shrink-0 mt-0.5">{step.n}</span>
+                  <p className="text-[13px] text-muted-foreground leading-snug">{step.text}</p>
                 </div>
               ))}
             </div>
           </div>
         )}
       </div>
-    </main>
+    </div>
   );
 }
+
 
 // ─── RightPanel ───────────────────────────────────────────────────────────────
 
@@ -3506,44 +3389,834 @@ function FullscreenPreviewDialog({
   );
 }
 
-// ─── BottomTabsBar ────────────────────────────────────────────────────────────
+// ─── FullRewritePanel ─────────────────────────────────────────────────────────────────────────────
 
-function BottomTabsBar() {
-  const dispatch        = useDispatch<AppDispatch>();
-  const navigate        = useNavigate();
-  const activeBottomTab = useSelector((s: RootState) => s.resumeBuilder.activeBottomTab);
+function FullRewritePanel({ onDone }: { onDone?: () => void } = {}) {
+  const dispatch       = useDispatch<AppDispatch>();
+  const fields         = useSelector((s: RootState) => s.resumeBuilder.fields);
+  const savedResumeId  = useSelector((s: RootState) => s.resumeBuilder.savedResumeId);
+  const isRewriting    = useSelector((s: RootState) => s.resumeBuilder.isRewriting);
+  const jobTitle       = useSelector((s: RootState) => s.resumeBuilder.jobTitle);
+  const company        = useSelector((s: RootState) => s.resumeBuilder.company);
+  const { getToken, userId: clerkUserId } = useAuth();
+  const { refresh: refreshBalance } = useCreditsBalance();
+  const { costFor } = useFeatureCosts();
+  const rewriteCost = costFor(FEATURE_KEYS.RESUME_REWRITE, 4);
 
-  const TABS: { id: BottomTab; label: string; badge?: string; isLink?: boolean }[] = [
-    { id: "editor",      label: "Editor" },
-    { id: "ats",         label: "ATS Score", badge: "FREE" },
-    { id: "jdtailor",    label: "JD Tailor" },
-    { id: "coverletter", label: "Cover Letter", isLink: true },
-  ];
+  const [targetTitle, setTargetTitle] = React.useState(jobTitle);
+  const [targetCompany, setTargetCompany] = React.useState(company);
+  const [targetLevel, setTargetLevel] = React.useState<string>("mid");
+  const [error, setError] = React.useState<string | null>(null);
+  const [done, setDone] = React.useState(false);
+
+  React.useEffect(() => { setTargetTitle(jobTitle); }, [jobTitle]);
+  React.useEffect(() => { setTargetCompany(company); }, [company]);
+
+  const handleRewrite = React.useCallback(async () => {
+    if (isRewriting || !targetTitle.trim()) return;
+    setError(null); setDone(false);
+    dispatch(setIsRewriting(true));
+    const idempotencyKey = createIdempotencyKey();
+    try {
+      const userId = localStorage.getItem("userId") ?? clerkUserId;
+      const token = await getToken();
+      const payload: Record<string, unknown> = { userId, jobTitle: targetTitle.trim(), company: targetCompany.trim(), targetLevel };
+      if (savedResumeId) payload.resumeId = savedResumeId; else payload.fields = fields;
+      const { data, creditsUsed, creditsRemaining, cached } = await postCreditedAi<{ tailoredFields: Partial<ResumeFields> }>(
+        ENDPOINTS.resumeBuilderRewrite(), payload, { token, idempotencyKey });
+      dispatch(applyRewrittenFields({ fields: data.tailoredFields ?? {} }));
+      dispatch(recordAiActivity({ operation: "resume_rewrite", label: "Full Rewrite", creditsUsed, cached, status: "success" }));
+      if (!isNaN(creditsRemaining)) setOptimisticBalance(creditsRemaining);
+      toast.success(cached ? "Rewrite from cache · no credits used" : `Resume rewritten · ${creditsUsed} credit${creditsUsed === 1 ? "" : "s"} used`);
+      setDone(true); refreshBalance();
+    } catch (err) {
+      setError(err instanceof InsufficientCreditsError
+        ? `Need ${rewriteCost} credits to rewrite. Top up to continue.`
+        : err instanceof Error ? err.message : "Rewrite failed.");
+      dispatch(recordAiActivity({ operation: "resume_rewrite", label: "Full Rewrite", creditsUsed: 0, cached: false, status: "error", errorMessage: err instanceof Error ? err.message : String(err) }));
+    } finally { dispatch(setIsRewriting(false)); }
+  }, [isRewriting, targetTitle, targetCompany, targetLevel, savedResumeId, fields, getToken, clerkUserId, dispatch, refreshBalance, rewriteCost]);
+
+  const LEVELS = ["junior", "mid", "senior", "lead"] as const;
 
   return (
-    <div className="flex items-center border-t border-slate-200/70 bg-white shrink-0 px-3 h-11">
-      {TABS.map((tab) => (
-        <button
-          key={tab.id}
-          onClick={() => {
-            if (tab.isLink) { navigate("/resume/cover-letter"); return; }
-            dispatch(setActiveBottomTab(tab.id));
-          }}
-          className={cn(
-            "flex items-center gap-1.5 px-4 h-full text-sm font-medium transition-all border-b-2 rounded-none relative",
-            !tab.isLink && activeBottomTab === tab.id
-              ? "border-slate-900 text-slate-900 font-semibold"
-              : "border-transparent text-slate-500 hover:text-slate-800 hover:bg-slate-50",
-          )}
-        >
-          {tab.label}
-          {tab.badge && (
-            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700 border border-emerald-200/60 uppercase tracking-wide">{tab.badge}</span>
-          )}
-          {tab.isLink && <ExternalLink className="h-2.5 w-2.5 opacity-40 ml-0.5" />}
-        </button>
-      ))}
+    <div className="flex flex-col flex-1 min-h-0">
+
+      {/* ── Fixed top: header + form inputs + action ── */}
+      <div className="shrink-0 bg-background px-6 pt-6 pb-5 space-y-5 border-b border-border/50">
+
+        {/* Header row */}
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="h-8 w-8 rounded-lg bg-slate-100 border border-border flex items-center justify-center shrink-0">
+              <RefreshCw className="h-4 w-4 text-slate-600" />
+            </div>
+            <div>
+              <h2 className="text-base font-semibold tracking-tight">Full Resume Rewrite</h2>
+              <p className="text-[12px] text-muted-foreground mt-0.5">Rewrite all sections for a new role — no job description needed</p>
+            </div>
+          </div>
+          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-border shrink-0 mt-0.5">{rewriteCost} cr</span>
+        </div>
+
+        {/* Form inputs — flat, clean */}
+        <div className="space-y-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="text-[11px] text-muted-foreground mb-1.5 block">Target Job Title <span className="text-destructive">*</span></label>
+              <input type="text" value={targetTitle} onChange={(e) => setTargetTitle(e.target.value)} placeholder="e.g. Senior Data Engineer"
+                className={cn("w-full h-9 px-3 text-[13px] bg-background border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring/30 focus:border-ring transition-colors", !targetTitle.trim() ? "border-destructive/40" : "border-border")} />
+              {!targetTitle.trim() && <p className="text-[11px] text-destructive mt-1">Required to rewrite your resume</p>}
+            </div>
+            <div>
+              <label className="text-[11px] text-muted-foreground mb-1.5 block">Company (optional)</label>
+              <input type="text" value={targetCompany} onChange={(e) => setTargetCompany(e.target.value)} placeholder="e.g. Netflix"
+                className="w-full h-9 px-3 text-[13px] bg-background border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring/30 focus:border-ring transition-colors" />
+            </div>
+          </div>
+          <div>
+            <label className="text-[11px] text-muted-foreground mb-1.5 block">Seniority Level</label>
+            <div className="flex gap-2">
+              {LEVELS.map((lvl) => (
+                <button key={lvl} onClick={() => setTargetLevel(lvl)}
+                  className={cn("px-3 h-8 rounded-lg text-[12px] font-medium border transition-colors", targetLevel === lvl ? "bg-slate-900 text-white border-slate-900" : "bg-background text-muted-foreground border-border hover:border-foreground/30")}>
+                  {lvl.charAt(0).toUpperCase() + lvl.slice(1)}
+                </button>
+              ))}
+            </div>
+          </div>
+          <p className="text-[11.5px] text-muted-foreground leading-relaxed">
+            Rewrites <strong className="text-foreground font-medium">summary, experience, skills, and projects</strong>. Employer names, job titles, and dates are never changed.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <button onClick={handleRewrite} disabled={!targetTitle.trim() || isRewriting}
+            className={cn("flex items-center gap-2 px-5 h-9 rounded-lg text-[13px] font-semibold transition-colors", targetTitle.trim() && !isRewriting ? "bg-slate-900 hover:bg-slate-700 text-white" : "bg-muted text-muted-foreground cursor-not-allowed")}>
+            {isRewriting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+            {isRewriting ? "Rewriting…" : done ? "Rewrite Again" : "Rewrite My Resume"}
+          </button>
+          {error && <p className="text-[12px] text-destructive flex items-center gap-1.5"><AlertTriangle className="h-3.5 w-3.5 shrink-0" />{error}</p>}
+        </div>
+      </div>
+
+      {/* ── Scrollable area ── */}
+      <div className="flex-1 overflow-y-auto min-h-0 bg-slate-50/40 px-6 py-5">
+        {done ? (
+          <div className="rounded-xl border border-border bg-white p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="h-8 w-8 rounded-lg bg-slate-100 border border-border flex items-center justify-center shrink-0">
+                <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-[13px] font-semibold text-foreground">Resume rewritten and applied</p>
+                <p className="text-[12px] text-muted-foreground mt-1 leading-relaxed">
+                  All sections rewritten for <strong className="text-foreground">{targetTitle}</strong>
+                  {targetCompany ? ` at ${targetCompany}` : ""} · {targetLevel} level.
+                  Employer names, titles, and dates were not changed.
+                </p>
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {["Summary", "Experience", "Skills", "Projects"].map((sec) => (
+                <span key={sec} className="inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-md bg-slate-50 text-slate-700 border border-border">
+                  <CheckCircle2 className="h-3 w-3 text-emerald-500" />{sec}
+                </span>
+              ))}
+            </div>
+            <div className="flex items-center gap-2">
+              <button onClick={() => onDone?.()} className="text-[12px] font-semibold px-3 h-8 rounded-lg bg-slate-900 text-white hover:bg-slate-700 transition-colors">Done</button>
+              <button onClick={() => setDone(false)} className="text-[12px] font-semibold px-3 h-8 rounded-lg border border-border bg-white text-foreground hover:bg-slate-50 transition-colors">Rewrite again</button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-col items-center justify-center h-full text-center py-8">
+            <div className="h-10 w-10 rounded-xl bg-slate-100 border border-border flex items-center justify-center mb-3">
+              <RefreshCw className="h-4 w-4 text-slate-400" />
+            </div>
+            <p className="text-[13px] font-medium text-foreground">Enter a target role and click Rewrite</p>
+            <p className="text-[12px] text-muted-foreground mt-1.5 leading-relaxed max-w-[280px] mx-auto">AI rewrites every section to match your new role. Employer names, titles, and dates are never changed.</p>
+          </div>
+        )}
+      </div>
     </div>
+  );
+}
+
+// ─── InjectSkillsPanel ─────────────────────────────────────────────────────────────────────────────
+
+function InjectSkillsPanel({ onDone }: { onDone?: () => void } = {}) {
+  const dispatch      = useDispatch<AppDispatch>();
+  const fields        = useSelector((s: RootState) => s.resumeBuilder.fields);
+  const savedResumeId = useSelector((s: RootState) => s.resumeBuilder.savedResumeId);
+  const isInjecting   = useSelector((s: RootState) => s.resumeBuilder.isInjectingSkills);
+  const jobTitle      = useSelector((s: RootState) => s.resumeBuilder.jobTitle);
+  const jobDescription= useSelector((s: RootState) => s.resumeBuilder.jobDescription);
+  const { getToken, userId: clerkUserId } = useAuth();
+  const { refresh: refreshBalance } = useCreditsBalance();
+  const { costFor } = useFeatureCosts();
+  const injectCost = costFor(FEATURE_KEYS.RESUME_INJECT_SKILLS, 1);
+  const [jd, setJd] = React.useState(jobDescription);
+  const [error, setError] = React.useState<string | null>(null);
+  const [addedSkills, setAddedSkills] = React.useState<string[]>([]);
+
+  const handleInject = React.useCallback(async () => {
+    if (isInjecting) return;
+    setError(null); setAddedSkills([]);
+    dispatch(setIsInjectingSkills(true));
+    const idempotencyKey = createIdempotencyKey();
+    try {
+      const userId = localStorage.getItem("userId") ?? clerkUserId;
+      const token = await getToken();
+      const { data, creditsUsed, creditsRemaining, cached } = await postCreditedAi<{ injectedFields: Partial<ResumeFields>; suggestedSkills: string[] }>(
+        ENDPOINTS.resumeBuilderInjectSkills(), { userId, resumeId: savedResumeId ?? undefined, jobDescription: jd || undefined, jobTitle: jobTitle || undefined, fields }, { token, idempotencyKey });
+      dispatch(applyInjectedSkills({ injectedFields: data.injectedFields ?? {} }));
+      setAddedSkills(data.suggestedSkills ?? []);
+      dispatch(recordAiActivity({ operation: "resume_inject_skills", label: "Inject Skills", creditsUsed, cached, status: "success" }));
+      if (!isNaN(creditsRemaining)) setOptimisticBalance(creditsRemaining);
+      toast.success(cached ? "From cache · no credits used" : `${creditsUsed} credit${creditsUsed === 1 ? "" : "s"} used`);
+      refreshBalance();
+    } catch (err) {
+      setError(err instanceof InsufficientCreditsError ? `Need ${injectCost} credits. Top up to continue.` : err instanceof Error ? err.message : "Skill injection failed.");
+      dispatch(recordAiActivity({ operation: "resume_inject_skills", label: "Inject Skills", creditsUsed: 0, cached: false, status: "error", errorMessage: err instanceof Error ? err.message : String(err) }));
+    } finally { dispatch(setIsInjectingSkills(false)); }
+  }, [isInjecting, jd, jobTitle, savedResumeId, fields, getToken, clerkUserId, dispatch, refreshBalance, injectCost]);
+
+  const existingSkills = [fields.skillsLanguages, fields.skillsFrameworks, fields.skillsDatabases, fields.skillsTools]
+    .flatMap((s) => s?.split(",").map((x) => x.trim()).filter(Boolean) ?? []);
+
+  return (
+    <div className="flex flex-col flex-1 min-h-0">
+
+      {/* ── Fixed top: header + JD textarea + current skills + action ── */}
+      <div className="shrink-0 bg-background px-6 pt-6 pb-5 space-y-5 border-b border-border/50">
+
+        {/* Header row */}
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="h-8 w-8 rounded-lg bg-slate-100 border border-border flex items-center justify-center shrink-0"><Zap className="h-4 w-4 text-slate-600" /></div>
+            <div>
+              <h2 className="text-base font-semibold tracking-tight">Inject Skills</h2>
+              <p className="text-[12px] text-muted-foreground mt-0.5">Add missing role-relevant skills automatically</p>
+            </div>
+          </div>
+          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-border shrink-0 mt-0.5">{injectCost} cr</span>
+        </div>
+
+        {/* JD textarea */}
+        <div className="rounded-xl border border-border overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-border/60 bg-muted/20">
+            <span className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">Job Description <span className="normal-case font-normal tracking-normal text-muted-foreground/70">(optional)</span></span>
+          </div>
+          <Textarea value={jd} onChange={(e) => setJd(e.target.value)} placeholder="Paste job description for targeted suggestions, or leave empty for general role skills…"
+            className="border-none rounded-none min-h-[90px] max-h-[150px] overflow-y-auto resize-none text-[13px] bg-background focus-visible:ring-0 focus-visible:ring-offset-0 px-4 py-3.5 placeholder:text-muted-foreground/40 leading-relaxed" />
+        </div>
+
+        {/* Current skills — flat compact */}
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <p className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">Current skills</p>
+            {existingSkills.length > 0 && <span className="text-[11px] text-muted-foreground">{existingSkills.length}</span>}
+          </div>
+          <div className="flex flex-wrap gap-1.5 max-h-[56px] overflow-y-auto">
+            {existingSkills.length > 0
+              ? existingSkills.map((sk, i) => <span key={i} className="text-[11px] px-2 py-0.5 rounded-md bg-slate-50 text-slate-600 border border-border">{sk}</span>)
+              : <span className="text-[12px] text-muted-foreground">No skills listed yet</span>}
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <button onClick={handleInject} disabled={isInjecting}
+            className="flex items-center gap-2 px-5 h-9 rounded-lg text-[13px] font-semibold bg-slate-900 hover:bg-slate-700 text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+            {isInjecting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
+            {isInjecting ? "Injecting skills…" : "Inject Missing Skills"}
+          </button>
+          {error && <p className="text-[12px] text-destructive flex items-center gap-1.5"><AlertTriangle className="h-3.5 w-3.5 shrink-0" />{error}</p>}
+        </div>
+      </div>
+
+      {/* ── Scrollable results ── */}
+      <div className="flex-1 overflow-y-auto min-h-0 bg-slate-50/40 px-6 py-5">
+        {addedSkills.length > 0 && (
+          <div className="rounded-xl border border-border bg-white p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="h-8 w-8 rounded-lg bg-slate-100 border border-border flex items-center justify-center shrink-0">
+                <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-[13px] font-semibold text-foreground">{addedSkills.length} skill{addedSkills.length === 1 ? "" : "s"} added to your resume</p>
+                <p className="text-[11px] text-muted-foreground mt-0.5">Skills sections updated and applied to your editor</p>
+              </div>
+              <button onClick={() => onDone?.()} className="text-[12px] font-semibold px-3 h-8 rounded-lg bg-slate-900 hover:bg-slate-700 text-white transition-colors shrink-0">Done</button>
+            </div>
+            <div className="flex flex-wrap gap-1.5">{addedSkills.map((sk, i) => <span key={i} className="text-[11px] px-2.5 py-1 rounded-md bg-slate-50 text-slate-700 border border-border font-medium">{sk}</span>)}</div>
+          </div>
+        )}
+        {addedSkills.length === 0 && (
+          <div className="flex flex-col items-center justify-center h-full text-center py-8">
+            <div className="h-10 w-10 rounded-xl bg-slate-100 border border-border flex items-center justify-center mb-3">
+              <Zap className="h-4 w-4 text-slate-400" />
+            </div>
+            <p className="text-[13px] font-medium text-foreground">Ready to inject skills</p>
+            <p className="text-[12px] text-muted-foreground mt-1.5 leading-relaxed max-w-[260px] mx-auto">Paste a job description above for targeted results, or run without one for general role-relevant skills.</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── InjectKeywordsPanel ─────────────────────────────────────────────────────────────────────────────
+
+function InjectKeywordsPanel({ onDone }: { onDone?: () => void } = {}) {
+  const dispatch       = useDispatch<AppDispatch>();
+  const fields         = useSelector((s: RootState) => s.resumeBuilder.fields);
+  const savedResumeId  = useSelector((s: RootState) => s.resumeBuilder.savedResumeId);
+  const isInjecting    = useSelector((s: RootState) => s.resumeBuilder.isInjectingKeywords);
+  const jobDescription = useSelector((s: RootState) => s.resumeBuilder.jobDescription);
+  const { getToken, userId: clerkUserId } = useAuth();
+  const { refresh: refreshBalance } = useCreditsBalance();
+  const { costFor } = useFeatureCosts();
+  const injectCost = costFor(FEATURE_KEYS.RESUME_INJECT_KEYWORDS, 2);
+  const [jd, setJd] = React.useState(jobDescription);
+  const [error, setError] = React.useState<string | null>(null);
+  const [injected, setInjected] = React.useState<string[]>([]);
+
+  React.useEffect(() => { setJd(jobDescription); }, [jobDescription]);
+
+  const handleInject = React.useCallback(async () => {
+    if (isInjecting || jd.trim().length < 50) return;
+    setError(null); setInjected([]);
+    dispatch(setIsInjectingKeywords(true));
+    const idempotencyKey = createIdempotencyKey();
+    try {
+      const userId = localStorage.getItem("userId") ?? clerkUserId;
+      const token = await getToken();
+      const { data, creditsUsed, creditsRemaining, cached } = await postCreditedAi<{ injectedFields: Partial<ResumeFields>; injectedKeywords: string[] }>(
+        ENDPOINTS.resumeBuilderInjectKeywords(), { userId, resumeId: savedResumeId ?? undefined, jobDescription: jd, fields }, { token, idempotencyKey });
+      dispatch(applyRewrittenFields({ fields: data.injectedFields ?? {} }));
+      setInjected(data.injectedKeywords ?? []);
+      dispatch(recordAiActivity({ operation: "resume_inject_keywords", label: "Bulk Keywords", creditsUsed, cached, status: "success" }));
+      if (!isNaN(creditsRemaining)) setOptimisticBalance(creditsRemaining);
+      toast.success(cached ? "From cache · no credits used" : `${creditsUsed} credit${creditsUsed === 1 ? "" : "s"} used`);
+      refreshBalance();
+    } catch (err) {
+      setError(err instanceof InsufficientCreditsError ? `Need ${injectCost} credits. Top up to continue.` : err instanceof Error ? err.message : "Keyword injection failed.");
+      dispatch(recordAiActivity({ operation: "resume_inject_keywords", label: "Bulk Keywords", creditsUsed: 0, cached: false, status: "error", errorMessage: err instanceof Error ? err.message : String(err) }));
+    } finally { dispatch(setIsInjectingKeywords(false)); }
+  }, [isInjecting, jd, savedResumeId, fields, getToken, clerkUserId, dispatch, refreshBalance, injectCost]);
+
+  return (
+    <div className="flex flex-col flex-1 min-h-0">
+
+      {/* ── Fixed top: header + JD textarea + action ── */}
+      <div className="shrink-0 bg-background px-6 pt-6 pb-5 space-y-5 border-b border-border/50">
+
+        {/* Header row */}
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="h-8 w-8 rounded-lg bg-slate-100 border border-border flex items-center justify-center shrink-0"><Tag className="h-4 w-4 text-slate-600" /></div>
+            <div>
+              <h2 className="text-base font-semibold tracking-tight">Bulk Keyword Injection</h2>
+              <p className="text-[12px] text-muted-foreground mt-0.5">Weave missing JD keywords naturally into your resume</p>
+            </div>
+          </div>
+          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-border shrink-0 mt-0.5">{injectCost} cr</span>
+        </div>
+
+        {/* JD textarea */}
+        <div className="rounded-xl border border-border overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-border/60 bg-muted/20 flex items-center justify-between">
+            <span className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">Job Description <span className="text-destructive normal-case font-normal tracking-normal">(required)</span></span>
+            <span className="text-[10px] text-muted-foreground">{jd.length > 0 ? `${jd.length} chars` : ""}</span>
+          </div>
+          <Textarea value={jd} onChange={(e) => setJd(e.target.value)} placeholder="Paste the full job description. AI will extract missing keywords and weave them naturally into your summary, experience, and project sections…"
+            className="border-none rounded-none min-h-[130px] max-h-[200px] overflow-y-auto resize-none text-[13px] bg-background focus-visible:ring-0 focus-visible:ring-offset-0 px-4 py-3.5 placeholder:text-muted-foreground/40 leading-relaxed" />
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <button onClick={handleInject} disabled={isInjecting || jd.trim().length < 50}
+            className={cn("flex items-center gap-2 px-5 h-9 rounded-lg text-[13px] font-semibold transition-colors", !isInjecting && jd.trim().length >= 50 ? "bg-slate-900 hover:bg-slate-700 text-white" : "bg-muted text-muted-foreground cursor-not-allowed")}>
+            {isInjecting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Tag className="h-3.5 w-3.5" />}
+            {isInjecting ? "Injecting keywords…" : "Inject Keywords"}
+          </button>
+          {jd.trim().length > 0 && jd.trim().length < 50 && <p className="text-[12px] text-muted-foreground">Paste at least 50 characters to continue</p>}
+          {error && <p className="text-[12px] text-destructive flex items-center gap-1.5"><AlertTriangle className="h-3.5 w-3.5 shrink-0" />{error}</p>}
+        </div>
+      </div>
+
+      {/* ── Scrollable results ── */}
+      <div className="flex-1 overflow-y-auto min-h-0 bg-slate-50/40 px-6 py-5">
+        {injected.length > 0 && (
+          <div className="rounded-xl border border-border bg-white p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="h-8 w-8 rounded-lg bg-slate-100 border border-border flex items-center justify-center shrink-0">
+                <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-[13px] font-semibold text-foreground">{injected.length} keyword{injected.length === 1 ? "" : "s"} woven into your resume</p>
+                <p className="text-[11px] text-muted-foreground mt-0.5">Summary, experience, and projects updated</p>
+              </div>
+              <button onClick={() => onDone?.()} className="text-[12px] font-semibold px-3 h-8 rounded-lg bg-slate-900 hover:bg-slate-700 text-white transition-colors shrink-0">Done</button>
+            </div>
+            <div className="flex flex-wrap gap-1.5">{injected.map((kw, i) => <span key={i} className="text-[11px] px-2.5 py-1 rounded-md bg-slate-50 text-slate-700 border border-border font-medium">{kw}</span>)}</div>
+          </div>
+        )}
+        {injected.length === 0 && (
+          <div className="flex flex-col items-center justify-center h-full text-center py-8">
+            <div className="h-10 w-10 rounded-xl bg-slate-100 border border-border flex items-center justify-center mb-3">
+              <Tag className="h-4 w-4 text-slate-400" />
+            </div>
+            <p className="text-[13px] font-medium text-foreground">Paste a job description and run</p>
+            <p className="text-[12px] text-muted-foreground mt-1.5 leading-relaxed max-w-[260px] mx-auto">AI extracts missing keywords from the JD and weaves them naturally into your summary, experience, and projects.</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── KeywordMatchPanel ─────────────────────────────────────────────────────────────────────────────
+
+function KeywordMatchPanel({ onDone, onOpenTool }: { onDone?: () => void; onOpenTool?: (tool: string) => void } = {}) {
+  const dispatch        = useDispatch<AppDispatch>();
+  const fields          = useSelector((s: RootState) => s.resumeBuilder.fields);
+  const isMatching      = useSelector((s: RootState) => s.resumeBuilder.isMatchingKeywords);
+  const result          = useSelector((s: RootState) => s.resumeBuilder.keywordMatchResult);
+  const jobDescription  = useSelector((s: RootState) => s.resumeBuilder.jobDescription);
+  const { getToken }    = useAuth();
+  const [jd, setJd] = React.useState(jobDescription);
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => { setJd(jobDescription); }, [jobDescription]);
+
+  const handleMatch = React.useCallback(async () => {
+    if (isMatching || jd.trim().length < 10) return;
+    setError(null);
+    dispatch(setIsMatchingKeywords(true));
+    try {
+      const token = await getToken();
+      const res = await fetch(ENDPOINTS.resumeBuilderKeywordMatch(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ jobDescription: jd, fields }),
+      });
+      if (!res.ok) throw new Error("Keyword match failed");
+      const data = await res.json();
+      dispatch(setKeywordMatchResult({ present: data.data?.present ?? [], missing: data.data?.missing ?? [], matchScore: data.data?.matchScore ?? 0 }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Match analysis failed.");
+    } finally { dispatch(setIsMatchingKeywords(false)); }
+  }, [isMatching, jd, fields, getToken, dispatch]);
+
+  return (
+    <div className="flex flex-col flex-1 min-h-0">
+
+      {/* ── Fixed top: header + JD textarea + action ── */}
+      <div className="shrink-0 bg-background px-6 pt-6 pb-5 space-y-5 border-b border-border/50">
+
+        {/* Header row */}
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="h-8 w-8 rounded-lg bg-slate-100 border border-border flex items-center justify-center shrink-0"><Search className="h-4 w-4 text-slate-600" /></div>
+            <div>
+              <h2 className="text-base font-semibold tracking-tight">Keyword Match</h2>
+              <p className="text-[12px] text-muted-foreground mt-0.5">See which JD keywords your resume covers</p>
+            </div>
+          </div>
+          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-border shrink-0 mt-0.5">Free</span>
+        </div>
+
+        {/* JD textarea */}
+        <div className="rounded-xl border border-border overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-border/60 bg-muted/20">
+            <span className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">Job Description</span>
+          </div>
+          <Textarea value={jd} onChange={(e) => setJd(e.target.value)} placeholder="Paste the job description to analyse keyword coverage…"
+            className="border-none rounded-none min-h-[130px] max-h-[190px] overflow-y-auto resize-none text-[13px] bg-background focus-visible:ring-0 focus-visible:ring-offset-0 px-4 py-3.5 placeholder:text-muted-foreground/40 leading-relaxed" />
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <button onClick={handleMatch} disabled={isMatching || jd.trim().length < 10}
+            className={cn("flex items-center gap-2 px-5 h-9 rounded-lg text-[13px] font-semibold transition-colors", !isMatching && jd.trim().length >= 10 ? "bg-slate-900 hover:bg-slate-700 text-white" : "bg-muted text-muted-foreground cursor-not-allowed")}>
+            {isMatching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
+            {isMatching ? "Analysing…" : "Analyse Keyword Match"}
+          </button>
+          {error && <p className="text-[12px] text-destructive flex items-center gap-1.5"><AlertTriangle className="h-3.5 w-3.5 shrink-0" />{error}</p>}
+        </div>
+      </div>
+
+      {/* ── Scrollable results ── */}
+      <div className="flex-1 overflow-y-auto min-h-0 bg-slate-50/40 px-6 py-5 space-y-3">
+        {result && (
+          <div className="space-y-3">
+            {/* Score summary */}
+            <div className="flex items-center gap-5 bg-white rounded-xl border border-border p-4">
+              <div className="relative shrink-0">
+                <svg width="72" height="72" viewBox="0 0 88 88">
+                  <circle cx="44" cy="44" r="36" fill="none" stroke="hsl(var(--border))" strokeWidth="7" />
+                  <circle
+                    cx="44" cy="44" r="36" fill="none"
+                    stroke={result.matchScore >= 70 ? "#10b981" : result.matchScore >= 40 ? "#f59e0b" : "#ef4444"}
+                    strokeWidth="7"
+                    strokeDasharray={`${2 * Math.PI * 36}`}
+                    strokeDashoffset={`${2 * Math.PI * 36 * (1 - result.matchScore / 100)}`}
+                    strokeLinecap="round"
+                    transform="rotate(-90 44 44)"
+                    style={{ transition: "stroke-dashoffset 0.6s ease" }}
+                  />
+                </svg>
+                <div className="absolute inset-0 flex flex-col items-center justify-center">
+                  <span className="text-lg font-bold text-foreground leading-none tabular-nums">{result.matchScore}%</span>
+                  <span className="text-[9px] text-muted-foreground font-medium mt-0.5">match</span>
+                </div>
+              </div>
+              <div>
+                <p className="text-[13px] font-semibold text-foreground">Keyword Coverage</p>
+                <p className="text-[12px] text-muted-foreground mt-0.5">{result.present.length} of {result.present.length + result.missing.length} JD keywords found</p>
+                <p className="text-[11px] text-muted-foreground mt-0.5">Analysed {new Date(result.analysedAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</p>
+              </div>
+            </div>
+
+            {/* Keyword grids */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="rounded-xl bg-white border border-border p-3">
+                <p className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground mb-2">Present ({result.present.length})</p>
+                <div className="flex flex-wrap gap-1">{result.present.slice(0, 20).map((k) => <span key={k} className="text-[10px] px-1.5 py-0.5 rounded-md bg-slate-50 border border-border text-slate-600">{k}</span>)}{result.present.length > 20 && <span className="text-[10px] text-muted-foreground">+{result.present.length - 20}</span>}</div>
+              </div>
+              <div className="rounded-xl bg-white border border-border p-3">
+                <p className="text-[10px] uppercase tracking-wider font-semibold text-destructive/70 mb-2">Missing ({result.missing.length})</p>
+                <div className="flex flex-wrap gap-1">{result.missing.slice(0, 20).map((k) => <span key={k} className="text-[10px] px-1.5 py-0.5 rounded-md bg-red-50 border border-red-200/60 text-red-600">{k}</span>)}{result.missing.length > 20 && <span className="text-[10px] text-muted-foreground">+{result.missing.length - 20}</span>}</div>
+              </div>
+            </div>
+
+            {result.missing.length > 0 && (
+              <div className="flex items-center gap-2 flex-wrap">
+                <button onClick={() => { onDone?.(); onOpenTool?.("jdtailor"); }} className="text-[12px] font-semibold px-3 h-8 rounded-lg bg-slate-900 text-white hover:bg-slate-700 transition-colors">Fix with JD Tailor</button>
+                <button onClick={() => { onDone?.(); onOpenTool?.("injectkeywords"); }} className="text-[12px] font-semibold px-3 h-8 rounded-lg border border-border bg-white text-foreground hover:bg-slate-50 transition-colors">Inject Keywords</button>
+              </div>
+            )}
+          </div>
+        )}
+        {!result && (
+          <div className="flex flex-col items-center justify-center h-full text-center py-8">
+            <div className="h-10 w-10 rounded-xl bg-slate-100 border border-border flex items-center justify-center mb-3">
+              <Search className="h-4 w-4 text-slate-400" />
+            </div>
+            <p className="text-[13px] font-medium text-foreground">Paste a job description and analyse</p>
+            <p className="text-[12px] text-muted-foreground mt-1.5 leading-relaxed max-w-[260px] mx-auto">See exactly which keywords from the JD appear in your resume, and which are missing.</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+
+// ─── Tool Dialog Types ────────────────────────────────────────────────────────
+type ToolId = "ats" | "jdtailor" | "rewrite" | "injectskills" | "injectkeywords" | "keywordmatch" | "coverletter" | "enhancesection";
+
+// ─── Tool definitions (shared between strip trigger and drawer) ───────────────
+interface ToolDef {
+  id: ToolId;
+  label: string;
+  description: string;
+  detail: string;
+  icon: React.ReactNode;
+  badge: string;
+  iconBg: string;
+  iconColor: string;
+  badgeCn: string;
+  cardHover: string;
+}
+
+function useToolDefs(): ToolDef[] {
+  const { costFor } = useFeatureCosts();
+  const tailorCost  = costFor(FEATURE_KEYS.RESUME_TAILOR,          4);
+  const rewriteCost = costFor(FEATURE_KEYS.RESUME_REWRITE,         4);
+  const skillsCost  = costFor(FEATURE_KEYS.RESUME_INJECT_SKILLS,   1);
+  const kwCost      = costFor(FEATURE_KEYS.RESUME_INJECT_KEYWORDS, 2);
+  const enhanceCost = costFor(FEATURE_KEYS.RESUME_ENHANCE_SECTION, AI_ENHANCE_FALLBACK_COST);
+
+  return React.useMemo<ToolDef[]>(() => [
+    {
+      id: "ats",
+      label: "ATS Score",
+      description: "Check keyword match against any JD",
+      detail: "Instantly score your resume against a job description and see exactly which keywords you're missing.",
+      icon: <FileSearch className="h-full w-full" />,
+      badge: "FREE",
+      iconBg: "bg-emerald-100",
+      iconColor: "text-emerald-600",
+      badgeCn: "bg-emerald-100 text-emerald-700 border-emerald-200",
+      cardHover: "hover:border-emerald-300 hover:bg-emerald-50/60",
+    },
+    {
+      id: "jdtailor",
+      label: "JD Tailor",
+      description: "Align every section to a job posting",
+      detail: "Paste a job description and let AI rephrase your bullets, summary, and skills to match it precisely.",
+      icon: <Wand2 className="h-full w-full" />,
+      badge: `${tailorCost} cr`,
+      iconBg: "bg-violet-100",
+      iconColor: "text-violet-600",
+      badgeCn: "bg-violet-100 text-violet-700 border-violet-200",
+      cardHover: "hover:border-violet-300 hover:bg-violet-50/60",
+    },
+    {
+      id: "rewrite",
+      label: "Full Rewrite",
+      description: "Rewrite all sections for a new role",
+      detail: "Provide a target role and the AI rewrites your entire resume — bullets, summary, skills — from scratch.",
+      icon: <RefreshCw className="h-full w-full" />,
+      badge: `${rewriteCost} cr`,
+      iconBg: "bg-purple-100",
+      iconColor: "text-purple-600",
+      badgeCn: "bg-purple-100 text-purple-700 border-purple-200",
+      cardHover: "hover:border-purple-300 hover:bg-purple-50/60",
+    },
+    {
+      id: "injectskills",
+      label: "Inject Skills",
+      description: "Surface missing role-relevant skills",
+      detail: "AI scans the job description and adds the technical skills you have but haven't listed yet.",
+      icon: <Zap className="h-full w-full" />,
+      badge: `${skillsCost} cr`,
+      iconBg: "bg-sky-100",
+      iconColor: "text-sky-600",
+      badgeCn: "bg-sky-100 text-sky-700 border-sky-200",
+      cardHover: "hover:border-sky-300 hover:bg-sky-50/60",
+    },
+    {
+      id: "injectkeywords",
+      label: "Bulk Keywords",
+      description: "Weave JD keywords into your resume",
+      detail: "Extracts high-value keywords from the JD and naturally weaves them into your existing bullet points.",
+      icon: <Tag className="h-full w-full" />,
+      badge: `${kwCost} cr`,
+      iconBg: "bg-amber-100",
+      iconColor: "text-amber-600",
+      badgeCn: "bg-amber-100 text-amber-700 border-amber-200",
+      cardHover: "hover:border-amber-300 hover:bg-amber-50/60",
+    },
+    {
+      id: "keywordmatch",
+      label: "Keyword Match",
+      description: "See which JD keywords you cover",
+      detail: "Visualise covered vs. missing keywords in seconds — no AI credits needed.",
+      icon: <Search className="h-full w-full" />,
+      badge: "FREE",
+      iconBg: "bg-blue-100",
+      iconColor: "text-blue-600",
+      badgeCn: "bg-blue-100 text-blue-700 border-blue-200",
+      cardHover: "hover:border-blue-300 hover:bg-blue-50/60",
+    },
+    {
+      id: "coverletter",
+      label: "Cover Letter",
+      description: "Generate a tailored cover letter",
+      detail: "Creates a professional, role-specific cover letter based on your resume and the target job.",
+      icon: <FileText className="h-full w-full" />,
+      badge: "↗",
+      iconBg: "bg-slate-100",
+      iconColor: "text-slate-500",
+      badgeCn: "bg-slate-100 text-slate-600 border-slate-200",
+      cardHover: "hover:border-slate-300 hover:bg-slate-50/60",
+    },
+    {
+      id: "enhancesection",
+      label: "AI Enhance",
+      description: "Polish any section with AI",
+      detail: "Select any section in the editor and click \"AI Enhance\" to get an AI-polished rewrite suggestion.",
+      icon: <PenLine className="h-full w-full" />,
+      badge: `${enhanceCost} cr`,
+      iconBg: "bg-rose-100",
+      iconColor: "text-rose-600",
+      badgeCn: "bg-rose-100 text-rose-700 border-rose-200",
+      cardHover: "hover:border-rose-300 hover:bg-rose-50/60",
+    },
+  ], [tailorCost, rewriteCost, skillsCost, kwCost, enhanceCost]);
+}
+
+// ─── AIToolsStrip ─────────────────────────────────────────────────────────────
+// Renders a single "AI Tools" trigger button in the top bar.
+// Clicking it opens a right-side Sheet listing all 8 tools.
+// Selecting a tool closes the sheet and fires onOpen(toolId).
+
+function AIToolsStrip({ onOpen }: { onOpen: (tool: ToolId) => void }) {
+  const navigate  = useNavigate();
+  const tools     = useToolDefs();
+  const [open, setOpen] = React.useState(false);
+
+  const handleSelect = (tool: ToolDef) => {
+    setOpen(false);
+    if (tool.id === "coverletter")    { navigate("/resume/cover-letter"); return; }
+    // enhancesection has no dialog — user uses the per-section button in the editor
+    if (tool.id === "enhancesection") { return; }
+    // Small delay so sheet close animation finishes before dialog mounts
+    setTimeout(() => onOpen(tool.id), 80);
+  };
+
+  return (
+    <>
+      {/* ── Thin trigger bar ───────────────────────────────────────────── */}
+      <div className="shrink-0 border-b border-slate-200/70 bg-white/95">
+        <div className="flex items-center gap-3 px-5 h-11">
+          <button
+            onClick={() => setOpen(true)}
+            className="flex items-center gap-2 px-4 h-7 rounded-full border border-slate-200 bg-slate-50 text-slate-700 text-[12px] font-semibold hover:bg-white hover:border-slate-300 hover:shadow-sm transition-all select-none"
+          >
+            <Sparkles className="h-3.5 w-3.5 text-violet-500" />
+            <span>AI Tools</span>
+            <ChevronRight className="h-3 w-3 text-slate-400" />
+          </button>
+
+          {/* Quick-access icon pills — hover for rich tooltip, click to open tool */}
+          <TooltipProvider delayDuration={80} skipDelayDuration={0}>
+            <div className="flex items-center gap-1.5 flex-1 overflow-x-auto min-w-0" style={{ scrollbarWidth: "none" }}>
+              {tools.map((tool) => (
+                <Tooltip key={tool.id}>
+                  <TooltipTrigger asChild>
+                    <button
+                      onClick={() => handleSelect(tool)}
+                      className={cn(
+                        "flex items-center justify-center h-7 w-7 rounded-full border bg-white shrink-0 transition-all hover:shadow-sm",
+                        tool.iconColor,
+                        "border-slate-200 hover:border-slate-300",
+                      )}
+                    >
+                      <span className="h-3.5 w-3.5">{tool.icon}</span>
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent
+                    side="bottom"
+                    sideOffset={8}
+                    className={cn(
+                      "p-0 border shadow-lg rounded-xl overflow-hidden",
+                      "bg-white border-slate-200/90",
+                      "[&[data-state=delayed-open]]:duration-100 [&[data-state=closed]]:duration-75",
+                    )}
+                  >
+                    <div className="px-3.5 py-2.5 max-w-[220px]">
+                      {/* Label + badge row */}
+                      <div className="flex items-center gap-2 mb-1">
+                        <p className="text-[12.5px] font-semibold text-slate-900 leading-none tracking-tight whitespace-nowrap">
+                          {tool.label}
+                        </p>
+                        <span className={cn(
+                          "text-[9.5px] font-bold px-1.5 py-0.5 rounded-full border leading-none shrink-0",
+                          tool.badgeCn,
+                        )}>
+                          {tool.badge}
+                        </span>
+                      </div>
+                      {/* Description */}
+                      <p className="text-[11px] text-slate-500 leading-snug">{tool.description}</p>
+                    </div>
+                  </TooltipContent>
+                </Tooltip>
+              ))}
+            </div>
+          </TooltipProvider>
+        </div>
+      </div>
+
+      {/* ── Right-side drawer ──────────────────────────────────────────── */}
+      <Sheet open={open} onOpenChange={setOpen}>
+        <SheetContent
+          side="right"
+          className="w-[420px] sm:w-[480px] p-0 flex flex-col gap-0 overflow-hidden"
+        >
+          {/* Header */}
+          <SheetHeader className="px-6 pt-6 pb-4 border-b border-slate-100 shrink-0">
+            <div className="flex items-center gap-2.5">
+              <div className="h-8 w-8 rounded-xl bg-violet-100 flex items-center justify-center shrink-0">
+                <Sparkles className="h-4 w-4 text-violet-600" />
+              </div>
+              <div>
+                <SheetTitle className="text-base font-semibold text-slate-900 leading-tight">
+                  AI Tools
+                </SheetTitle>
+                <p className="text-[12px] text-slate-500 mt-0.5">
+                  Choose a tool to enhance your resume
+                </p>
+              </div>
+            </div>
+          </SheetHeader>
+
+          {/* Tool cards */}
+          <div className="flex-1 overflow-y-auto px-4 py-4 space-y-2.5">
+            {tools.map((tool) => (
+              <button
+                key={tool.id}
+                onClick={() => handleSelect(tool)}
+                className={cn(
+                  "group w-full flex items-start gap-4 p-4 rounded-2xl border border-slate-200 bg-white text-left",
+                  "transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 focus-visible:ring-offset-1",
+                  tool.cardHover,
+                  "hover:shadow-md",
+                )}
+              >
+                {/* Icon block */}
+                <div className={cn("h-10 w-10 rounded-xl flex items-center justify-center shrink-0 mt-0.5", tool.iconBg)}>
+                  <div className={cn("h-5 w-5", tool.iconColor)}>{tool.icon}</div>
+                </div>
+
+                {/* Text */}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <p className="text-[13.5px] font-semibold text-slate-900 leading-none">
+                      {tool.label}
+                    </p>
+                    <span className={cn(
+                      "text-[10px] font-bold px-1.5 py-0.5 rounded-full border leading-none shrink-0",
+                      tool.badgeCn,
+                    )}>
+                      {tool.badge}
+                    </span>
+                  </div>
+                  <p className="text-[12px] font-medium text-slate-600 leading-snug">
+                    {tool.description}
+                  </p>
+                  <p className="text-[11.5px] text-slate-400 leading-relaxed mt-1.5">
+                    {tool.detail}
+                  </p>
+                </div>
+
+                {/* Arrow */}
+                <ChevronRight className="h-4 w-4 text-slate-300 group-hover:text-slate-500 shrink-0 mt-3 transition-colors" />
+              </button>
+            ))}
+          </div>
+
+          {/* Footer hint */}
+          <div className="shrink-0 border-t border-slate-100 px-6 py-3">
+            <p className="text-[11px] text-slate-400 text-center">
+              AI Enhance works directly inside each section editor
+            </p>
+          </div>
+        </SheetContent>
+      </Sheet>
+    </>
+  );
+}
+
+// ─── ToolDialogShell ──────────────────────────────────────────────────────────
+
+function ToolDialogShell({ open, onClose, children }: { open: boolean; onClose: () => void; children: React.ReactNode }) {
+  return (
+    <Dialog open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
+      {/* sm: full-width edge-to-edge → md: 680px → lg: 760px — all responsive.
+          overflow-hidden lives on inner div, NOT DialogContent, so Radix fixed
+          positioning is never clipped. h-[90vh] gives a concrete height so
+          flex-1 + overflow-y-auto in the scrollable body activates correctly. */}
+      <DialogContent className="w-full max-w-[calc(100vw-2rem)] sm:max-w-[640px] md:max-w-[720px] lg:max-w-[780px] p-0 gap-0">
+        <div className="flex flex-col h-[90vh] overflow-hidden rounded-2xl">
+          {children}
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -3574,7 +4247,7 @@ export default function ResumeEditor() {
   const isDirty         = useSelector((s: RootState) => s.resumeBuilder.isDirty);
   const fieldsKey       = useSelector((s: RootState) => JSON.stringify(s.resumeBuilder.fields));
   const resumeTitle     = useSelector((s: RootState) => s.resumeBuilder.resumeTitle);
-  const activeBottomTab = useSelector((s: RootState) => s.resumeBuilder.activeBottomTab);
+  const activeBottomTab = useSelector((s: RootState) => s.resumeBuilder.activeBottomTab); // kept for Redux compat
   const autoSaveEnabled = useSelector((s: RootState) => s.resumeBuilder.autoSaveEnabled);
   const savedResumeId   = useSelector((s: RootState) => s.resumeBuilder.savedResumeId);
   const fields          = useSelector((s: RootState) => s.resumeBuilder.fields);
@@ -3588,6 +4261,7 @@ export default function ResumeEditor() {
   const [templateCode, setTemplateCode] = useState<string>("");
   const [isInitialized, setIsInitialized] = useState(false);
   const [showTemplateMarket, setShowTemplateMarket] = useState(false);
+  const [openTool, setOpenTool] = useState<ToolId | null>(null);
 
   /** All templates fetched from the API, cached so switching is instant. */
   const allTemplatesRef = useRef<TemplateItem[]>([]);
@@ -3791,27 +4465,42 @@ export default function ResumeEditor() {
     if (match) setCurrentTemplateName(match.name);
   };
 
-  const centerContent = () => {
-    switch (activeBottomTab) {
-      case "ats":      return <ATSPanel />;
-      case "jdtailor": return <JDTailorPanel />;
-      default:         return <CenterPanel />;
-    }
-  };
-
   return (
     <div className="flex flex-col h-full overflow-hidden bg-background">
       <TopBar />
+      <AIToolsStrip onOpen={setOpenTool} />
       <div className="flex flex-1 overflow-hidden min-h-0">
-        {activeBottomTab === "editor" && <LeftPanel />}
-        {centerContent()}
+        <LeftPanel />
+        <CenterPanel />
         <RightPanel
           templateCode={templateCode}
           currentTemplateName={currentTemplateName}
           onOpenMarketplace={() => setShowTemplateMarket(true)}
         />
       </div>
-      <BottomTabsBar />
+
+      {/* AI Tool Dialogs */}
+      <ToolDialogShell open={openTool === "ats"} onClose={() => setOpenTool(null)}>
+        <ATSPanel />
+      </ToolDialogShell>
+      <ToolDialogShell open={openTool === "jdtailor"} onClose={() => setOpenTool(null)}>
+        <JDTailorPanel onDone={() => setOpenTool(null)} />
+      </ToolDialogShell>
+      <ToolDialogShell open={openTool === "rewrite"} onClose={() => setOpenTool(null)}>
+        <FullRewritePanel onDone={() => setOpenTool(null)} />
+      </ToolDialogShell>
+      <ToolDialogShell open={openTool === "injectskills"} onClose={() => setOpenTool(null)}>
+        <InjectSkillsPanel onDone={() => setOpenTool(null)} />
+      </ToolDialogShell>
+      <ToolDialogShell open={openTool === "injectkeywords"} onClose={() => setOpenTool(null)}>
+        <InjectKeywordsPanel onDone={() => setOpenTool(null)} />
+      </ToolDialogShell>
+      <ToolDialogShell open={openTool === "keywordmatch"} onClose={() => setOpenTool(null)}>
+        <KeywordMatchPanel
+          onDone={() => setOpenTool(null)}
+          onOpenTool={(tool) => { setOpenTool(null); setTimeout(() => setOpenTool(tool as ToolId), 100); }}
+        />
+      </ToolDialogShell>
 
       {/* Template marketplace overlay */}
       {showTemplateMarket && (

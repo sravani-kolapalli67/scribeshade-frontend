@@ -55,7 +55,7 @@ export interface ResumeFields {
 }
 
 export type AutoSaveStatus = "idle" | "saving" | "saved" | "error";
-export type BottomTab = "editor" | "ats" | "jdtailor" | "coverletter";
+export type BottomTab = "editor" | "ats" | "jdtailor" | "coverletter" | "rewrite" | "injectskills" | "injectkeywords" | "keywordmatch";
 export type TemplateId = "classic" | "modern" | "minimal";
 
 // ─── Section Quality / Validation ─────────────────────────────────────────────
@@ -148,6 +148,18 @@ export interface ResumeBuilderState {
   /** Latest populated resume HTML (template + fields). Lifted from RightPanel
    *  so TopBar can use it for real PDF export without reaching into props. */
   populatedHtml: string;
+  // ── New AI Feature State ──────────────────────────────────────────────────
+  isRewriting: boolean;
+  isInjectingSkills: boolean;
+  isInjectingKeywords: boolean;
+  isMatchingKeywords: boolean;
+  /** Last keyword match result from the keyword-match endpoint. */
+  keywordMatchResult: {
+    present: string[];
+    missing: string[];
+    matchScore: number;
+    analysedAt: string;
+  } | null;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -221,6 +233,11 @@ const initialState: ResumeBuilderState = {
   preTailorSnapshot: null,
   aiActivityLog: [],
   populatedHtml: "",
+  isRewriting: false,
+  isInjectingSkills: false,
+  isInjectingKeywords: false,
+  isMatchingKeywords: false,
+  keywordMatchResult: null,
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -349,6 +366,76 @@ const resumeBuilderSlice = createSlice({
     ) {
       const { sectionId, quality } = action.payload;
       state.sectionValidation[sectionId] = { ...quality, isValidating: false };
+    },
+
+    // ── New AI Feature Reducers ───────────────────────────────────────────────
+
+    setIsRewriting(state, action: PayloadAction<boolean>) {
+      state.isRewriting = action.payload;
+    },
+
+    setIsInjectingSkills(state, action: PayloadAction<boolean>) {
+      state.isInjectingSkills = action.payload;
+    },
+
+    setIsInjectingKeywords(state, action: PayloadAction<boolean>) {
+      state.isInjectingKeywords = action.payload;
+    },
+
+    setIsMatchingKeywords(state, action: PayloadAction<boolean>) {
+      state.isMatchingKeywords = action.payload;
+    },
+
+    setKeywordMatchResult(
+      state,
+      action: PayloadAction<{ present: string[]; missing: string[]; matchScore: number } | null>,
+    ) {
+      if (action.payload === null) {
+        state.keywordMatchResult = null;
+      } else {
+        state.keywordMatchResult = { ...action.payload, analysedAt: new Date().toISOString() };
+      }
+    },
+
+    /**
+     * Applies rewritten fields from the full-rewrite or inject-keywords endpoint.
+     * Skips empty values and locked fields. Pushes to undo history.
+     */
+    applyRewrittenFields(
+      state,
+      action: PayloadAction<{ fields: Partial<ResumeFields> }>,
+    ) {
+      const { fields } = action.payload;
+      pushHistory(state);
+      (Object.keys(fields) as Array<keyof ResumeFields>).forEach((key) => {
+        const next = fields[key];
+        if (typeof next !== "string" || next.trim() === "") return;
+        if (state.lockedFields[key]) return;
+        state.fields[key] = next;
+      });
+      state.isDirty = true;
+    },
+
+    /**
+     * Applies injected skills fields. Only updates the 4 skills sub-fields.
+     * Preserves locked fields and pushes undo history.
+     */
+    applyInjectedSkills(
+      state,
+      action: PayloadAction<{ injectedFields: Partial<ResumeFields> }>,
+    ) {
+      const { injectedFields } = action.payload;
+      const SKILLS_KEYS: Array<keyof ResumeFields> = [
+        "skillsLanguages", "skillsFrameworks", "skillsDatabases", "skillsTools",
+      ];
+      pushHistory(state);
+      SKILLS_KEYS.forEach((key) => {
+        const next = injectedFields[key];
+        if (typeof next !== "string" || next.trim() === "") return;
+        if (state.lockedFields[key]) return;
+        state.fields[key] = next;
+      });
+      state.isDirty = true;
     },
 
     /** Apply the current AI suggestion to the fields. */
@@ -660,6 +747,7 @@ const resumeBuilderSlice = createSlice({
       state.lastTailorKeywordsMatched = [];
       state.lastTailorKeywordsMissing = [];
       state.preTailorSnapshot = null;
+      state.keywordMatchResult = null;
     },
   },
 });
@@ -697,6 +785,13 @@ export const {
   updateCustomField,
   setSectionValidating,
   setSectionQuality,
+  setIsRewriting,
+  setIsInjectingSkills,
+  setIsInjectingKeywords,
+  setIsMatchingKeywords,
+  setKeywordMatchResult,
+  applyRewrittenFields,
+  applyInjectedSkills,
 } = resumeBuilderSlice.actions;
 
 export default resumeBuilderSlice.reducer;

@@ -20,6 +20,9 @@ export const FEATURE_KEYS = {
   RESUME_ENHANCE_SECTION: "resume_enhance_section",
   RESUME_TAILOR: "resume_tailor",
   RESUME_EXTRACT_FIELDS: "resume_extract_fields",
+  RESUME_REWRITE: "resume_rewrite",
+  RESUME_INJECT_SKILLS: "resume_inject_skills",
+  RESUME_INJECT_KEYWORDS: "resume_inject_keywords",
 } as const;
 
 let _cache: FeatureCost[] | null = null;
