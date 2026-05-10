@@ -300,17 +300,36 @@ export default function ListOfResumes({
 
     setIsRenaming(true);
     try {
-      const res = await fetch(
-        `${import.meta.env.VITE_BACKEND_URL}/api/resume/${resumeToRename.id}/rename`,
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ filename: newFilename.trim() }),
-        },
-      );
+      const isBuilt = resumeToRename.source === "builder";
+
+      let res: Response;
+      if (isBuilt) {
+        // Builder resumes: use the builder rename endpoint with auth
+        const token = await getToken();
+        res = await fetch(
+          `${import.meta.env.VITE_BACKEND_URL}/api/resume/builder/${resumeToRename.id}/rename`,
+          {
+            method: "PATCH",
+            headers: {
+              "Content-Type": "application/json",
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify({ title: newFilename.trim() }),
+          },
+        );
+      } else {
+        res = await fetch(
+          `${import.meta.env.VITE_BACKEND_URL}/api/resume/${resumeToRename.id}/rename`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ filename: newFilename.trim() }),
+          },
+        );
+      }
 
       if (!res.ok) {
-        const err = await res.json();
+        const err = await res.json().catch(() => ({}));
         throw new Error(err.error || "Failed to rename resume");
       }
 

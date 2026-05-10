@@ -3571,56 +3571,91 @@ export default function ResumeEditor() {
   // ── Initialise Redux from config ──────────────────────────────────────────
   useEffect(() => {
     if (!config) { setIsInitialized(true); return; }
-    const { title, fields: parsedFields } = configToFields(config);
-    const rawConfigTitle = config.resumeTitle || config.title || title;
-    const finalTitle = (!rawConfigTitle || rawConfigTitle === "My Resume")
-      ? smartTitle(parsedFields, title)
-      : rawConfigTitle;
-    // Only lock name/email when the resume was produced from an uploaded file or
-    // a previous builder save — those values came from a verified source.
-    // Manual (blank) resumes start fully unlocked so the user can edit freely.
-    const isImported = config.sourceType === "builder" || config.sourceType === "resume";
-    dispatch(initFromConfig({
-      title:          finalTitle,
-      fields:         parsedFields,
-      templateId:     config.templateId ?? "classic",
-      lockedFields:   isImported ? { name: true, email: true } : {},
-      jobDescription: config.jobDescription ?? "",
-      jobTitle:       config.jobTitle ?? "",
-      company:        config.company ?? "",
-    }));
-    if (config.resumeId) dispatch(setSavedResumeId(config.resumeId));
 
-    // Always fetch all templates so the marketplace and template switching work
     const backendUrl = import.meta.env.VITE_BACKEND_URL ?? "";
-    fetch(`${backendUrl}/api/resume/all-templates`)
-      .then((r) => r.json())
-      .then((list: TemplateItem[]) => {
-        if (!Array.isArray(list)) return;
-        allTemplatesRef.current = list;
-        const tid = (config.templateId ?? "classic").toLowerCase();
-        const match =
-          list.find((t) => t.id === config.templateId) ??
-          list.find((t) => t.name.toLowerCase() === tid) ??
-          list.find((t) => t.category.toLowerCase() === tid);
-        if (match) {
-          setCurrentTemplateName(match.name);
-          if (config.templateCode) {
-            // Config already has code (fresh load) — prefer that, but still
-            // cache the code from API into allTemplatesRef for correct switching
-            setTemplateCode(config.templateCode);
-          } else {
-            setTemplateCode(match.code);
+
+    // When the editor is opened from the All Resumes list for a builder resume,
+    // the navigation state only carries { sourceType: "builder", resumeId }.
+    // Fields aren't included, so we must fetch them from the API first.
+    const needsFetch =
+      config.sourceType === "builder" &&
+      config.resumeId &&
+      (!config.fields || Object.keys(config.fields).length === 0);
+
+    const initialize = (resolvedConfig: typeof config) => {
+      const { title, fields: parsedFields } = configToFields(resolvedConfig);
+      const rawConfigTitle = resolvedConfig.resumeTitle || resolvedConfig.title || title;
+      const finalTitle = (!rawConfigTitle || rawConfigTitle === "My Resume")
+        ? smartTitle(parsedFields, title)
+        : rawConfigTitle;
+      const isImported = resolvedConfig.sourceType === "builder" || resolvedConfig.sourceType === "resume";
+      dispatch(initFromConfig({
+        title:          finalTitle,
+        fields:         parsedFields,
+        templateId:     resolvedConfig.templateId ?? "classic",
+        lockedFields:   isImported ? { name: true, email: true } : {},
+        jobDescription: resolvedConfig.jobDescription ?? "",
+        jobTitle:       resolvedConfig.jobTitle ?? "",
+        company:        resolvedConfig.company ?? "",
+      }));
+      if (resolvedConfig.resumeId) dispatch(setSavedResumeId(resolvedConfig.resumeId));
+
+      fetch(`${backendUrl}/api/resume/all-templates`)
+        .then((r) => r.json())
+        .then((list: TemplateItem[]) => {
+          if (!Array.isArray(list)) return;
+          allTemplatesRef.current = list;
+          const tid = (resolvedConfig.templateId ?? "classic").toLowerCase();
+          const match =
+            list.find((t) => t.id === resolvedConfig.templateId) ??
+            list.find((t) => t.name.toLowerCase() === tid) ??
+            list.find((t) => t.category.toLowerCase() === tid);
+          if (match) {
+            setCurrentTemplateName(match.name);
+            if (resolvedConfig.templateCode) {
+              setTemplateCode(resolvedConfig.templateCode);
+            } else {
+              setTemplateCode(match.code);
+            }
+          } else if (resolvedConfig.templateCode) {
+            setTemplateCode(resolvedConfig.templateCode);
           }
-        } else if (config.templateCode) {
-          setTemplateCode(config.templateCode);
-        }
-      })
-      .catch(() => {
-        // Fallback: if API fails and config has templateCode, use it
-        if (config.templateCode) setTemplateCode(config.templateCode);
-      })
-      .finally(() => setIsInitialized(true));
+        })
+        .catch(() => {
+          if (resolvedConfig.templateCode) setTemplateCode(resolvedConfig.templateCode);
+        })
+        .finally(() => setIsInitialized(true));
+    };
+
+    if (needsFetch) {
+      // Fetch the full built resume data then initialise
+      getToken()
+        .then((token) =>
+          fetch(`${backendUrl}/api/resume/builder/${config.resumeId}`, {
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+          }),
+        )
+        .then((r) => r.json())
+        .then((data) => {
+          // Merge API response into config so configToFields can use it
+          const enriched = {
+            ...config,
+            fields:         data.fields ?? {},
+            templateId:     data.templateId ?? config.templateId,
+            resumeTitle:    data.title ?? config.resumeTitle,
+            jobDescription: data.jobDescription ?? config.jobDescription ?? "",
+            jobTitle:       data.jobTitle ?? config.jobTitle ?? "",
+            company:        data.company ?? config.company ?? "",
+          };
+          initialize(enriched);
+        })
+        .catch(() => {
+          // Fallback to blank editor if fetch fails
+          initialize(config);
+        });
+    } else {
+      initialize(config);
+    }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Template switching — update templateCode when user picks a new template
