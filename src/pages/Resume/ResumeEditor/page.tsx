@@ -2193,6 +2193,7 @@ function CenterPanel() {
   const sectionValidation   = useSelector((s: RootState) => s.resumeBuilder.sectionValidation);
   const jobTitle            = useSelector((s: RootState) => s.resumeBuilder.jobTitle);
   const company             = useSelector((s: RootState) => s.resumeBuilder.company);
+  const jobDescription      = useSelector((s: RootState) => s.resumeBuilder.jobDescription);
   const { balance, refresh: refreshBalance } = useCreditsBalance();
   const { costFor }         = useFeatureCosts();
   const { getToken, userId: clerkUserId } = useAuth();
@@ -2282,6 +2283,8 @@ function CenterPanel() {
             sectionId: activeSection,
             currentText,
             resumeContext: fields.name ? `${fields.name}, ${fields.role}` : undefined,
+            jobDescription: jobDescription || undefined,
+            jobTitle:       jobTitle       || undefined,
           },
           { token, idempotencyKey },
         );
@@ -2323,7 +2326,7 @@ function CenterPanel() {
     } finally {
       dispatch(setIsEnhancing(false));
     }
-  }, [dispatch, getToken, clerkUserId, activeSection, fields, isEnhancing, refreshBalance]);
+  }, [dispatch, getToken, clerkUserId, activeSection, fields, isEnhancing, jobDescription, jobTitle, refreshBalance]);
 
   return (
     <main className="flex-1 overflow-y-auto bg-slate-50/60">
@@ -3735,7 +3738,7 @@ export default function ResumeEditor() {
     <div className="flex flex-col h-full overflow-hidden bg-background">
       <TopBar />
       <div className="flex flex-1 overflow-hidden min-h-0">
-        <LeftPanel />
+        {activeBottomTab === "editor" && <LeftPanel />}
         {centerContent()}
         <RightPanel
           templateCode={templateCode}

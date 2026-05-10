@@ -193,7 +193,37 @@ export default function ListOfResumes({
     setAtsLoadingIds((prev) => ({ ...prev, [resume.id]: true }));
 
     try {
-      // If ATS boolean flag is true, try to fetch existing analysis first
+      // ── Builder resumes: use the dedicated builder ATS endpoint ────────────
+      if (resume.source === "builder") {
+        const token = await getToken();
+        const response = await fetch(
+          `${import.meta.env.VITE_BACKEND_URL}/api/resume/builder/ats-score`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify({ resumeId: resume.id }),
+          },
+        );
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Failed to analyze resume");
+        // Refresh table so the ATS score column updates
+        setRefreshKey((prev) => prev + 1);
+        navigate("/resume/ats-result", {
+          state: {
+            analysis: {
+              ...data.data,
+              filename: resume.filename,
+              resumeId: resume.id,
+            },
+          },
+        });
+        return;
+      }
+
+      // ── Uploaded resumes: check for cached analysis first ─────────────────
       if (resume.ats) {
         const res = await fetch(
           `${import.meta.env.VITE_BACKEND_URL}/api/resume/all-ats?userId=${userId}`,
@@ -215,7 +245,7 @@ export default function ListOfResumes({
         }
       }
 
-      // Otherwise (or if not found), run the analysis
+      // Otherwise run fresh analysis for uploaded resumes
       const response = await fetch(
         `${import.meta.env.VITE_BACKEND_URL}/api/resume/ats-score`,
         {
@@ -231,6 +261,8 @@ export default function ListOfResumes({
         throw new Error(data.error || "Failed to analyze resume");
       }
 
+      // Refresh table so the ATS score column updates
+      setRefreshKey((prev) => prev + 1);
       navigate("/resume/ats-result", {
         state: {
           analysis: {

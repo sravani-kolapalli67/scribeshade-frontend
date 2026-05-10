@@ -356,6 +356,10 @@ const resumeBuilderSlice = createSlice({
       if (!state.aiSuggestion || !state.aiSectionId) return;
       pushHistory(state);
       switch (state.aiSectionId) {
+        case "personalInfo":
+          // AI returns an improved professional title — write it to the role field
+          state.fields.role = state.aiSuggestion;
+          break;
         case "summary":
           state.fields.summary = state.aiSuggestion;
           break;
