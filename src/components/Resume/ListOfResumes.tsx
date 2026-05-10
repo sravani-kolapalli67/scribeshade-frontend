@@ -427,10 +427,23 @@ export default function ListOfResumes({
       header: "Type",
       cell: ({ row }) => {
         const resume = row.original;
+        // Builder resumes are always shown as "Builder" regardless of filename
+        if (resume.source === "builder") {
+          return (
+            <Badge variant="outline" className="text-xs font-medium text-purple-700 border-purple-200 bg-purple-50">
+              Builder
+            </Badge>
+          );
+        }
+        // For uploaded resumes, derive type from fileType field or file extension
         const fileType = resume.fileType || getFileExtension(resume.filename);
+        // getFileExtension returns the full filename if there's no dot — treat those as "FILE"
+        const label = fileType.includes(".") || fileType === resume.filename
+          ? "FILE"
+          : fileType;
         return (
           <Badge variant="outline" className="text-xs font-medium">
-            {fileType}
+            {label}
           </Badge>
         );
       },

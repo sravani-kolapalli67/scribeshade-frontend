@@ -161,7 +161,7 @@ const TEMPLATES: { id: TemplateId; label: string }[] = [  { id: "classic", label
 // fetch fails.
 const AI_ENHANCE_FALLBACK_COST = 1;
 const AI_ENHANCEABLE: SectionId[] = [
-  "summary", "experience", "skills", "projects", "education",
+  "personalInfo", "summary", "experience", "skills", "projects", "education",
   "certifications", "publications",
 ];
 
@@ -195,12 +195,15 @@ function sectionHasContent(id: string, fields: ResumeFields): boolean {
 
 function sectionAIText(id: string, fields: ResumeFields): string {
   switch (id) {
-    case "summary":    return fields.summary;
-    case "experience": return fields.experience;
-    case "skills":     return [fields.skillsLanguages, fields.skillsFrameworks, fields.skillsDatabases, fields.skillsTools].filter(Boolean).join("\n");
-    case "projects":   return fields.projects;
-    case "education":  return fields.education;
-    default:           return "";
+    case "personalInfo":  return [fields.name, fields.role, fields.location].filter(Boolean).join(" · ");
+    case "summary":       return fields.summary;
+    case "experience":    return fields.experience;
+    case "skills":        return [fields.skillsLanguages, fields.skillsFrameworks, fields.skillsDatabases, fields.skillsTools].filter(Boolean).join("\n");
+    case "projects":      return fields.projects;
+    case "education":     return fields.education;
+    case "certifications": return fields.certifications;
+    case "publications":  return fields.publications;
+    default:              return "";
   }
 }
 
@@ -2210,8 +2213,8 @@ function CenterPanel() {
   const fieldsSnapshot = JSON.stringify(fields);
 
   useEffect(() => {
-    // Only validate AI-enhanceable sections (personalInfo has no free-text field to score)
-    if (!canAI) return;
+    // personalInfo has no long-form prose to validate — skip it
+    if (!canAI || activeSection === "personalInfo") return;
     const text = sectionAIText(activeSection, fields);
     if (!text || text.trim().length < 15) return;
 
@@ -2691,6 +2694,7 @@ function JDTailorPanel() {
   const jobTitle       = useSelector((s: RootState) => s.resumeBuilder.jobTitle);
   const company        = useSelector((s: RootState) => s.resumeBuilder.company);
   const savedResumeId  = useSelector((s: RootState) => s.resumeBuilder.savedResumeId);
+  const fields         = useSelector((s: RootState) => s.resumeBuilder.fields);
   const tailoredSections        = useSelector((s: RootState) => s.resumeBuilder.tailoredSections);
   const lastTailoredAt          = useSelector((s: RootState) => s.resumeBuilder.lastTailoredAt);
   const lastTailorMatchScore    = useSelector((s: RootState) => s.resumeBuilder.lastTailorMatchScore);
@@ -2719,6 +2723,19 @@ function JDTailorPanel() {
     try {
       const userId = localStorage.getItem("userId") ?? clerkUserId;
       const token = await getToken();
+
+      // For manual (unsaved) resumes, pass current fields directly instead of a DB resumeId.
+      // The backend handles both paths: DB lookup when resumeId is set, inline fields when absent.
+      const payload: Record<string, unknown> = {
+        userId,
+        jobDescription: jdText,
+      };
+      if (savedResumeId) {
+        payload.resumeId = savedResumeId;
+      } else {
+        payload.fields = fields;
+      }
+
       const { data, creditsUsed, creditsRemaining, cached } = await postCreditedAi<{
         tailoredFields: Partial<ResumeFields>;
         keywordsMatched?: string[];
@@ -2726,11 +2743,7 @@ function JDTailorPanel() {
         matchScore?: number;
       }>(
         ENDPOINTS.resumeBuilderTailor(),
-        {
-          userId,
-          resumeId: savedResumeId,
-          jobDescription: jdText,
-        },
+        payload,
         { token, idempotencyKey },
       );
 
@@ -2776,7 +2789,7 @@ function JDTailorPanel() {
     } finally {
       setIsTailoring(false);
     }
-  }, [isTailoring, charCount, getToken, savedResumeId, jdText, refreshBalance, tailorCost, dispatch]);
+  }, [isTailoring, charCount, getToken, savedResumeId, fields, jdText, refreshBalance, tailorCost, dispatch]);
 
   const sectionLabelMap: Record<string, string> = {
     summary: "Summary",
@@ -2789,6 +2802,7 @@ function JDTailorPanel() {
   };
 
   const hasOutcome = tailoredSections.length > 0 && lastTailoredAt;
+  const isManualResume = !savedResumeId;
 
   return (
     <main className="flex-1 overflow-y-auto bg-slate-50/60">
@@ -2800,10 +2814,24 @@ function JDTailorPanel() {
           </div>
           <div>
             <h2 className="text-lg font-bold tracking-tight">JD Tailor</h2>
-            <p className="text-xs text-muted-foreground">Rewrite your entire resume to match a specific job description</p>
+            <p className="text-xs text-muted-foreground">
+              {isManualResume
+                ? "Craft a complete resume from scratch — tailored to your target job"
+                : "Rewrite your entire resume to match a specific job description"}
+            </p>
           </div>
           <span className="ml-auto text-[10px] font-bold px-2.5 py-1 rounded-full bg-violet-100 text-violet-700 border border-violet-200/60 uppercase tracking-wide">{tailorCost} credit{tailorCost === 1 ? "" : "s"} · regen free</span>
         </div>
+
+        {/* Manual resume info banner */}
+        {isManualResume && (
+          <div className="flex items-start gap-3 bg-violet-50 border border-violet-200/70 rounded-2xl px-4 py-3">
+            <Sparkles className="h-4 w-4 text-violet-600 shrink-0 mt-0.5" />
+            <p className="text-xs text-violet-800 leading-relaxed">
+              <span className="font-semibold">Building from scratch.</span> Paste the job description and AI will craft a complete, ATS-optimised resume for you — summary, experience, skills, projects and more.
+            </p>
+          </div>
+        )}
 
         {/* Context card — pre-filled from wizard if available */}
         {(jobTitle || company) && (
@@ -3545,11 +3573,15 @@ export default function ResumeEditor() {
     const finalTitle = (!rawConfigTitle || rawConfigTitle === "My Resume")
       ? smartTitle(parsedFields, title)
       : rawConfigTitle;
+    // Only lock name/email when the resume was produced from an uploaded file or
+    // a previous builder save — those values came from a verified source.
+    // Manual (blank) resumes start fully unlocked so the user can edit freely.
+    const isImported = config.sourceType === "builder" || config.sourceType === "resume";
     dispatch(initFromConfig({
       title:          finalTitle,
       fields:         parsedFields,
       templateId:     config.templateId ?? "classic",
-      lockedFields:   { name: true, email: true },
+      lockedFields:   isImported ? { name: true, email: true } : {},
       jobDescription: config.jobDescription ?? "",
       jobTitle:       config.jobTitle ?? "",
       company:        config.company ?? "",

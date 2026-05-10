@@ -418,6 +418,8 @@ const resumeBuilderSlice = createSlice({
       const snapshot: Partial<ResumeFields> = {};
       const touched: string[] = [];
       const FIELD_TO_SECTION: Record<string, string> = {
+        role:              "personalInfo",
+        location:          "personalInfo",
         summary:           "summary",
         experience:        "experience",
         skillsLanguages:   "skills",

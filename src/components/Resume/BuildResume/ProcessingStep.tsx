@@ -10,14 +10,24 @@ interface ProcessingStepProps {
   error?: string | null;
   onRetry?: () => void;
   onSkip?: () => void;
+  /** "extract" = parsing an existing file, "scratch" = building from JD */
+  mode?: "extract" | "scratch";
 }
 
-const AI_STATES = [
+const AI_STATES_EXTRACT = [
   "Extracting resume content",
   "Analyzing experience & skills",
   "Structuring resume sections",
   "Optimizing content flow",
   "Preparing final layout",
+];
+
+const AI_STATES_SCRATCH = [
+  "Reading job description",
+  "Crafting professional summary",
+  "Generating work experience",
+  "Building skills & projects",
+  "Finalising resume layout",
 ];
 
 // Smooth shimmer progress that advances to ~85% over ~20s then stays
@@ -42,7 +52,9 @@ export function ProcessingStep({
   error = null,
   onRetry,
   onSkip,
+  mode = "extract",
 }: ProcessingStepProps) {
+  const AI_STATES = mode === "scratch" ? AI_STATES_SCRATCH : AI_STATES_EXTRACT;
   // Cycling AI state label
   const [stateIdx, setStateIdx] = React.useState(0);
   const [fadeIn, setFadeIn] = React.useState(true);
@@ -126,12 +138,14 @@ export function ProcessingStep({
 
       {/* ── Title ── */}
       <h3 className="text-[17px] font-semibold text-slate-800 tracking-tight leading-snug mb-1.5">
-        Crafting Your Resume
+        {mode === "scratch" ? "Building Your Resume" : "Crafting Your Resume"}
       </h3>
 
       {/* ── Description ── */}
       <p className="text-[13px] text-slate-400 max-w-[260px] leading-relaxed mb-6">
-        Our AI is extracting, analyzing, and structuring your information into a professional layout.
+        {mode === "scratch"
+          ? "AI is crafting a complete, tailored resume from your job description."
+          : "Our AI is extracting, analyzing, and structuring your information into a professional layout."}
       </p>
 
       {/* ── Cycling AI state label ── */}

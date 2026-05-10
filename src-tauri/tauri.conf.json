@@ -25,7 +25,7 @@
         "resizable": false,
         "minimizable": true,
         "maximizable": false,
-        "contentProtected": false,
+        "contentProtected": true,
         "skipTaskbar": true,
         "alwaysOnTop": true,
         "visibleOnAllWorkspaces": true,
@@ -42,7 +42,7 @@
         "visible": false,
         "center": true,
         "resizable": false,
-        "contentProtected": false,
+        "contentProtected": true,
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "visibleOnAllWorkspaces": true

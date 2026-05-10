@@ -233,13 +233,79 @@ export function BuildResumeDialog() {
     setProcessingStatus("loading");
     setProcessingError(null);
 
-    // Path B (scratch): no AI extraction needed — navigate with empty fields.
+    // ── Path B (scratch): fetch user name/email from DB, then call AI tailor ──
     if (sourceType === "scratch") {
-      await navigateToEditor();
+      try {
+        const userId = localStorage.getItem("userId") ?? clerkUserId;
+        const token  = await getToken();
+
+        // 1. Fetch user profile for name + email seed
+        let userName  = "";
+        let userEmail = "";
+        try {
+          const meRes = await fetch(ENDPOINTS.authMe(), {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (meRes.ok) {
+            const me = await meRes.json();
+            userName  = me.name  ?? "";
+            userEmail = me.email ?? "";
+          }
+        } catch {
+          // Non-fatal — AI will build without name/email seed
+        }
+
+        // 2. If a job description was provided, call AI tailor to build the resume
+        if (jdData.jobDescription.trim().length >= 50) {
+          const idempotencyKey = createIdempotencyKey();
+          const { data, creditsUsed, creditsRemaining, cached } =
+            await postCreditedAi<{ tailoredFields: Record<string, string> }>(
+              ENDPOINTS.resumeBuilderTailor(),
+              {
+                userId,
+                jobDescription: jdData.jobDescription,
+                jobTitle:       jdData.jobTitle  || undefined,
+                company:        jdData.company   || undefined,
+                // Seed with real name/email so AI puts them in the right spots
+                fields: { name: userName, email: userEmail },
+              },
+              { token, idempotencyKey },
+            );
+
+          if (!cached && creditsUsed > 0) {
+            toast.success(
+              `Resume built · ${creditsUsed} credit${creditsUsed === 1 ? "" : "s"} used · ${creditsRemaining.toFixed(2)} remaining`,
+            );
+          }
+          if (!isNaN(creditsRemaining)) setOptimisticBalance(creditsRemaining);
+          refreshBalance();
+
+          // Navigate with AI-generated fields (force "builder" sourceType so editor doesn't re-parse)
+          const generatedFields: Record<string, string> = {
+            ...(data.tailoredFields as Record<string, string>),
+            // Always keep real name/email from DB, not whatever AI wrote
+            name:  userName  || (data.tailoredFields as Record<string, string>).name  || "",
+            email: userEmail || (data.tailoredFields as Record<string, string>).email || "",
+          };
+          await navigateToEditor(generatedFields);
+        } else {
+          // No JD or too short: open editor blank but pre-seed name/email
+          const seedFields = userName || userEmail
+            ? { name: userName, email: userEmail }
+            : undefined;
+          await navigateToEditor(seedFields as never);
+        }
+      } catch (err) {
+        const message = err instanceof InsufficientCreditsError
+          ? "Not enough credits to build this resume — top up to continue."
+          : err instanceof Error ? err.message : "Something went wrong";
+        setProcessingStatus("error");
+        setProcessingError(message);
+      }
       return;
     }
 
-    // Path A (resume): call AI extract-fields endpoint.
+    // ── Path A (resume): call AI extract-fields endpoint ──
     const resumeContext = selectedResume?.resumeContext;
     if (!resumeContext) {
       // Fallback: no resume text available, navigate without AI-extracted fields.
@@ -409,6 +475,7 @@ export function BuildResumeDialog() {
               error={processingError}
               onRetry={() => startProcessing()}
               onSkip={() => { void navigateToEditor(); }}
+              mode={sourceType === "scratch" ? "scratch" : "extract"}
             />
           )}
         </div>
