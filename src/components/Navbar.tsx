@@ -12,7 +12,7 @@ const routeConfig: Record<string, string> = {
   "/sessions": "Sessions",
   "/resume/all": "All Resumes",
   "/resume/ats-analysis": "ATS Analysis",
-  "/resume/build": "Build Resume",
+  "/resume/build": "Resume Studio",
   "/resume/editor": "Resume Editor",
   "/resume/cover-letter": "Cover Letter",
   "/resume/ats-result": "ATS Result",

@@ -50,7 +50,7 @@ const data = {
           url: "/resume/all",
         },
         {
-          title: "Build Resume",
+          title: "Resume Studio",
           url: "/resume/build",
         },
         {

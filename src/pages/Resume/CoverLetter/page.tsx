@@ -140,6 +140,7 @@ export default function CoverLetter() {
             <CardContent className="p-6">
               <ResumeSelector
                 onSelect={(resume) => setSelectedResumeId(resume.id)}
+                includeBuilderResumes
               />
             </CardContent>
           </Card>

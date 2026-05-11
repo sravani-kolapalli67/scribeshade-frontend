@@ -2138,6 +2138,8 @@ function CenterPanel() {
             resumeContext: fields.name ? `${fields.name}, ${fields.role}` : undefined,
             jobDescription: jobDescription || undefined,
             jobTitle:       jobTitle       || undefined,
+            qualityIssues:       quality?.issues?.length       ? quality.issues       : undefined,
+            qualitySuggestions:  quality?.suggestions?.length  ? quality.suggestions  : undefined,
           },
           { token, idempotencyKey },
         );

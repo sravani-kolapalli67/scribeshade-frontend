@@ -1,10 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate, useLocation } from "react-router-dom";
+import { useNavigate, useLocation, Link } from "react-router-dom";
 import { useAuth } from "@clerk/clerk-react";
-import { Badge } from "@/components/ui/badge";
-import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { BuildResumeDialog } from "@/components/Resume/BuildResumeDialog";
 import { ENDPOINTS } from "@/lib/endpoints";
 import { populateTemplate, fieldsToResumeData } from "@/lib/resumeTemplate";
@@ -42,6 +40,18 @@ import {
   Eye,
   X,
   ExternalLink,
+  ZoomIn,
+  ZoomOut,
+  Minimize2,
+  Sparkles,
+  ScanText,
+  Mail,
+  Wand2,
+  Rocket,
+  FileSearch,
+  KeyRound,
+  Copy,
+  Download,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -106,28 +116,51 @@ const SORT_LABELS: Record<SortKey, string> = {
 };
 
 const PAGE_SIZE = 12;
-const THUMB_H   = 156; // visible px of the thumbnail strip
+const THUMB_H   = 228; // visible px of the thumbnail strip
 
 // ── ShadowHtml ────────────────────────────────────────────────────────────────
-// Renders HTML into a Shadow DOM instead of an <iframe>.
-// Benefits vs iframe srcDoc:
-//   • No separate browsing context → browser extensions (Grammarly, etc.) cannot
-//     inject content scripts, eliminating the [ContentService] console flood.
-//   • No sandboxing warnings ("Blocked script execution in 'about:srcdoc'…").
-//   • Template CSS is naturally scoped inside the shadow root.
+// Renders a full HTML document in an isolated iframe.
+// Using srcDoc + sandbox="" ensures:
+//   • Full document structure (html/head/body) is preserved, so template
+//     styles like `body { display: flex }` (Modern template) apply correctly.
+//   • Scripts are blocked (sandbox="" disables all permissions).
+//   • Extension content-scripts (Grammarly etc.) cannot inject into a
+//     sandboxed iframe.
+function IframeHtml({
+  html,
+  style,
+  onContentHeight,
+}: {
+  html: string;
+  style?: React.CSSProperties;
+  /** When provided, the iframe gets allow-same-origin so we can measure content height on load. */
+  onContentHeight?: (h: number) => void;
+}) {
+  const ref = useRef<HTMLIFrameElement>(null);
 
-function ShadowHtml({ html, style }: { html: string; style?: React.CSSProperties }) {
-  const ref = useRef<HTMLDivElement>(null);
+  const handleLoad = () => {
+    if (!onContentHeight || !ref.current) return;
+    try {
+      const doc = ref.current.contentDocument;
+      if (doc) {
+        const h = doc.documentElement.scrollHeight;
+        if (h > 0) onContentHeight(h);
+      }
+    } catch { /* sandboxed or cross-origin — ignore */ }
+  };
 
-  useEffect(() => {
-    const el = ref.current;
-    if (!el || !html) return;
-    // Attach once, reuse shadow root on subsequent html updates
-    const root = el.shadowRoot ?? el.attachShadow({ mode: "open" });
-    root.innerHTML = html;
-  }, [html]);
-
-  return <div ref={ref} style={style} />;
+  return (
+    <iframe
+      ref={ref}
+      srcDoc={html}
+      // allow-same-origin is added only when onContentHeight is supplied (preview dialog)
+      // so we can read scrollHeight; the thumbnail keeps sandbox="" to block everything.
+      sandbox={onContentHeight ? "allow-same-origin" : ""}
+      scrolling="no"
+      onLoad={onContentHeight ? handleLoad : undefined}
+      style={{ border: "none", display: "block", ...style }}
+    />
+  );
 }
 
 // ── ResumeThumbnail ──────────────────────────────────────────────────────────────
@@ -235,9 +268,9 @@ function ResumeThumbnail({
               pointerEvents: "none",
             }}
           >
-            <ShadowHtml
+            <IframeHtml
               html={html}
-              style={{ width: A4_W, height: A4_H, display: "block", overflow: "hidden" }}
+              style={{ width: A4_W, height: A4_H, overflow: "hidden" }}
             />
           </div>
         </div>
@@ -276,106 +309,124 @@ function ResumeCard({
   resume,
   isOpening,
   isLoadingPreview,
+  isDuplicating,
+  isDownloading,
   onOpen,
   onDelete,
   onPreview,
+  onDuplicate,
+  onDownload,
 }: {
   resume: ResumeEntry;
   isOpening: boolean;
   isLoadingPreview: boolean;
+  isDuplicating: boolean;
+  isDownloading: boolean;
   onOpen: (id: string) => void;
   onDelete: (id: string, title: string) => void;
   onPreview: (id: string) => void;
+  onDuplicate: (id: string) => void;
+  onDownload: (id: string) => void;
 }) {
   const isCompleted = resume.status === "completed";
 
   return (
     <div
       className={cn(
-        "flex flex-col bg-white border border-border rounded-xl overflow-hidden transition-shadow hover:shadow-sm",
-        (isOpening || isLoadingPreview) && "opacity-60 pointer-events-none",
+        "group flex flex-col bg-white border border-border rounded-2xl overflow-hidden transition-all duration-200 hover:shadow-md hover:border-slate-200",
+        (isOpening || isLoadingPreview || isDuplicating || isDownloading) && "opacity-60 pointer-events-none",
       )}
     >
-      {/* Thumbnail strip — real resume preview, lazy-loaded on viewport entry */}
-      <ResumeThumbnail id={resume.id} onPreview={onPreview} />
-
-      {/* Card body */}
-      <div className="flex flex-col gap-3 p-4">
-        {/* Top row: template indicator + status badge */}
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
-            <span className={cn("h-2 w-2 rounded-full shrink-0", templateDot(resume.template))} />
-            <span className="text-[11px] font-medium text-muted-foreground truncate">{resume.template}</span>
-          </div>
-          <Badge
-            variant={isCompleted ? "default" : "outline"}
+      {/* ── Preview thumbnail (dominant area) ── */}
+      <div className="relative">
+        <ResumeThumbnail id={resume.id} onPreview={onPreview} />
+        {/* Status pill floated over thumbnail */}
+        <div className="absolute top-2.5 right-2.5">
+          <span
             className={cn(
-              "text-[10px] font-semibold px-2 py-0.5 rounded-md shrink-0",
-              !isCompleted && "text-muted-foreground border-border",
+              "inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold ring-1 backdrop-blur-sm",
+              isCompleted
+                ? "bg-emerald-50/90 text-emerald-700 ring-emerald-200"
+                : "bg-white/90 text-slate-500 ring-slate-200",
             )}
           >
             {resume.status.charAt(0).toUpperCase() + resume.status.slice(1)}
-          </Badge>
+          </span>
+        </div>
+      </div>
+
+      {/* ── Card body ── */}
+      <div className="flex flex-col gap-3 p-4">
+
+        {/* Template indicator row */}
+        <div className="flex items-center gap-1.5">
+          <span className={cn("h-2 w-2 rounded-full shrink-0", templateDot(resume.template))} />
+          <span className="text-[11px] font-medium text-muted-foreground tracking-wide uppercase">
+            {resume.template}
+          </span>
         </div>
 
-        {/* Title + modified time */}
-        <div>
-          <h3 className="text-[13px] font-semibold text-foreground leading-snug line-clamp-2">
-            {resume.title}
-          </h3>
-          <p className="text-[11px] text-muted-foreground mt-0.5">
-            Modified {relativeTime(resume._updatedAtMs)}
-          </p>
+        {/* Resume title */}
+        <h3 className="text-[14px] font-semibold text-foreground leading-snug line-clamp-2 -mt-1">
+          {resume.title}
+        </h3>
+
+        {/* Metadata grid */}
+        <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 mt-0.5">
+          <div>
+            <p className="text-[10px] text-muted-foreground/70 uppercase tracking-wide font-medium">Modified</p>
+            <p className="text-[11px] text-muted-foreground mt-0.5">{relativeTime(resume._updatedAtMs)}</p>
+          </div>
+          <div>
+            <p className="text-[10px] text-muted-foreground/70 uppercase tracking-wide font-medium">Created</p>
+            <p className="text-[11px] text-muted-foreground mt-0.5 truncate">{resume.createdAt}</p>
+          </div>
         </div>
 
-        {/* Meta */}
-        <p className="text-[11px] text-muted-foreground -mt-1">
-          Created {resume.createdAt}
-        </p>
-
-        {/* Footer actions */}
-        <div className="flex items-center gap-2 pt-1 border-t border-border/60">
+        {/* Action row */}
+        <div className="flex items-center gap-2 pt-2 border-t border-border/60">
+          {/* Edit time label */}
+          <span className="flex-1 text-[11px] text-muted-foreground truncate">
+            Edited {relativeTime(resume._updatedAtMs)}
+          </span>
+          {/* Open */}
           <button
             onClick={() => onOpen(resume.id)}
-            className="flex-1 flex items-center justify-center gap-1.5 h-8 rounded-lg text-[12px] font-semibold bg-slate-900 text-white hover:bg-slate-700 transition-colors"
+            title="Open in Editor"
+            className="h-7 w-7 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-slate-100 transition-colors"
           >
-            {isOpening ? <Loader2 className="h-3 w-3 animate-spin" /> : <Pencil className="h-3 w-3" />}
-            Open in Editor
+            {isOpening
+              ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              : <Pencil className="h-3.5 w-3.5" />}
           </button>
+          {/* Duplicate */}
           <button
-            onClick={() => onPreview(resume.id)}
-            title="Preview"
-            className="h-8 w-8 flex items-center justify-center rounded-lg border border-border hover:bg-slate-50 transition-colors"
+            onClick={() => onDuplicate(resume.id)}
+            title="Duplicate"
+            className="h-7 w-7 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-slate-100 transition-colors"
           >
-            {isLoadingPreview
-              ? <Loader2 className="h-3.5 w-3.5 text-muted-foreground animate-spin" />
-              : <Eye className="h-3.5 w-3.5 text-muted-foreground" />}
+            {isDuplicating
+              ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              : <Copy className="h-3.5 w-3.5" />}
           </button>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button className="h-8 w-8 flex items-center justify-center rounded-lg border border-border hover:bg-slate-50 transition-colors">
-                <MoreHorizontal className="h-3.5 w-3.5 text-muted-foreground" />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-40">
-              <DropdownMenuItem onClick={() => onPreview(resume.id)}>
-                <Eye className="h-3.5 w-3.5 mr-2" />
-                Preview
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => onOpen(resume.id)}>
-                <Pencil className="h-3.5 w-3.5 mr-2" />
-                Open in Editor
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem
-                className="text-destructive focus:text-destructive"
-                onClick={() => onDelete(resume.id, resume.title)}
-              >
-                <Trash2 className="h-3.5 w-3.5 mr-2" />
-                Delete
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+          {/* Download PDF */}
+          <button
+            onClick={() => onDownload(resume.id)}
+            title="Download PDF"
+            className="h-7 w-7 flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-slate-100 transition-colors"
+          >
+            {isDownloading
+              ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              : <Download className="h-3.5 w-3.5" />}
+          </button>
+          {/* Delete */}
+          <button
+            onClick={() => onDelete(resume.id, resume.title)}
+            title="Delete"
+            className="h-7 w-7 flex items-center justify-center rounded-lg text-muted-foreground hover:text-destructive hover:bg-red-50 transition-colors"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
         </div>
       </div>
     </div>
@@ -388,6 +439,10 @@ function ResumeCard({
 const A4_W = 794;
 const A4_H = 1123;
 
+/**
+ * Fullscreen preview overlay — matches the editor's FullscreenPreviewDialog.
+ * Dark backdrop, zoom controls (Fit page / Fit width / 100% / +/-), ESC to close.
+ */
 function ResumePreviewDialog({
   preview,
   onClose,
@@ -398,110 +453,173 @@ function ResumePreviewDialog({
   onOpenEditor: (id: string) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [scale, setScale] = useState(1);
+  const [mode, setMode] = useState<"fit-width" | "fit-page" | "custom">("fit-page");
+  const [customScale, setCustomScale] = useState(1);
+  const [containerSize, setContainerSize] = useState({ w: 0, h: 0 });
+  /** Actual document height in un-scaled px, measured when the iframe loads. */
+  const [contentHeight, setContentHeight] = useState(A4_H);
 
-  // Compute scale to fit A4 inside the scrollable body
+  // ESC to close
   useEffect(() => {
-    if (!preview || !containerRef.current) return;
+    if (!preview) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [preview, onClose]);
+
+  // Track container size for scale computation
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
     const ro = new ResizeObserver(([entry]) => {
-      const w = entry.contentRect.width;
-      setScale(Math.min(1, (w - 32) / A4_W));
+      const { width, height } = entry.contentRect;
+      setContainerSize({ w: width, h: height });
     });
-    ro.observe(containerRef.current);
+    ro.observe(el);
     return () => ro.disconnect();
   }, [preview]);
 
+  const PADDING = 64;
+  const fitWidthScale = containerSize.w > 0 ? Math.max(0.1, (containerSize.w - PADDING) / A4_W) : 0.7;
+  const fitPageScale =
+    containerSize.w > 0 && containerSize.h > 0
+      ? Math.min((containerSize.w - PADDING) / A4_W, (containerSize.h - PADDING) / contentHeight)
+      : 0.7;
+  const effectiveScale =
+    mode === "fit-width" ? fitWidthScale :
+    mode === "fit-page"  ? fitPageScale  :
+    customScale;
+
+  const adjustZoom = (delta: number) => {
+    const next = Math.max(0.3, Math.min(2.5, effectiveScale + delta));
+    setCustomScale(next);
+    setMode("custom");
+  };
+
+  if (!preview) return null;
+
   return (
-    <Dialog open={!!preview} onOpenChange={(v) => { if (!v) onClose(); }}>
-      <DialogContent className="w-full max-w-[calc(100vw-2rem)] sm:max-w-[860px] p-0 gap-0">
-        <div className="flex flex-col h-[90vh] overflow-hidden rounded-2xl">
-
-          {/* ── Fixed top: title bar ── */}
-          <div className="shrink-0 bg-background px-6 pt-5 pb-4 border-b border-border/50 flex items-center gap-3">
-            <div className="h-8 w-8 rounded-lg bg-slate-100 border border-border flex items-center justify-center shrink-0">
-              <FileText className="h-4 w-4 text-slate-600" />
-            </div>
-            <div className="flex-1 min-w-0">
-              <h2 className="text-[13px] font-semibold text-foreground truncate leading-tight">{preview?.title ?? "Resume Preview"}</h2>
-              <div className="flex items-center gap-1.5 mt-0.5">
-                {preview?.template && (
-                  <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-border">
-                    {preview.template}
-                  </span>
-                )}
-              </div>
-            </div>
-            <div className="flex items-center gap-2 shrink-0">
-              <button
-                onClick={() => { onClose(); if (preview) onOpenEditor(preview.id); }}
-                className="flex items-center gap-1.5 h-8 px-3 rounded-lg text-[12px] font-semibold border border-border bg-background hover:bg-slate-50 transition-colors"
-              >
-                <ExternalLink className="h-3 w-3" />
-                Open in Editor
-              </button>
-              <button
-                onClick={onClose}
-                className="h-8 w-8 flex items-center justify-center rounded-lg border border-border hover:bg-slate-50 transition-colors"
-              >
-                <X className="h-3.5 w-3.5 text-muted-foreground" />
-              </button>
-            </div>
+    <div
+      className="fixed inset-0 z-[60] bg-slate-950/85 backdrop-blur-md flex flex-col animate-in fade-in duration-200"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      {/* ── Toolbar ── */}
+      <div className="shrink-0 flex items-center gap-3 px-5 h-14 border-b border-white/10 bg-slate-950/60">
+        {/* Title */}
+        <div className="flex items-center gap-2.5">
+          <div className="h-7 w-7 rounded-lg bg-white/10 flex items-center justify-center">
+            <FileText className="h-3.5 w-3.5 text-white/80" />
           </div>
-
-          {/* ── Scrollable body: Shadow DOM resume render ── */}
-          {/*
-            Layout trick: the outer scroll container (overflow-y-auto) must see the
-            VISUAL (scaled) height, not the raw A4 height. We achieve this with a
-            two-layer approach:
-              1. A layout placeholder div sized to scaled dimensions (what the scroll
-                 container measures).
-              2. An absolutely-positioned inner div that holds the real A4 element
-                 and applies the CSS scale transform (origin: top left).
-            ShadowHtml renders into a shadow root — no browsing context, no
-            extension injection, no sandboxing warnings.
-          */}
-          <div
-            ref={containerRef}
-            className="flex-1 overflow-y-auto min-h-0 bg-slate-100 flex flex-col items-center py-6 px-4"
-          >
-            {preview?.html ? (
-              /* Layout placeholder — sized to the VISUAL scaled dimensions */
-              <div
-                style={{
-                  width: Math.round(A4_W * scale),
-                  height: Math.round(A4_H * scale),
-                  position: "relative",
-                  flexShrink: 0,
-                  overflow: "hidden",
-                }}
-              >
-                {/* Actual A4 content — CSS-scaled from top-left origin */}
-                <div
-                  style={{
-                    width: A4_W,
-                    height: A4_H,
-                    transform: `scale(${scale})`,
-                    transformOrigin: "top left",
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                  }}
-                >
-                  <ShadowHtml
-                    html={preview.html}
-                    style={{ width: A4_W, height: A4_H, display: "block", overflow: "hidden" }}
-                  />
-                </div>
-              </div>
-            ) : (
-              <div className="flex items-center justify-center h-full">
-                <Loader2 className="h-6 w-6 text-slate-400 animate-spin" />
-              </div>
+          <div>
+            <div className="text-sm font-semibold text-white/90 truncate max-w-[220px]">
+              {preview.title || "Resume Preview"}
+            </div>
+            {preview.template && (
+              <div className="text-[10px] font-medium text-white/40 -mt-0.5">{preview.template}</div>
             )}
           </div>
         </div>
-      </DialogContent>
-    </Dialog>
+
+        <div className="ml-auto flex items-center gap-1.5">
+          {/* Fit-mode toggle */}
+          <div className="flex items-center bg-white/10 rounded-lg p-0.5">
+            {(["fit-page", "fit-width", "custom"] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => { if (m === "custom") { setCustomScale(1); } setMode(m); }}
+                className={cn(
+                  "h-7 px-2.5 rounded-md text-[11px] font-semibold transition-colors",
+                  mode === m ? "bg-white text-slate-900" : "text-white/70 hover:text-white",
+                )}
+              >
+                {m === "fit-page" ? "Fit page" : m === "fit-width" ? "Fit width" : "100%"}
+              </button>
+            ))}
+          </div>
+
+          {/* Zoom */}
+          <div className="flex items-center gap-0.5 bg-white/10 rounded-lg p-0.5">
+            <button
+              onClick={() => adjustZoom(-0.1)}
+              className="h-7 w-7 rounded-md flex items-center justify-center text-white/80 hover:bg-white/10"
+              title="Zoom out"
+            >
+              <ZoomOut className="h-3.5 w-3.5" />
+            </button>
+            <span className="text-[11px] font-semibold text-white/90 tabular-nums w-11 text-center">
+              {Math.round(effectiveScale * 100)}%
+            </span>
+            <button
+              onClick={() => adjustZoom(0.1)}
+              className="h-7 w-7 rounded-md flex items-center justify-center text-white/80 hover:bg-white/10"
+              title="Zoom in"
+            >
+              <ZoomIn className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          {/* Open in Editor */}
+          <button
+            onClick={() => { onClose(); onOpenEditor(preview.id); }}
+            className="flex items-center gap-1.5 h-8 px-3 rounded-lg text-[12px] font-semibold bg-white/10 text-white/80 hover:bg-white/20 transition-colors border border-white/10"
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+            Open in Editor
+          </button>
+
+          {/* Close */}
+          <button
+            onClick={onClose}
+            className="h-8 w-8 rounded-lg flex items-center justify-center text-white/80 hover:bg-white/10 transition-colors ml-1"
+            title="Close (Esc)"
+          >
+            <Minimize2 className="h-4 w-4" />
+          </button>
+        </div>
+      </div>
+
+      {/* ── Document stage ── */}
+      <div
+        ref={containerRef}
+        className="flex-1 overflow-auto px-8 py-8 flex flex-col items-center justify-start"
+        onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      >
+        {preview.html ? (
+          <div
+            className="bg-white shadow-[0_30px_80px_-20px_rgba(0,0,0,0.6),0_8px_24px_-8px_rgba(0,0,0,0.4)] rounded-sm ring-1 ring-black/5 mx-auto"
+            style={{
+              width:     Math.round(A4_W * effectiveScale),
+              height:    Math.round(contentHeight * effectiveScale),
+              flexShrink: 0,
+              position: "relative",
+            }}
+          >
+            <IframeHtml
+              html={preview.html}
+              onContentHeight={setContentHeight}
+              style={{
+                width:  A4_W,
+                height: contentHeight,
+                transform: `scale(${effectiveScale})`,
+                transformOrigin: "top left",
+                position: "absolute",
+                top: 0,
+                left: 0,
+              }}
+            />
+          </div>
+        ) : (
+          <div className="flex items-center justify-center h-full">
+            <Loader2 className="h-6 w-6 text-white/40 animate-spin" />
+          </div>
+        )}
+      </div>
+
+      {/* ── Footer hint ── */}
+      <div className="shrink-0 px-5 h-9 border-t border-white/10 bg-slate-950/60 flex items-center text-[11px] text-white/50">
+        Press <kbd className="mx-1.5 px-1.5 py-0.5 rounded bg-white/10 text-white/70 text-[10px] font-mono">Esc</kbd> to close · Click backdrop to dismiss
+      </div>
+    </div>
   );
 }
 
@@ -509,23 +627,101 @@ function ResumePreviewDialog({
 
 function SkeletonCard() {
   return (
-    <div className="flex flex-col bg-white border border-border rounded-xl p-5 gap-4">
-      <div className="flex items-center justify-between">
-        <div className="h-3 w-20 rounded bg-slate-100 animate-pulse" />
-        <div className="h-5 w-16 rounded-md bg-slate-100 animate-pulse" />
-      </div>
-      <div className="flex items-start gap-3">
-        <div className="h-10 w-10 rounded-lg bg-slate-100 animate-pulse shrink-0" />
-        <div className="flex-1 space-y-2 pt-0.5">
+    <div className="flex flex-col bg-white border border-border rounded-2xl overflow-hidden">
+      {/* Thumbnail placeholder */}
+      <div className="bg-slate-100 animate-pulse" style={{ height: THUMB_H }} />
+      {/* Body */}
+      <div className="flex flex-col gap-3 p-4">
+        <div className="h-2 w-16 rounded-full bg-slate-100 animate-pulse" />
+        <div className="space-y-1.5">
           <div className="h-3.5 w-3/4 rounded bg-slate-100 animate-pulse" />
-          <div className="h-3 w-1/3 rounded bg-slate-100 animate-pulse" />
+          <div className="h-3 w-1/2 rounded bg-slate-100 animate-pulse" />
         </div>
+        <div className="grid grid-cols-2 gap-3 mt-0.5">
+          <div className="space-y-1">
+            <div className="h-2 w-12 rounded bg-slate-100 animate-pulse" />
+            <div className="h-2.5 w-16 rounded bg-slate-100 animate-pulse" />
+          </div>
+          <div className="space-y-1">
+            <div className="h-2 w-12 rounded bg-slate-100 animate-pulse" />
+            <div className="h-2.5 w-20 rounded bg-slate-100 animate-pulse" />
+          </div>
+        </div>
+        <div className="h-8 w-full rounded-xl bg-slate-100 animate-pulse mt-1" />
       </div>
-      <div className="h-3 w-2/5 rounded bg-slate-100 animate-pulse" />
-      <div className="h-8 w-full rounded-lg bg-slate-100 animate-pulse mt-1" />
     </div>
   );
 }
+
+// ── AI Capability Tools ────────────────────────────────────────────────────
+
+const AI_TOOLS = [
+  {
+    icon: Rocket,
+    label: "JD Tailor",
+    description: "Match resume to a job description",
+    href: "/resume/build",
+    // teal
+    bg: "bg-emerald-50",
+    border: "border-emerald-100",
+    iconBg: "bg-emerald-100/60 ring-emerald-200",
+    iconColor: "text-emerald-600",
+    labelColor: "text-emerald-700",
+    descColor: "text-emerald-600/70",
+  },
+  {
+    icon: Wand2,
+    label: "Rewrite Bullets",
+    description: "Sharpen every bullet with AI",
+    href: "/resume/build",
+    // violet
+    bg: "bg-violet-50",
+    border: "border-violet-100",
+    iconBg: "bg-violet-100/60 ring-violet-200",
+    iconColor: "text-violet-600",
+    labelColor: "text-violet-700",
+    descColor: "text-violet-600/70",
+  },
+  {
+    icon: ScanText,
+    label: "ATS Score",
+    description: "See your match score + gaps",
+    href: "/resume/ats-analysis",
+    // amber
+    bg: "bg-amber-50",
+    border: "border-amber-100",
+    iconBg: "bg-amber-100/60 ring-amber-200",
+    iconColor: "text-amber-600",
+    labelColor: "text-amber-700",
+    descColor: "text-amber-600/70",
+  },
+  {
+    icon: Mail,
+    label: "Cover Letter",
+    description: "Draft a matching cover letter",
+    href: "/resume/cover-letter",
+    // sky blue
+    bg: "bg-sky-50",
+    border: "border-sky-100",
+    iconBg: "bg-sky-100/60 ring-sky-200",
+    iconColor: "text-sky-600",
+    labelColor: "text-sky-700",
+    descColor: "text-sky-600/70",
+  },
+  {
+    icon: KeyRound,
+    label: "Keyword Inject",
+    description: "Add missing keywords naturally",
+    href: "/resume/build",
+    // rose
+    bg: "bg-rose-50",
+    border: "border-rose-100",
+    iconBg: "bg-rose-100/60 ring-rose-200",
+    iconColor: "text-rose-600",
+    labelColor: "text-rose-700",
+    descColor: "text-rose-600/70",
+  },
+] as const;
 
 export default function BuildResume() {
   const { getToken, isLoaded, isSignedIn } = useAuth();
@@ -549,6 +745,8 @@ export default function BuildResume() {
   const [isDeleting, setIsDeleting]         = useState(false);
   const [previewState, setPreviewState]     = useState<PreviewState | null>(null);
   const [previewLoadingId, setPreviewLoadingId] = useState<string | null>(null);
+  const [duplicatingId, setDuplicatingId]   = useState<string | null>(null);
+  const [downloadingId, setDownloadingId]   = useState<string | null>(null);
 
   // ── Resolve userId (fast path: localStorage, slow path: userSynced event) ──
   useEffect(() => {
@@ -704,6 +902,76 @@ export default function BuildResume() {
     }
   };
 
+  // ── Duplicate resume ────────────────────────────────────────────────────
+  const handleDuplicate = useCallback(
+    async (id: string) => {
+      if (duplicatingId) return;
+      setDuplicatingId(id);
+      try {
+        const token = await getToken();
+        const res = await fetch(ENDPOINTS.resumeBuilderGet(id), {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error || "Failed to load resume");
+        const r = json.resume ?? json;
+        const saveRes = await fetch(ENDPOINTS.resumeBuilderSave(), {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            userId,
+            title: `${r.title} (Copy)`,
+            templateId: r.templateId,
+            templateCode: r.templateCode ?? null,
+            fields: r.fields,
+            sections: r.sections ?? [],
+            jobDescription: r.jobDescription ?? "",
+            jobTitle: r.jobTitle ?? "",
+            company: r.company ?? "",
+          }),
+        });
+        if (!saveRes.ok) throw new Error("Failed to duplicate");
+        rawCacheRef.current = null;
+        if (userId) await loadResumes(userId);
+      } catch (err) {
+        console.error("[BuildResume] duplicate error:", err);
+      } finally {
+        setDuplicatingId(null);
+      }
+    },
+    [duplicatingId, getToken, loadResumes, userId],
+  );
+
+  // ── Download PDF ─────────────────────────────────────────────────────────
+  const handleDownload = useCallback(
+    async (id: string) => {
+      if (downloadingId) return;
+      setDownloadingId(id);
+      try {
+        const token = await getToken();
+        const res = await fetch(ENDPOINTS.resumeBuilderExportPdf(), {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ resumeId: id }),
+        });
+        if (!res.ok) throw new Error("Export failed");
+        const blob = await res.blob();
+        const entry = allEntries.find((e) => e.id === id);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${entry?.title ?? "resume"}.pdf`;
+        a.click();
+        URL.revokeObjectURL(url);
+      } catch (err) {
+        console.error("[BuildResume] download error:", err);
+      } finally {
+        setDownloadingId(null);
+      }
+    },
+    [downloadingId, getToken, allEntries],
+  );
+
   // ── Preview resume (client-side rendering) ────────────────────────────────
   const handlePreview = useCallback(
     async (id: string) => {
@@ -763,48 +1031,131 @@ export default function BuildResume() {
     );
   }
 
-  // ── All-empty state ────────────────────────────────────────────────────────
-  if (!isLoading && allEntries.length === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center py-24 text-center">
-        <div className="h-12 w-12 rounded-xl bg-slate-100 border border-border flex items-center justify-center mb-4">
-          <FileText className="h-5 w-5 text-slate-400" />
-        </div>
-        <p className="text-[14px] font-semibold text-foreground">No resumes yet</p>
-        <p className="text-[12px] text-muted-foreground mt-1.5 max-w-[240px] leading-relaxed">
-          Click <strong>Build Resume</strong> above to create your first resume.
-        </p>
-      </div>
-    );
-  }
+  // ── All-empty state — handled inline in main render ───────────────────────
 
   // ── Main render ────────────────────────────────────────────────────────────
   return (
     <>
-      <div className="space-y-5">
+      <div className="space-y-6">
+
+        {/* ── Page header ── */}
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <div className="flex items-center gap-2.5 mb-1">
+              <h1 className="text-[22px] font-bold text-foreground tracking-tight">Resume Studio</h1>
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-brand/10 text-brand text-[10px] font-semibold ring-1 ring-brand/20">
+                <Sparkles className="h-2.5 w-2.5" />
+                AI
+              </span>
+            </div>
+            <p className="text-[13px] text-muted-foreground max-w-[480px] leading-relaxed">
+              Build, tailor, and manage your resumes. Every resume here can be enhanced with AI in seconds.
+            </p>
+          </div>
+          <BuildResumeDialog />
+        </div>
+
+        {/* ── Hero banner ── */}
+        <div className="relative rounded-2xl border border-border bg-gradient-to-br from-slate-50 via-white to-slate-50 overflow-hidden px-7 py-6">
+          {/* Subtle grid pattern */}
+          <div
+            className="absolute inset-0 opacity-[0.035] pointer-events-none"
+            style={{
+              backgroundImage:
+                "linear-gradient(to right,#64748b 1px,transparent 1px),linear-gradient(to bottom,#64748b 1px,transparent 1px)",
+              backgroundSize: "28px 28px",
+            }}
+          />
+          <div className="relative flex items-center justify-between gap-6 flex-wrap">
+            <div className="flex-1 min-w-0">
+              <p className="text-[10px] font-bold uppercase tracking-[0.12em] text-muted-foreground/60 mb-2.5">
+                AI-POWERED RESUME STUDIO
+              </p>
+              <h2 className="text-[20px] font-bold text-foreground leading-tight mb-2">
+                Build and tailor your resume{" "}
+                <span className="text-brand">with AI assistance</span>
+              </h2>
+              <p className="text-[13px] text-muted-foreground max-w-[420px] leading-relaxed">
+                Start from scratch or enhance an existing resume. AI rewrites bullets,
+                scores ATS match, and drafts cover letters for every role you apply to.
+              </p>
+            </div>
+            <div className="flex items-center gap-5 shrink-0">
+              <div className="text-center">
+                <p className="text-[10px] text-muted-foreground/60 font-medium uppercase tracking-wide mb-0.5">Resumes</p>
+                <p className="text-[22px] font-bold text-foreground tabular-nums">{allEntries.length}</p>
+              </div>
+              <div className="w-px h-10 bg-border" />
+              <div className="text-center">
+                <p className="text-[10px] text-muted-foreground/60 font-medium uppercase tracking-wide mb-0.5">Completed</p>
+                <p className="text-[22px] font-bold text-brand tabular-nums">
+                  {allEntries.filter((e) => e.status === "completed").length}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* ── AI Capabilities ── */}
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-[10px] font-bold uppercase tracking-[0.12em] text-muted-foreground/60 flex items-center gap-1.5">
+              <Sparkles className="h-3 w-3" />
+              AI CAPABILITIES
+            </p>
+            <p className="text-[11px] text-muted-foreground/50">Click any tool to get started</p>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5">
+            {AI_TOOLS.map(({ icon: Icon, label, description, href, bg, border, iconBg, iconColor, labelColor, descColor }) => (
+              <Link
+                key={label}
+                to={href}
+                className={cn(
+                  "group flex flex-col gap-2.5 p-3.5 rounded-xl border transition-all duration-150 hover:shadow-sm hover:brightness-[0.97]",
+                  bg, border,
+                )}
+              >
+                <div className={cn("h-8 w-8 rounded-lg flex items-center justify-center ring-1 shrink-0 transition-transform group-hover:scale-105", iconBg, iconColor)}>
+                  <Icon className="h-4 w-4" />
+                </div>
+                <div>
+                  <p className={cn("text-[12px] font-semibold leading-tight", labelColor)}>{label}</p>
+                  <p className={cn("text-[11px] mt-0.5 leading-snug", descColor)}>{description}</p>
+                </div>
+              </Link>
+            ))}
+          </div>
+        </div>
+
+        {/* ── Divider ── */}
+        <div className="flex items-center gap-3">
+          <div className="flex-1 border-t border-border/60" />
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/40">Your Resumes</p>
+          <div className="flex-1 border-t border-border/60" />
+        </div>
 
         {/* ── Toolbar ── */}
-        <div className="flex items-center gap-3 flex-wrap">
+        <div className="flex items-center gap-2.5 flex-wrap -mt-1">
 
           {/* Search */}
-          <div className="relative flex-1 min-w-[200px] max-w-xs">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+          <div className="relative flex-1 min-w-[180px] max-w-[280px]">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/60 pointer-events-none" />
             <input
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search resumes…"
-              className="w-full h-9 pl-9 pr-3 rounded-lg border border-border bg-background text-[13px] placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
+              className="w-full h-9 pl-9 pr-3 rounded-xl border border-border bg-background text-[13px] placeholder:text-muted-foreground/40 focus:outline-none focus:ring-1 focus:ring-ring transition-shadow"
             />
           </div>
 
           {/* Sort dropdown */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <button className="flex items-center gap-2 h-9 px-3 rounded-lg border border-border bg-background text-[13px] text-foreground hover:bg-slate-50 transition-colors whitespace-nowrap">
+              <button className="flex items-center gap-2 h-9 px-3.5 rounded-xl border border-border bg-background text-[12px] font-medium text-foreground hover:bg-slate-50 transition-colors whitespace-nowrap">
                 <ArrowUpDown className="h-3.5 w-3.5 text-muted-foreground" />
                 {SORT_LABELS[sortBy]}
-                <span className="text-[10px] text-muted-foreground">{sortOrder === "asc" ? "↑" : "↓"}</span>
+                <span className="text-[11px] text-muted-foreground font-normal">{sortOrder === "asc" ? "↑" : "↓"}</span>
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-44">
@@ -828,13 +1179,13 @@ export default function BuildResume() {
             </DropdownMenuContent>
           </DropdownMenu>
 
-          {/* Build Resume button + count — pushed to the right as a group */}
-          <div className="ml-auto flex items-center gap-3">
-            <BuildResumeDialog />
-            <span className="text-[12px] text-muted-foreground whitespace-nowrap">
-              {sorted.length} {sorted.length === 1 ? "resume" : "resumes"}
-            </span>
-          </div>
+          {/* Spacer */}
+          <div className="flex-1" />
+
+          {/* Resume count */}
+          <span className="text-[12px] text-muted-foreground whitespace-nowrap tabular-nums">
+            {sorted.length} {sorted.length === 1 ? "resume" : "resumes"}
+          </span>
         </div>
 
         {/* ── Search empty state ── */}
@@ -846,6 +1197,16 @@ export default function BuildResume() {
             <p className="text-[13px] font-medium text-foreground">No results for "{search}"</p>
             <p className="text-[12px] text-muted-foreground mt-1">Try a different search term.</p>
           </div>
+        ) : paginated.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-20 text-center">
+            <div className="h-12 w-12 rounded-2xl bg-slate-100 border border-border flex items-center justify-center mb-4">
+              <FileText className="h-5 w-5 text-slate-400" />
+            </div>
+            <p className="text-[14px] font-semibold text-foreground">No resumes yet</p>
+            <p className="text-[12px] text-muted-foreground mt-1.5 max-w-[240px] leading-relaxed">
+              Click <strong>Build Resume</strong> above to get started.
+            </p>
+          </div>
         ) : (
           /* ── Card grid ── */
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -855,9 +1216,13 @@ export default function BuildResume() {
                 resume={resume}
                 isOpening={openingId === resume.id}
                 isLoadingPreview={previewLoadingId === resume.id}
+                isDuplicating={duplicatingId === resume.id}
+                isDownloading={downloadingId === resume.id}
                 onOpen={handleOpen}
                 onDelete={(id, title) => setDeleteTarget({ id, title })}
                 onPreview={handlePreview}
+                onDuplicate={handleDuplicate}
+                onDownload={handleDownload}
               />
             ))}
           </div>
@@ -885,7 +1250,6 @@ export default function BuildResume() {
                 <ChevronLeft className="h-3.5 w-3.5" />
               </button>
 
-              {/* Windowed page numbers (max 5 visible) */}
               {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
                 const start = Math.max(1, Math.min(page - 2, totalPages - 4));
                 const pg    = start + i;

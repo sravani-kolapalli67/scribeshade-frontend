@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { FileText, X } from "lucide-react";
+import { FileText, PencilLine, X } from "lucide-react";
 import {
   Select,
   SelectContent,
@@ -9,6 +9,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { useAuth } from "@clerk/clerk-react";
 
 export interface Resume {
   id: string;
@@ -20,6 +21,8 @@ export interface Resume {
   userId?: string;
   score?: number;
   ats: boolean;
+  /** "uploaded" for file-based resumes, "builder" for builder resumes */
+  source?: "uploaded" | "builder";
   atsAnalysis?: {
     id: string;
     score: number;
@@ -37,9 +40,12 @@ interface ResumeSelectorProps {
   value?: string;
   className?: string;
   filter?: (resume: Resume) => boolean;
+  /** When true, also fetches builder resumes and shows them in the list. */
+  includeBuilderResumes?: boolean;
 }
 
-export function ResumeSelector({ onSelect, onDeselect, value, filter }: ResumeSelectorProps) {
+export function ResumeSelector({ onSelect, onDeselect, value, filter, includeBuilderResumes }: ResumeSelectorProps) {
+  const { getToken } = useAuth();
   const [resumes, setResumes] = React.useState<Resume[]>([]);
   const [selectedResumeId, setSelectedResumeId] = React.useState<string>(value || "");
 
@@ -62,29 +68,45 @@ export function ResumeSelector({ onSelect, onDeselect, value, filter }: ResumeSe
     if (!id) return;
 
     setLoading(true);
-    fetch(`${import.meta.env.VITE_BACKEND_URL}/api/resume/list?userId=${id}`, {
-      method: "GET",
-      headers: {
-        "Content-Type": "application/json",
-      },
-    })
-      .then((res) => res.json())
-      .then((response) => {
-        // Handle both flat array and wrapped response formats
-        let resumeList: Resume[] = Array.isArray(response)
-          ? response
-          : (response.data ?? []);
 
-        // Apply filter if provided
-        if (filter) {
-          resumeList = resumeList.filter(filter);
-        }
+    const fetchUploaded = fetch(`${import.meta.env.VITE_BACKEND_URL}/api/resume/list?userId=${id}`, {
+      headers: { "Content-Type": "application/json" },
+    }).then((res) => res.json()).then((response): Resume[] => {
+      const list: Resume[] = Array.isArray(response) ? response : (response.data ?? []);
+      return list.map((r) => ({ ...r, source: "uploaded" as const }));
+    });
 
-        setResumes(resumeList);
+    const fetchBuilder = includeBuilderResumes
+      ? getToken().then((token) =>
+          fetch(`${import.meta.env.VITE_BACKEND_URL}/api/resume/builder/list?userId=${id}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          })
+            .then((res) => res.json())
+            .then((response): Resume[] => {
+              const list: Array<{ id: string; title?: string; createdAt?: string; updatedAt?: string }> =
+                response.resumes ?? response.data ?? (Array.isArray(response) ? response : []);
+              return list.map((r) => ({
+                id: r.id,
+                filename: r.title || "Untitled Resume",
+                path: "",
+                ats: false,
+                source: "builder" as const,
+                uploadedAt: r.updatedAt ?? r.createdAt ?? "",
+              }));
+            })
+        )
+      : Promise.resolve([] as Resume[]);
+
+    Promise.all([fetchUploaded, fetchBuilder])
+      .then(([uploaded, builder]) => {
+        let combined: Resume[] = [...uploaded, ...builder];
+        if (filter) combined = combined.filter(filter);
+        setResumes(combined);
       })
       .catch((err) => console.error("Error fetching resumes:", err))
       .finally(() => setLoading(false));
-  }, [id, filter]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, includeBuilderResumes]);
 
   const handleValueChange = (value: string) => {
     setSelectedResumeId(value);
@@ -129,10 +151,16 @@ export function ResumeSelector({ onSelect, onDeselect, value, filter }: ResumeSe
           {selectedResume && (
             <div className="flex items-center gap-3 py-1">
               <div className="flex shrink-0 items-center justify-center h-8 w-8 rounded-lg bg-muted text-muted-foreground/80">
-                <FileText className="h-5 w-5" />
+                {selectedResume.source === "builder"
+                  ? <PencilLine className="h-5 w-5" />
+                  : <FileText className="h-5 w-5" />
+                }
               </div>
               <span className="truncate text-sm font-medium text-foreground/80">
                 {selectedResume.filename}
+                {selectedResume.source === "builder" && (
+                  <span className="ml-1.5 text-[10px] font-semibold px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 border border-violet-200">Builder</span>
+                )}
               </span>
             </div>
           )}
@@ -146,9 +174,17 @@ export function ResumeSelector({ onSelect, onDeselect, value, filter }: ResumeSe
             className="py-3 px-4 focus:bg-primary/5 focus:text-primary transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-3">
-              <FileText className="h-5 w-5 text-muted-foreground" />
+              {resume.source === "builder"
+                ? <PencilLine className="h-5 w-5 text-violet-500" />
+                : <FileText className="h-5 w-5 text-muted-foreground" />
+              }
               <div className="flex flex-col">
-                <span className="text-sm font-medium">{resume.filename}</span>
+                <span className="text-sm font-medium">
+                  {resume.filename}
+                  {resume.source === "builder" && (
+                    <span className="ml-1.5 text-[10px] font-semibold px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 border border-violet-200">Builder</span>
+                  )}
+                </span>
                 <span className="text-[10px] text-muted-foreground">
                   {resume.uploadedAt}
                 </span>
@@ -169,15 +205,5 @@ export function ResumeSelector({ onSelect, onDeselect, value, filter }: ResumeSe
         </button>
       )}
     </div>
-    // <Card className={cn("w-full shadow-none border-border/50", className)}>
-    //   <CardHeader className="py-4 px-6 border-b border-border/40">
-    //     <CardTitle className="text-sm font-semibold text-foreground/90">
-    //       Resume to Use
-    //     </CardTitle>
-    //   </CardHeader>
-    //   <CardContent className="p-6">
-
-    //   </CardContent>
-    // </Card>
   );
 }
