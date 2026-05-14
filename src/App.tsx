@@ -17,7 +17,6 @@ import "./App.css";
 import { AppSidebar } from "@/components/app-sidebar";
 import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
 import { TauriReturnBanner } from "@/components/TauriReturnBanner";
-import { checkForUpdates } from "@/lib/updater";
 import Navbar from "./components/Navbar";
 
 // Lazy-load all route-level pages so each page's JS is only downloaded when
@@ -70,12 +69,6 @@ function App() {
   const location = useLocation();
   const navigate = useNavigate();
   useSyncUser();
-
-  // ── Auto-update check on launch (Tauri only) ─────────────────────────
-  useEffect(() => {
-    checkForUpdates();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // ── Auth sync: broadcast sign-out to widget
   // Navigation from widget → dashboard is handled via URL params (no event

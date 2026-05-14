@@ -1,7 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { getVersion } from "@tauri-apps/api/app";
 import { useUser, useAuth } from "@clerk/clerk-react";
-import { Activity, Wifi, WifiOff, LayoutDashboard, History, CreditCard, ExternalLink, Loader2, Cpu } from "lucide-react";
+import { Activity, Wifi, WifiOff, LayoutDashboard, History, CreditCard, ExternalLink, Loader2, Cpu, Tag, RefreshCw } from "lucide-react";
+import { checkForUpdates } from "@/lib/updater";
 import { cn } from "@/lib/utils";
 import { useCreditsBalance } from "@/hooks/useCreditsBalance";
 import { BACKEND_URL, FRONTEND_URL, APP_NAME } from "@/features/launcher/constants";
@@ -35,6 +37,11 @@ export function InspectTab() {
   const { getToken } = useAuth();
   const { balance, isLoading: isLoadingBalance } = useCreditsBalance();
   const health = useBackendHealth();
+  const [appVersion, setAppVersion] = useState<string>("…");
+
+  useEffect(() => {
+    getVersion().then(setAppVersion).catch(() => setAppVersion("—"));
+  }, []);
 
   const email =
     user?.primaryEmailAddress?.emailAddress ??
@@ -81,6 +88,20 @@ export function InspectTab() {
           <div className={row}>
             <span className={key}><Activity className="w-3.5 h-3.5 text-zinc-400" />App</span>
             <span className={val}>{APP_NAME}</span>
+          </div>
+
+          <div className={row}>
+            <span className={key}><Tag className="w-3.5 h-3.5 text-zinc-400" />Version</span>
+            <div className="flex items-center gap-2">
+              <span className={cn(val, "font-mono text-[11px]")}>v{appVersion}</span>
+              <button
+                onClick={() => checkForUpdates(true)}
+                title="Check for updates"
+                className="p-0.5 rounded text-zinc-400 hover:text-zinc-600 hover:bg-zinc-200 transition-colors"
+              >
+                <RefreshCw className="w-3 h-3" />
+              </button>
+            </div>
           </div>
 
         </div>
