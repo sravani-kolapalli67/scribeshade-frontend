@@ -18,10 +18,11 @@ import {
 } from "./steps/Step1_JobDetails";
 import { Step2_ResumeSelector } from "./steps/Step2_ResumeSelector";
 import { Step3_DocumentSelector } from "./steps/Step3_DocumentSelector";
-import { Step4_LanguageAISettings } from "./steps/Step4_LanguageAISettings";
-import { Step5_AutoGenerateAI } from "./steps/Step5_AutoGenerateAI";
-import { Step6_SaveTranscript } from "./steps/Step6_SaveTranscript";
-import { Step7_Review } from "./steps/Step7_Review";
+import { Step4_AIProjects } from "./steps/Step4_AIProjects";
+import { Step4_LanguageAISettings as Step5_LanguageAISettings } from "./steps/Step4_LanguageAISettings";
+import { Step5_AutoGenerateAI as Step6_AutoGenerateAI } from "./steps/Step5_AutoGenerateAI";
+import { Step6_SaveTranscript as Step7_SaveTranscript } from "./steps/Step6_SaveTranscript";
+import { Step7_Review as Step8_Review } from "./steps/Step7_Review";
 import { type Resume } from "@/components/Resume/ResumeSelector";
 import { type Document } from "@/components/Document/DocumentSelector";
 import { toast } from "sonner";
@@ -29,7 +30,7 @@ import { useCreditsBalance } from "@/hooks/useCreditsBalance";
 import { OutOfCreditsDialog } from "@/components/Billing/OutOfCreditsDialog";
 import { BuyCreditsDialog } from "@/components/Billing/BuyCreditsDialog";
 
-type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7;
+type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 
 interface CreateSessionDialogProps {
   isFree?: boolean;
@@ -41,6 +42,7 @@ const INITIAL_SESSION_DATA = {
   jobDescription: "",
   selectedResume: null as Resume | null,
   selectedDocument: null as Document | null,
+  selectedProjectIds: [] as string[],
   language: "English",
   simpleLanguage: false,
   extraContext: "",
@@ -75,7 +77,7 @@ export default function CreateSessionDialog({
   };
 
   const handleNext = () => {
-    if (step < 7) {
+    if (step < 8) {
       setStep((curr) => (curr + 1) as Step);
     }
   };
@@ -109,6 +111,7 @@ export default function CreateSessionDialog({
     formData.append("jobDescription", sessionData.jobDescription);
     formData.append("resumeId", sessionData.selectedResume?.id || "");
     formData.append("documentId", sessionData.selectedDocument?.id || "");
+    formData.append("projectIds", JSON.stringify(sessionData.selectedProjectIds));
     formData.append("language", sessionData.language);
     formData.append("simpleLanguage", sessionData.simpleLanguage.toString());
     formData.append("extraContext", sessionData.extraContext);
@@ -221,19 +224,20 @@ export default function CreateSessionDialog({
                   {step === 1 && "Job Details"}
                   {step === 2 && "Select Resume"}
                   {step === 3 && "Extra Documents"}
-                  {step === 4 && "AI Customization"}
-                  {step === 5 && "AI Response"}
-                  {step === 6 && "Save Session"}
-                  {step === 7 && "Final Review"}
+                  {step === 4 && "AI Projects"}
+                  {step === 5 && "AI Customization"}
+                  {step === 6 && "AI Response"}
+                  {step === 7 && "Save Session"}
+                  {step === 8 && "Final Review"}
                 </DialogTitle>
                 <p className="text-sm text-muted-foreground">
-                  Step {step} of 7
+                  Step {step} of 8
                 </p>
               </div>
             </div>
 
             <div className="flex items-center gap-1 mb-0">
-              {[1, 2, 3, 4, 5, 6, 7].map((i) => (
+              {[1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
                 <div
                   key={i}
                   className={cn(
@@ -269,28 +273,35 @@ export default function CreateSessionDialog({
             )}
 
             {step === 4 && (
-              <Step4_LanguageAISettings
+              <Step4_AIProjects
+                selectedProjectIds={sessionData.selectedProjectIds}
+                onChange={(ids) => updateData("selectedProjectIds", ids)}
+              />
+            )}
+
+            {step === 5 && (
+              <Step5_LanguageAISettings
                 data={sessionData}
                 onChange={updateData}
               />
             )}
 
-            {step === 5 && (
-              <Step5_AutoGenerateAI
+            {step === 6 && (
+              <Step6_AutoGenerateAI
                 autoGenerate={sessionData.autoGenerateAI}
                 onChange={(v) => updateData("autoGenerateAI", v)}
               />
             )}
 
-            {step === 6 && (
-              <Step6_SaveTranscript
+            {step === 7 && (
+              <Step7_SaveTranscript
                 saveTranscript={sessionData.saveTranscript}
                 onChange={(v) => updateData("saveTranscript", v)}
               />
             )}
 
-            {step === 7 && (
-              <Step7_Review
+            {step === 8 && (
+              <Step8_Review
                 data={{
                   companyName: sessionData.companyName,
                   isFree,
@@ -301,7 +312,7 @@ export default function CreateSessionDialog({
               />
             )}
 
-            {step < 7 && (
+            {step < 8 && (
               <div className="flex items-center justify-between pt-6 border-t mt-6">
                 <Button
                   variant="outline"
@@ -325,7 +336,7 @@ export default function CreateSessionDialog({
                   }
                   className="rounded-xl gap-2 h-11 px-10 bg-black dark:bg-white text-white dark:text-black font-bold shadow-lg hover:shadow-xl active:scale-95 transition-all"
                 >
-                  Next
+                  {step === 4 && sessionData.selectedProjectIds.length === 0 ? "Skip" : "Next"}
                   <ChevronRight className="h-4 w-4" />
                 </Button>
               </div>
