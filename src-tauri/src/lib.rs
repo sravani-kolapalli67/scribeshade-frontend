@@ -1,4 +1,4 @@
-use tauri::{Manager, Emitter, WebviewWindowBuilder, WebviewUrl, AppHandle, Window, PhysicalPosition, LogicalSize, command};
+use tauri::{Manager, Emitter, WebviewWindowBuilder, WebviewUrl, AppHandle, Window, PhysicalPosition, PhysicalSize, command};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
 use screenshots::Screen;
@@ -12,8 +12,6 @@ mod deepgram;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use deepgram::{DeepgramConfig, SttChannel};
 
-/// Monotonic version counter — every new animation request bumps this.
-static ANIM_VERSION: AtomicU64 = AtomicU64::new(0);
 static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 // ── Native audio WebSocket state ─────────────────────────────────────────────
@@ -266,69 +264,64 @@ async fn show_mini_top_center(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?,
     };
 
-    window
-        .set_size(LogicalSize::new(700u32, 222u32))
-        .map_err(|e| e.to_string())?;
-
+    // Expand mini to fill the entire primary monitor — same architecture as
+    // the launcher window.  The React overlay positions the widget card
+    // absolutely at top-center; the fullscreen transparent host ensures
+    // popups / tooltips / SessionMenu can never be clipped by the OS frame.
     let monitor = window
         .primary_monitor()
         .map_err(|e| e.to_string())?
         .ok_or("no primary monitor")?;
 
     let screen = monitor.size();
-    let size = window.outer_size().map_err(|e| e.to_string())?;
-
-    let x = (screen.width as i32 - size.width as i32) / 2;
-    let y = 10;
+    let mon_pos = monitor.position();
 
     window
-        .set_position(PhysicalPosition { x, y })
+        .set_size(PhysicalSize::new(screen.width, screen.height))
+        .map_err(|e| e.to_string())?;
+
+    window
+        .set_position(PhysicalPosition { x: mon_pos.x, y: mon_pos.y })
         .map_err(|e| e.to_string())?;
     window.set_minimizable(false).map_err(|e| e.to_string())?;
     window.set_maximizable(false).map_err(|e| e.to_string())?;
 
-    // ── macOS: atomic level + show in one run_on_main_thread block ────────
+    // ── macOS: atomic level + shadow/opacity + show ───────────────────────
     //
-    // PROBLEM: `run_on_main_thread` from setup() (which runs on the main
-    // thread) does NOT execute the closure inline — it enqueues it to the
-    // Winit event-loop user-event queue for the NEXT iteration. Any Tauri
-    // call after `run_on_main_thread` that dispatches via the same path
-    // (e.g. set_focus → makeKeyAndOrderFront at the current level 3) will
-    // race with our closure and may show the window at level 3 first.
+    // Identical to show_launcher_widget.  run_on_main_thread enqueues to the
+    // Winit event-loop user-event queue so ALL show/level/behavior work runs
+    // atomically on one tick — no level-race with set_focus.
     //
-    // SOLUTION: Do NOT call set_focus / window.show() outside this block on
-    // macOS. All show + level + collection-behavior work happens in a single
-    // closure so it executes atomically on one event-loop tick.
-    //
-    //   orderFrontRegardless — shows the window unconditionally even when
-    //     the app is not frontmost (unlike makeKeyAndOrderFront which silently
-    //     no-ops if the app is inactive).
-    //   activateIgnoringOtherApps — brings our process to the front so the
-    //     window actually receives the key-window state.
-    //
-    // NSWindowCollectionBehavior:
-    //   1   = canJoinAllSpaces       — visible on every Mission Control space
-    //   16  = stationary             — doesn't slide away on space switch
-    //   64  = ignoresCycle           — Cmd+` skips it
-    //   256 = fullScreenAuxiliary    — floats over fullscreen apps
+    // setHasShadow:false + setOpaque:false + clearColor:
+    //   A fullscreen transparent overlay MUST NOT have an NSWindow shadow —
+    //   AppKit composites a dark halo around any non-fully-transparent pixel
+    //   (the session card). clearColor also disables edge-antialiasing blend
+    //   that bleeds dark pixels at rounded corners.
     #[cfg(target_os = "macos")]
     {
         let win_clone = window.clone();
         window
             .run_on_main_thread(move || {
-                const NS_STATUS_WINDOW_LEVEL: i64 = 1;
+                const OVERLAY_LEVEL: i64 = 25; // NSStatusWindowLevel
+                // canJoinAllSpaces(1) | stationary(16) | ignoresCycle(64) | fullScreenAuxiliary(256)
+                const OVERLAY_BEHAVIOR: u64 = 1 | 16 | 64 | 256;
                 unsafe {
                     if let Ok(ns_win) = win_clone.ns_window() {
                         let ptr = ns_win as *mut objc2::runtime::AnyObject;
-                        // 1. Set level — MUST happen before the window is ordered front.
-                        let _: () = objc2::msg_send![ptr, setLevel: NS_STATUS_WINDOW_LEVEL];
-                        // 2. Collection behavior.
-                        let behavior: u64 = 1 | 16 | 64 | 256;
-                        let _: () = objc2::msg_send![ptr, setCollectionBehavior: behavior];
-                        // 3. Show regardless of app-active state (NSApp.active not required).
-                        //    This is the correct call for floating overlay windows.
+                        // 1. Level — must be set before orderFront.
+                        let _: () = objc2::msg_send![ptr, setLevel: OVERLAY_LEVEL];
+                        // 2. Collection behavior (fullScreenAuxiliary is critical).
+                        let _: () = objc2::msg_send![ptr, setCollectionBehavior: OVERLAY_BEHAVIOR];
+                        // 3. Kill native shadow + force clear background.
+                        let _: () = objc2::msg_send![ptr, setHasShadow: false];
+                        let _: () = objc2::msg_send![ptr, setOpaque: false];
+                        let ns_color_cls = objc2::class!(NSColor);
+                        let clear_color: *mut objc2::runtime::AnyObject =
+                            objc2::msg_send![ns_color_cls, clearColor];
+                        let _: () = objc2::msg_send![ptr, setBackgroundColor: clear_color];
+                        // 4. Show regardless of app-active state.
                         let _: () = objc2::msg_send![ptr, orderFrontRegardless];
-                        // 4. Activate the app so the widget can receive key events.
+                        // 5. Activate so the widget receives key events.
                         let app_cls = objc2::class!(NSApplication);
                         let ns_app: *mut objc2::runtime::AnyObject =
                             objc2::msg_send![app_cls, sharedApplication];
@@ -370,61 +363,30 @@ async fn show_mini_top_center(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Animate the mini overlay to one of three discrete states.
+/// No-op stub kept for API compat.
 ///
-/// React owns the *intent* (idle bar / expanded panel / collapsed badge)
-/// and a content-derived `height` for the expanded case. Rust owns the
-/// smooth, monotonic eased animation — keeping per-frame `set_size` calls
-/// off the JS thread and out of the IPC bus.
+/// The mini window is now a fullscreen transparent overlay (same architecture
+/// as the launcher window). Badge / bar / expanded state transitions are
+/// managed entirely by React via CSS — the native window never resizes.
 #[tauri::command]
 async fn set_mini_state(
-    app: AppHandle,
-    state: String,
-    height: Option<u32>,
+    _app: AppHandle,
+    _state: String,
+    _height: Option<u32>,
 ) -> Result<(), String> {
-    let win = app.get_webview_window("mini").ok_or("mini window missing")?;
+    Ok(())
+}
 
-    let (target_w, target_h): (u32, u32) = match state.as_str() {
-        "badge"    => (180, 36),
-        "bar"      => (700, 222),
-        "expanded" => (700, height.unwrap_or(185).clamp(120, 720)),
-        other      => return Err(format!("unknown mini state: {other}")),
-    };
-
-    let scale = win.scale_factor().map_err(|e| e.to_string())?;
-    let cur = win.inner_size().map_err(|e| e.to_string())?;
-    let cur_w = (cur.width  as f64 / scale).round() as u32;
-    let cur_h = (cur.height as f64 / scale).round() as u32;
-    if cur_w == target_w && cur_h == target_h {
-        return Ok(());
-    }
-
-    let version = ANIM_VERSION.fetch_add(1, Ordering::SeqCst) + 1;
-    let win_clone = win.clone();
-
-    tauri::async_runtime::spawn(async move {
-        let start = std::time::Instant::now();
-        let duration_ms: f32 = 220.0;
-        let start_w = cur_w as f32;
-        let start_h = cur_h as f32;
-        let dx = target_w as f32 - start_w;
-        let dy = target_h as f32 - start_h;
-
-        loop {
-            if ANIM_VERSION.load(Ordering::SeqCst) != version { return; }
-
-            let elapsed = start.elapsed().as_millis() as f32;
-            let t = (elapsed / duration_ms).min(1.0);
-            let eased = 1.0 - (1.0 - t).powi(3); // ease-out cubic
-            let w = (start_w + dx * eased).round() as u32;
-            let h = (start_h + dy * eased).round() as u32;
-            let _ = win_clone.set_size(LogicalSize::new(w, h));
-
-            if t >= 1.0 { return; }
-            tokio::time::sleep(std::time::Duration::from_millis(8)).await;
-        }
-    });
-
+/// No-op stub kept for API compat.
+///
+/// The mini window is now fullscreen — popups can never clip, so the
+/// expand-before-render pattern is no longer needed.
+#[tauri::command]
+async fn set_mini_size_instant(
+    _app: AppHandle,
+    _width: u32,
+    _height: u32,
+) -> Result<(), String> {
     Ok(())
 }
 
@@ -2008,6 +1970,25 @@ fn set_session_active(active: bool) {
     SESSION_ACTIVE.store(active, Ordering::SeqCst);
 }
 
+/// Toggle content protection (screen-capture block) at runtime across all
+/// windows without requiring a restart.
+///
+/// Private Mode ON  (protected = true):  window disappears from screenshots,
+///   screen-share, and screen-recording on macOS and Windows.
+/// Private Mode OFF (protected = false): normal shareable window.
+///
+/// Called from the frontend when the user toggles the Private switch.
+#[command]
+async fn toggle_content_protection(app: AppHandle, protected: bool) -> Result<(), String> {
+    for label in ["launcher", "mini", "main"] {
+        if let Some(win) = app.get_webview_window(label) {
+            win.set_content_protected(protected)
+                .map_err(|e| format!("set_content_protected({label}): {e}"))?;
+        }
+    }
+    Ok(())
+}
+
 #[command]
 fn handle_launcher_click(app: AppHandle) -> Result<(), String> {
     if SESSION_ACTIVE.load(Ordering::SeqCst) {
@@ -2191,22 +2172,22 @@ fn show_launcher_widget(app: AppHandle) -> Result<(), String> {
         .get_webview_window("launcher")
         .ok_or("launcher window not found")?;
 
-    window
-        .set_size(LogicalSize::new(460u32, 260u32))
-        .map_err(|e| e.to_string())?;
-
     let monitor = window
         .primary_monitor()
         .map_err(|e| e.to_string())?
         .ok_or("no primary monitor")?;
 
     let screen = monitor.size();
-    let size = window.outer_size().map_err(|e| e.to_string())?;
-    let x = (screen.width as i32 - size.width as i32) / 2;
-    let y = 20i32;
+    let mon_pos = monitor.position();
+
+    // Expand launcher to fill the entire primary monitor so that the React
+    // overlay can position the card anywhere on screen without OS-level clipping.
+    window
+        .set_size(PhysicalSize::new(screen.width, screen.height))
+        .map_err(|e| e.to_string())?;
 
     window
-        .set_position(PhysicalPosition { x, y })
+        .set_position(PhysicalPosition { x: mon_pos.x, y: mon_pos.y })
         .map_err(|e| e.to_string())?;
     window.set_minimizable(false).map_err(|e| e.to_string())?;
     window.set_maximizable(false).map_err(|e| e.to_string())?;
@@ -2237,6 +2218,20 @@ fn show_launcher_widget(app: AppHandle) -> Result<(), String> {
                         // 2. canJoinAllSpaces | stationary | ignoresCycle | fullScreenAuxiliary
                         let behavior: u64 = 1 | 16 | 64 | 256;
                         let _: () = objc2::msg_send![ptr, setCollectionBehavior: behavior];
+                        // 2b. Kill native shadow + force clear background.
+                        //     A fullscreen transparent overlay must NOT have an
+                        //     NSWindow shadow — AppKit otherwise composites a
+                        //     dark halo around any non-fully-transparent pixel
+                        //     (the launcher card), which appears as the black
+                        //     irregular outline.  setOpaque:NO + clearColor
+                        //     also disables the compositor's edge antialiasing
+                        //     blend that bleeds dark pixels at rounded corners.
+                        let _: () = objc2::msg_send![ptr, setHasShadow: false];
+                        let _: () = objc2::msg_send![ptr, setOpaque: false];
+                        let ns_color_cls = objc2::class!(NSColor);
+                        let clear_color: *mut objc2::runtime::AnyObject =
+                            objc2::msg_send![ns_color_cls, clearColor];
+                        let _: () = objc2::msg_send![ptr, setBackgroundColor: clear_color];
                         // 3. Show regardless of app-active state.
                         let _: () = objc2::msg_send![ptr, orderFrontRegardless];
                         // 4. Activate so the widget can receive key events.
@@ -2279,6 +2274,31 @@ fn show_launcher_widget(app: AppHandle) -> Result<(), String> {
     window.set_focus().map_err(|e| e.to_string())?;
 
     Ok(())
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Returns the global cursor position in physical screen coordinates
+/// (relative to the top-left of the primary monitor).
+///
+/// Used by the React overlay to implement click-through hit-testing while
+/// the launcher window is in `setIgnoreCursorEvents(true)` mode — at that
+/// point the WKWebView receives zero mouse events, so the only way to know
+/// where the cursor is (and whether to re-enable interaction) is to poll
+/// the OS cursor each frame.
+#[tauri::command]
+fn get_cursor_position(app: AppHandle) -> Result<(f64, f64), String> {
+    let pos = app.cursor_position().map_err(|e| e.to_string())?;
+    Ok((pos.x, pos.y))
+}
+
+/// Toggle whether the given window passes mouse events through to whatever
+/// is below it.  When `passthrough = true`, the window becomes
+/// click-through; when `false`, it captures clicks normally.
+#[tauri::command]
+fn set_cursor_passthrough(window: Window, passthrough: bool) -> Result<(), String> {
+    window
+        .set_ignore_cursor_events(passthrough)
+        .map_err(|e| e.to_string())
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2502,33 +2522,53 @@ pub fn run() {
             if let Some(mini_win) = app.get_webview_window("mini") {
                 let mini_handle = app.handle().clone();
                 mini_win.on_window_event(move |event| {
-                    if let tauri::WindowEvent::Resized(_) = event {
-                        let mini = mini_handle.get_webview_window("mini").unwrap();
-                        if mini.is_minimized().unwrap_or(false) {
-                            let _ = mini.hide();
-                            if !SESSION_ACTIVE.load(Ordering::SeqCst) {
-                                if let Some(widget) = mini_handle.get_webview_window("launcher") {
-                                    // macOS: avoid makeKeyAndOrderFront path.
-                                    #[cfg(target_os = "macos")]
-                                    {
-                                        let w = widget.clone();
-                                        let _ = widget.run_on_main_thread(move || {
-                                            unsafe {
-                                                if let Ok(ns_win) = w.ns_window() {
-                                                    let ptr = ns_win as *mut objc2::runtime::AnyObject;
-                                                    let _: () = objc2::msg_send![ptr, orderFrontRegardless];
+                    match event {
+                        tauri::WindowEvent::Resized(_) => {
+                            let mini = mini_handle.get_webview_window("mini").unwrap();
+                            if mini.is_minimized().unwrap_or(false) {
+                                let _ = mini.hide();
+                                if !SESSION_ACTIVE.load(Ordering::SeqCst) {
+                                    if let Some(widget) = mini_handle.get_webview_window("launcher") {
+                                        // macOS: avoid makeKeyAndOrderFront path.
+                                        #[cfg(target_os = "macos")]
+                                        {
+                                            let w = widget.clone();
+                                            let _ = widget.run_on_main_thread(move || {
+                                                unsafe {
+                                                    if let Ok(ns_win) = w.ns_window() {
+                                                        let ptr = ns_win as *mut objc2::runtime::AnyObject;
+                                                        let _: () = objc2::msg_send![ptr, orderFrontRegardless];
+                                                    }
                                                 }
-                                            }
-                                        });
-                                    }
-                                    #[cfg(not(target_os = "macos"))]
-                                    {
-                                        let _ = widget.show();
-                                        let _ = widget.set_focus();
+                                            });
+                                        }
+                                        #[cfg(not(target_os = "macos"))]
+                                        {
+                                            let _ = widget.show();
+                                            let _ = widget.set_focus();
+                                        }
                                     }
                                 }
                             }
                         }
+                        // BUG FIX: Intercept close requests on the mini overlay.
+                        //
+                        // ROOT CAUSE: Calling `getCurrentWindow().close()` from the
+                        // frontend destroys the transparent + content-protected WKWebView.
+                        // During teardown the GPU compositor momentarily renders the
+                        // underlying framebuffer as solid black before the window
+                        // disappears — visible to all screen-share participants.
+                        //
+                        // FIX: Prevent the window from being destroyed. Hide it instead.
+                        // The window stays alive (just invisible) so the next session
+                        // can call show_mini_top_center without recreating anything.
+                        tauri::WindowEvent::CloseRequested { api, .. } => {
+                            api.prevent_close();
+                            if let Some(win) = mini_handle.get_webview_window("mini") {
+                                let _ = win.hide();
+                            }
+                        }
+                        _ => {}
                     }
                 });
             }
@@ -2551,18 +2591,46 @@ pub fn run() {
                 // launcher window — always shown
                 if let Some(win) = app.get_webview_window("launcher") {
                     let w = win.clone();
+                    let exit_handle = app.handle().clone();
                     win.on_window_event(move |event| {
-                        if let tauri::WindowEvent::Focused(_) = event {
-                            let ww = w.clone();
-                            let _ = w.run_on_main_thread(move || {
-                                const NS_STATUS_WINDOW_LEVEL: i64 = 25;
-                                unsafe {
-                                    if let Ok(ns_win) = ww.ns_window() {
-                                        let ptr = ns_win as *mut objc2::runtime::AnyObject;
-                                        let _: () = objc2::msg_send![ptr, setLevel: NS_STATUS_WINDOW_LEVEL];
+                        match event {
+                            tauri::WindowEvent::Focused(_) => {
+                                // Re-apply BOTH level AND collectionBehavior.
+                                // macOS can reset either property after makeKeyAndOrderFront
+                                // or a Space transition. Level alone is not enough — if
+                                // collectionBehavior loses fullScreenAuxiliary the overlay
+                                // will no longer appear above fullscreen apps.
+                                let ww = w.clone();
+                                let _ = w.run_on_main_thread(move || {
+                                    const OVERLAY_LEVEL: i64 = 25;
+                                    const OVERLAY_BEHAVIOR: u64 = 1 | 16 | 64 | 256;
+                                    unsafe {
+                                        if let Ok(ns_win) = ww.ns_window() {
+                                            let ptr = ns_win as *mut objc2::runtime::AnyObject;
+                                            let _: () = objc2::msg_send![ptr, setLevel: OVERLAY_LEVEL];
+                                            let _: () = objc2::msg_send![ptr, setCollectionBehavior: OVERLAY_BEHAVIOR];
+                                        }
                                     }
-                                }
-                            });
+                                });
+                            }
+                            // BUG FIX: Exit the process when the launcher is destroyed.
+                            //
+                            // ROOT CAUSE: With NSApplicationActivationPolicyAccessory
+                            // (no Dock icon) and skipTaskbar=true (no taskbar entry)
+                            // there is no OS-level way to reopen the app after the
+                            // launcher window is closed. The process keeps running
+                            // because the mini window (always alive, just hidden) holds
+                            // a window handle that prevents Tauri from exiting. The user
+                            // sees nothing and must kill the process via Task Manager.
+                            //
+                            // FIX: When the launcher is destroyed (user-initiated close or
+                            // any other destruction path), terminate the process cleanly.
+                            // The next app launch starts a fresh process with the widget
+                            // visible immediately.
+                            tauri::WindowEvent::Destroyed => {
+                                exit_handle.exit(0);
+                            }
+                            _ => {}
                         }
                     });
                 }
@@ -2574,14 +2642,78 @@ pub fn run() {
                         if let tauri::WindowEvent::Focused(_) = event {
                             let ww = w.clone();
                             let _ = w.run_on_main_thread(move || {
-                                const NS_STATUS_WINDOW_LEVEL: i64 = 25;
+                                const OVERLAY_LEVEL: i64 = 25;
+                                const OVERLAY_BEHAVIOR: u64 = 1 | 16 | 64 | 256;
                                 unsafe {
                                     if let Ok(ns_win) = ww.ns_window() {
                                         let ptr = ns_win as *mut objc2::runtime::AnyObject;
-                                        let _: () = objc2::msg_send![ptr, setLevel: NS_STATUS_WINDOW_LEVEL];
+                                        let _: () = objc2::msg_send![ptr, setLevel: OVERLAY_LEVEL];
+                                        let _: () = objc2::msg_send![ptr, setCollectionBehavior: OVERLAY_BEHAVIOR];
                                     }
                                 }
                             });
+                        }
+                    });
+                }
+            }
+
+            // ── macOS: Space-transition overlay reinforcement ─────────────────
+            //
+            // ROOT CAUSE: When another app enters native fullscreen macOS creates
+            // a new private compositor Space for that app. Tauri fires no window
+            // event on our windows during this transition, so the Focused-event
+            // re-application above never runs. macOS can reset NSWindowLevel and
+            // NSWindowCollectionBehavior during the Space compositor handoff,
+            // causing the overlay to disappear behind the fullscreen app.
+            //
+            // FIX: A lightweight background task re-applies level=25 +
+            // collectionBehavior (canJoinAllSpaces | stationary | ignoresCycle |
+            // fullScreenAuxiliary) to every visible overlay window every 2 seconds.
+            // The cost is two run_on_main_thread dispatches per interval — each is
+            // two ObjC msg_send calls. CPU impact is negligible.
+            //
+            // This handles: fullscreen Space entry/exit, Mission Control, Exposé,
+            // hot corners, and any other event that silently resets window
+            // compositor properties outside of Tauri's event model.
+            #[cfg(target_os = "macos")]
+            {
+                let reinforce_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        for label in ["launcher", "mini"] {
+                            if let Some(win) = reinforce_handle.get_webview_window(label) {
+                                if win.is_visible().unwrap_or(false) {
+                                    let w = win.clone();
+                                    let _ = win.run_on_main_thread(move || {
+                                        const OVERLAY_LEVEL: i64 = 25;
+                                        const OVERLAY_BEHAVIOR: u64 = 1 | 16 | 64 | 256;
+                                        unsafe {
+                                            if let Ok(ns_win) = w.ns_window() {
+                                                let ptr = ns_win as *mut objc2::runtime::AnyObject;
+                                                let _: () = objc2::msg_send![ptr, setLevel: OVERLAY_LEVEL];
+                                                let _: () = objc2::msg_send![ptr, setCollectionBehavior: OVERLAY_BEHAVIOR];
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
+            // ── Windows / Linux: exit when launcher is closed ──────────────
+            // On macOS the Destroyed handler is registered in the
+            // #[cfg(target_os = "macos")] block above. Add the same clean-exit
+            // logic here for Windows and Linux where that block is not compiled.
+            #[cfg(not(target_os = "macos"))]
+            {
+                if let Some(win) = app.get_webview_window("launcher") {
+                    let exit_handle = app.handle().clone();
+                    win.on_window_event(move |event| {
+                        if let tauri::WindowEvent::Destroyed = event {
+                            exit_handle.exit(0);
                         }
                     });
                 }
@@ -2591,14 +2723,16 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             toggle_floating, capture_screen, show_mini_top_center, set_mini_state,
+            set_mini_size_instant,
             start_audio_stream, stop_audio_stream, list_audio_devices,
             start_display_audio_stream, stop_display_audio_stream,
             start_system_audio_transcription, stop_system_audio_transcription,
             start_mic_transcription, stop_mic_transcription,
             open_screen_recording_settings, open_microphone_settings,
             ensure_microphone_permission,
-            set_session_active, handle_launcher_click,
+            set_session_active, toggle_content_protection, handle_launcher_click,
             open_main_dashboard, show_launcher_widget,
+            get_cursor_position, set_cursor_passthrough,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

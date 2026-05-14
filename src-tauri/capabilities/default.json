@@ -35,6 +35,8 @@
     "core:window:allow-outer-size",
     "core:window:allow-inner-size",
     "core:window:allow-scale-factor",
+    "core:window:allow-cursor-position",
+    "core:window:allow-set-ignore-cursor-events",
     "core:webview:allow-create-webview-window",
     "core:webview:allow-webview-close",
     "oauth:allow-start",

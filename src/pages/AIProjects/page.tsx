@@ -175,9 +175,6 @@ export default function AIProjectsPage() {
   useEffect(() => {
     if (!pollingMode) return;
 
-    const userId = localStorage.getItem("userId");
-    if (!userId) { setPollingMode(false); return; }
-
     let cancelled = false;
 
     const checkStatus = async () => {
@@ -197,7 +194,11 @@ export default function AIProjectsPage() {
       }
 
       try {
-        const res = await fetch(ENDPOINTS.projectsList(userId));
+        const token = await getToken();
+        if (!token || cancelled) return;
+        const res = await fetch(ENDPOINTS.projectsMine(), {
+          headers: { Authorization: `Bearer ${token}` },
+        });
         if (!res.ok || cancelled) return;
         const data = await res.json();
         const projects: Array<{ id: string; createdAt: string }> = Array.isArray(data) ? data : [];
@@ -218,7 +219,7 @@ export default function AIProjectsPage() {
     checkStatus();
     const interval = setInterval(checkStatus, 5000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [pollingMode, dispatch]);
+  }, [pollingMode, dispatch, getToken]);
 
   // Refresh the table when a background regen finishes (regenJob cleared → null)
   const prevRegenJobRef = useRef(regenJob);
@@ -317,8 +318,10 @@ export default function AIProjectsPage() {
       localStorage.removeItem(PENDING_GEN_KEY);
       dispatch(finishGeneration({ recordId: undefined }));
       toast.success("AI projects generated!", { id: GEN_TOAST_ID });
-      // Trigger table refresh to pick up the newly saved record
-      setRefreshTrigger((k) => k + 1);
+      // Wait briefly for DB write to commit, then refresh the table
+      setTimeout(() => setRefreshTrigger((k) => k + 1), 800);
+      // Second refresh as safety net in case the first fires before the write lands
+      setTimeout(() => setRefreshTrigger((k) => k + 1), 3000);
     } catch (err) {
       localStorage.removeItem(PENDING_GEN_KEY);
       const errMsg = (err as Error).message || "Unexpected error";

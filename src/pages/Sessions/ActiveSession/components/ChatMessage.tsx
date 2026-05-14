@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Message } from "../Transcript";
 import { cn } from "@/lib/utils";
-import { Copy, Check, MessageSquare, Sparkles, Terminal } from "lucide-react";
+import { Copy, Check, MessageSquare, Sparkles, Terminal, RefreshCw } from "lucide-react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import {
   vscDarkPlus,
@@ -114,6 +114,7 @@ export const ChatMessage = ({
   message,
   isStreaming,
   isFullscreen = false,
+  onRegenerate,
 }: ChatMessageProps) => {
   const isAI = message.sender !== "User";
 
@@ -173,11 +174,26 @@ export const ChatMessage = ({
             )}>
               Answer:
             </div>
-            <CopyButton
-              text={displayAnswer}
-              label="Full Answer"
-              className="absolute top-0 right-0 opacity-0 group-hover/ansheader:opacity-100"
-            />
+            <div className="flex items-center gap-1 opacity-0 group-hover/ansheader:opacity-100">
+              {onRegenerate && !isStreaming && (
+                <button
+                  onClick={onRegenerate}
+                  className={cn(
+                    "flex items-center justify-center p-1.5 rounded-md transition-all active:scale-95",
+                    isFullscreen
+                      ? "bg-white/10 hover:bg-white/20 text-white/60 border border-white/20"
+                      : "bg-white hover:bg-slate-50 text-slate-400 border border-slate-200 shadow-sm"
+                  )}
+                  title="Regenerate answer"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                </button>
+              )}
+              <CopyButton
+                text={displayAnswer}
+                label="Full Answer"
+              />
+            </div>
           </div>
 
           <div
@@ -326,4 +342,5 @@ interface ChatMessageProps {
   message: Message;
   isStreaming: boolean;
   isFullscreen?: boolean;
+  onRegenerate?: () => void;
 }

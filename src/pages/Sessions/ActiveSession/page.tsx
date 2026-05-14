@@ -48,7 +48,7 @@ export default function ActiveSession() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [selectedModel, setSelectedModel] = useState(
-    location.state?.connectData?.aiModel || "google/gemma-4-26b-a4b-it",
+    location.state?.connectData?.aiModel || "anthropic/claude-haiku-4-5",
   );
   const [selectedLanguage, setSelectedLanguage] = useState(
     location.state?.connectData?.language || "English",
@@ -438,6 +438,7 @@ export default function ActiveSession() {
     handleAnalyzeScreen,
     handleAiAnswer,
     handleCustomQuery,
+    handleRegenerate,
   } = useAIChat();
 
   // Restore persisted transcript + AI answers on mount (survives refresh / back-nav)
@@ -546,7 +547,9 @@ export default function ActiveSession() {
     isExecutingRef.current = true;
     try {
       console.log("[Trigger] AI Answer initiated");
-      let combinedTranscript = messages
+      // Use the last 50 transcript entries for context
+      const recentMessages = messages.slice(-50);
+      let combinedTranscript = recentMessages
         .map(
           (m) => `[${m.sender === "User" ? "YOU" : "Interviewer"}]: ${m.text}`,
         )
@@ -574,6 +577,22 @@ export default function ActiveSession() {
     mergedTabInterimTranscript,
     selectedModel,
   ]);
+
+  const onRegenerate = useCallback(
+    (messageId: string) => {
+      if (!id) return;
+      // Rebuild context from recent 50 transcript messages
+      const recentMessages = messages.slice(-50);
+      const combinedTranscript = recentMessages
+        .map(
+          (m) => `[${m.sender === "User" ? "YOU" : "Interviewer"}]: ${m.text}`,
+        )
+        .join("\n");
+      if (!combinedTranscript) return;
+      handleRegenerate(id, messageId, combinedTranscript, selectedModel);
+    },
+    [id, messages, handleRegenerate, selectedModel],
+  );
 
   const toggleFullscreen = () => setIsFullscreen((prev) => !prev);
 
@@ -868,6 +887,7 @@ export default function ActiveSession() {
     onAnalyzeScreen,
     onSend: () => id && handleCustomQuery(id, inputMessage, selectedModel),
     onExit: () => setIsEndSessionDialogOpen(true),
+    onRegenerate,
     isFreeSession,
     timerText: formattedTime,
     isWarning: creditWarning !== null,

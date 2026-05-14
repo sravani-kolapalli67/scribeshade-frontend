@@ -83,18 +83,44 @@ export function SessionAnalyticsDialog({
             fetch(`${import.meta.env.VITE_BACKEND_URL}/api/session/${session.id}/analytics/existing`),
           ]);
 
+          let resolvedFeedback: any = null;
+
           if (sessionRes.ok) {
             const data = await sessionRes.json();
             const sessionData = data.data ?? data;
             setMessages(sessionData.messages || []);
-            // Use inline feedback from the full session response if available
-            if (sessionData.feedback) setFeedback(sessionData.feedback);
+            if (sessionData.feedback) resolvedFeedback = sessionData.feedback;
           }
 
-          // Dedicated existing-analytics fetch (returns null / 404 if none)
           if (feedbackRes.ok) {
             const existing = await feedbackRes.json();
-            if (existing && existing.id) setFeedback(existing);
+            if (existing && existing.id) resolvedFeedback = existing;
+          }
+
+          setFeedback(resolvedFeedback);
+
+          // Auto-generate if session is complete but analytics aren't ready yet
+          if (!resolvedFeedback && session.endedAt) {
+            setIsGenerating(true);
+            try {
+              const controller = new AbortController();
+              const timeoutId = setTimeout(() => controller.abort(), 90_000);
+              const analyticsRes = await fetch(
+                `${import.meta.env.VITE_BACKEND_URL}/api/session/${session.id}/analytics`,
+                { signal: controller.signal },
+              );
+              clearTimeout(timeoutId);
+              if (analyticsRes.ok) {
+                const data = await analyticsRes.json();
+                setFeedback(data);
+              }
+            } catch (err: any) {
+              if (err?.name !== "AbortError") {
+                console.error("Auto-generate analytics failed:", err);
+              }
+            } finally {
+              setIsGenerating(false);
+            }
           }
         } catch (error) {
           console.error("Error fetching session data:", error);

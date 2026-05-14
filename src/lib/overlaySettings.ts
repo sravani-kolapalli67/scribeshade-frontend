@@ -1,0 +1,78 @@
+/**
+ * overlaySettings — lightweight persisted overlay settings.
+ *
+ * NOT a Redux slice — the launcher and mini windows are separate JS contexts
+ * and do NOT share a Redux store. Each context reads/writes the same
+ * localStorage keys so settings are globally consistent across windows.
+ *
+ * Keys
+ *   scribeshade.widget.opacity   — number  0.20 → 1.00
+ *   scribeshade.widget.zoom      — number  0.70 → 1.60
+ *   scribeshade.widget.private   — boolean
+ *   scribeshade.widget.autodetect — boolean
+ */
+
+export const OPACITY_KEY   = "scribeshade.widget.opacity";
+export const ZOOM_KEY      = "scribeshade.widget.zoom";
+export const PRIVATE_KEY   = "scribeshade.widget.private";
+export const AUTODETECT_KEY = "scribeshade.widget.autodetect";
+
+export const OPACITY_MIN  = 0.20;
+export const OPACITY_MAX  = 1.00;
+export const OPACITY_DEFAULT = 1.00;
+
+export const ZOOM_MIN     = 0.70;
+export const ZOOM_MAX     = 1.60;
+export const ZOOM_STEP    = 0.10;
+export const ZOOM_DEFAULT = 1.00;
+
+// ── Getters ──────────────────────────────────────────────────────────────────
+
+export function getOpacity(): number {
+  const v = parseFloat(localStorage.getItem(OPACITY_KEY) ?? String(OPACITY_DEFAULT));
+  return isNaN(v) ? OPACITY_DEFAULT : Math.min(OPACITY_MAX, Math.max(OPACITY_MIN, v));
+}
+
+export function getZoom(): number {
+  const v = parseFloat(localStorage.getItem(ZOOM_KEY) ?? String(ZOOM_DEFAULT));
+  return isNaN(v) ? ZOOM_DEFAULT : Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, v));
+}
+
+export function getPrivateMode(): boolean {
+  return localStorage.getItem(PRIVATE_KEY) === "true";
+}
+
+export function getAutoDetect(): boolean {
+  return localStorage.getItem(AUTODETECT_KEY) === "true";
+}
+
+// ── Setters ──────────────────────────────────────────────────────────────────
+
+export function saveOpacity(v: number): void {
+  const clamped = Math.min(OPACITY_MAX, Math.max(OPACITY_MIN, +v.toFixed(2)));
+  localStorage.setItem(OPACITY_KEY, String(clamped));
+}
+
+export function saveZoom(v: number): void {
+  const clamped = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, +v.toFixed(2)));
+  localStorage.setItem(ZOOM_KEY, String(clamped));
+}
+
+export function savePrivateMode(v: boolean): void {
+  localStorage.setItem(PRIVATE_KEY, v ? "true" : "false");
+}
+
+export function saveAutoDetect(v: boolean): void {
+  localStorage.setItem(AUTODETECT_KEY, v ? "true" : "false");
+}
+
+/**
+ * Reset overlay settings to their post-session defaults:
+ *   opacity → 100%, zoom → 100%, private → true
+ * Called when the mini window closes so the next session starts clean.
+ */
+export function resetOverlaySettings(): void {
+  saveOpacity(OPACITY_DEFAULT);
+  saveZoom(ZOOM_DEFAULT);
+  savePrivateMode(true);
+}

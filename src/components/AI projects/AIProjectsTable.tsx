@@ -37,7 +37,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   FileText, Calendar, Sparkles, Eye, Loader2, AlertCircle, RefreshCw, X,
-  MoreHorizontal, Pencil, Trash2,
+  MoreHorizontal, Pencil, Trash2, FileDown,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ENDPOINTS } from "@/lib/endpoints";
@@ -181,6 +181,37 @@ export function AIProjectsTable({ activeJob, refreshTrigger = 0 }: AIProjectsTab
   const [renameValue,  setRenameValue]    = useState("");
   const [renameLoading, setRenameLoading] = useState(false);
 
+  // ── PDF export state ───────────────────────────────────────────────────
+  const [pdfLoadingId, setPdfLoadingId] = useState<string | null>(null);
+
+  const handleExportPdf = useCallback(async (project: ProjectRecord) => {
+    setPdfLoadingId(project.id);
+    const toastId = `pdf-${project.id}`;
+    toast.loading("Generating PDF…", { id: toastId, description: project.position });
+    try {
+      const token = await getToken();
+      const res = await fetch(ENDPOINTS.projectsExportPdf(project.id), {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || "PDF generation failed");
+      }
+      const blob = await res.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement("a");
+      a.href     = url;
+      a.download = `${project.position.replace(/[^a-z0-9]/gi, "_")}_projects.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success("PDF downloaded", { id: toastId, description: project.position });
+    } catch (err) {
+      toast.error("PDF export failed", { id: toastId, description: (err as Error).message });
+    } finally {
+      setPdfLoadingId(null);
+    }
+  }, [getToken]);
+
   // ── Delete handler ─────────────────────────────────────────────────────
   const handleDelete = useCallback(async () => {
     if (!deleteTarget) return;
@@ -239,23 +270,26 @@ export function AIProjectsTable({ activeJob, refreshTrigger = 0 }: AIProjectsTab
 
   // ── Fetch ──────────────────────────────────────────────────────────────
   const fetchProjects = useCallback(async (params: any) => {
-    const userId = localStorage.getItem("userId");
-    if (!userId) {
-      return {
-        success: false,
-        data: [],
-        pagination: { page: 1, limit: 10, total_pages: 0, total_items: 0 },
-      };
-    }
-
     try {
+      const token = await getToken();
+      if (!token) {
+        return {
+          success: false,
+          data: [],
+          pagination: { page: 1, limit: 10, total_pages: 0, total_items: 0 },
+        };
+      }
+
       const search    = (params?.search    || "") as string;
       const limit     = Number(params?.limit  || 10);
       const page      = Number(params?.page   || 1);
       const from_date = (params?.from_date || "") as string;
       const to_date   = (params?.to_date   || "") as string;
 
-      const res = await fetch(ENDPOINTS.projectsList(userId));
+      const res = await fetch(`${ENDPOINTS.projectsMine()}?t=${Date.now()}`, {
+        headers: { Authorization: `Bearer ${token}`, "Cache-Control": "no-cache" },
+        cache: "no-store",
+      });
       if (!res.ok) throw new Error("Failed to fetch");
       const data = await res.json();
 
@@ -316,7 +350,7 @@ export function AIProjectsTable({ activeJob, refreshTrigger = 0 }: AIProjectsTab
         pagination: { page: 1, limit: 10, total_pages: 0, total_items: 0 },
       };
     }
-  }, []);
+  }, [getToken]);
 
   // ── Columns ────────────────────────────────────────────────────────────
   const columns: ColumnDef<ProjectRecord>[] = useMemo(
@@ -422,6 +456,16 @@ export function AIProjectsTable({ activeJob, refreshTrigger = 0 }: AIProjectsTab
                     <Pencil className="h-3.5 w-3.5 text-muted-foreground" />
                     Rename
                   </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={() => handleExportPdf(project)}
+                    disabled={pdfLoadingId === project.id}
+                    className="gap-2 cursor-pointer"
+                  >
+                    {pdfLoadingId === project.id
+                      ? <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                      : <FileDown className="h-3.5 w-3.5 text-muted-foreground" />}
+                    Download PDF
+                  </DropdownMenuItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem
                     onClick={() => setDeleteTarget(project)}
@@ -437,7 +481,7 @@ export function AIProjectsTable({ activeJob, refreshTrigger = 0 }: AIProjectsTab
         },
       },
     ],
-    [navigate],
+    [navigate, handleExportPdf, pdfLoadingId],
   );
 
   // ── Render ─────────────────────────────────────────────────────────────
@@ -469,6 +513,8 @@ export function AIProjectsTable({ activeJob, refreshTrigger = 0 }: AIProjectsTab
               enableColumnVisibility: true,
               enableExport:           true,
               searchPlaceholder:      "Search by role or description…",
+              defaultSortBy:          "createdAt",
+              defaultSortOrder:       "desc",
             }}
             exportConfig={{
               entityName: "AI Projects",

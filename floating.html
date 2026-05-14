@@ -36,12 +36,40 @@
         #mini-app-root {
             width: 100%;
             height: 100%;
+            /* CRITICAL: mini window is fullscreen-transparent in the
+             * unified-overlay architecture. Interactive children opt in
+             * via [data-interactive] + inline pointer-events:auto. The
+             * root MUST be pointer-events:none, otherwise the cursor
+             * passthrough fallback (elementsFromPoint walk) finds this
+             * fullscreen element and disables OS-level click-through in
+             * empty regions. */
+            pointer-events: none;
+        }
+        /*
+         * Portal root — sits ABOVE the session card in the compositor stack.
+         * position:fixed + inset:0 → full viewport, zero layout influence.
+         * pointer-events:none → transparent to all mouse events by default;
+         * individual portal children override with pointer-events:auto.
+         * z-index:9000 → always above the card (auto z-index).
+         * overflow:visible + isolation:isolate → clean stacking context that
+         * doesn't clip fixed-positioned descendants.
+         */
+        #floating-portal-root {
+            position: fixed;
+            inset: 0;
+            z-index: 9000;
+            pointer-events: none;
+            overflow: visible;
+            isolation: isolate;
         }
     </style>
 </head>
 
 <body>
     <div id="mini-app-root"></div>
+    <!-- Portal root: fixed full-viewport layer above the session card.
+         Dropdowns, menus, tooltips portal here to escape card stacking context. -->
+    <div id="floating-portal-root"></div>
     <script type="module" src="/src/pages/Sessions/ActiveSession/FloatingApp.tsx"></script>
 </body>
 

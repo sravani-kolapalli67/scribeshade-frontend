@@ -52,7 +52,16 @@ import {
   KeyRound,
   Copy,
   Download,
+  Coins,
+  ArrowRight,
 } from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -655,73 +664,206 @@ function SkeletonCard() {
 
 // ── AI Capability Tools ────────────────────────────────────────────────────
 
-const AI_TOOLS = [
+interface AiTool {
+  icon: React.ElementType;
+  label: string;
+  description: string;
+  howItWorks: string;
+  href: string;
+  featureKey: string;
+  bg: string;
+  border: string;
+  iconBg: string;
+  iconColor: string;
+  labelColor: string;
+  descColor: string;
+  accentClass: string;
+}
+
+const AI_TOOLS: AiTool[] = [
   {
     icon: Rocket,
     label: "JD Tailor",
     description: "Match resume to a job description",
+    howItWorks:
+      "Paste a job posting and ScribeShade rewrites your resume bullets, summary, and skills section to highlight the exact keywords and competencies recruiters are looking for. The first tailoring per resume costs credits; re-runs within 24 hours are free thanks to our generation cache.",
     href: "/resume/build",
-    // teal
+    featureKey: "resume_tailor",
     bg: "bg-emerald-50",
     border: "border-emerald-100",
     iconBg: "bg-emerald-100/60 ring-emerald-200",
     iconColor: "text-emerald-600",
     labelColor: "text-emerald-700",
     descColor: "text-emerald-600/70",
+    accentClass: "bg-emerald-600",
   },
   {
     icon: Wand2,
     label: "Rewrite Bullets",
     description: "Sharpen every bullet with AI",
+    howItWorks:
+      "Weak, passive bullet points are rewritten into strong, metric-driven achievement statements. The AI targets action verbs, adds impact quantifiers where possible, and tightens phrasing for ATS and human reviewers alike. Each full-resume rewrite consumes credits.",
     href: "/resume/build",
-    // violet
+    featureKey: "resume_rewrite",
     bg: "bg-violet-50",
     border: "border-violet-100",
     iconBg: "bg-violet-100/60 ring-violet-200",
     iconColor: "text-violet-600",
     labelColor: "text-violet-700",
     descColor: "text-violet-600/70",
+    accentClass: "bg-violet-600",
   },
   {
     icon: ScanText,
     label: "ATS Score",
     description: "See your match score + gaps",
+    howItWorks:
+      "ScribeShade simulates an Applicant Tracking System scan against a target job description, scoring keyword coverage, formatting compliance, and section completeness. You get a letter grade, a percentage score, and a prioritised list of gaps to close — completely free to run.",
     href: "/resume/ats-analysis",
-    // amber
+    featureKey: "resume_ats_score",
     bg: "bg-amber-50",
     border: "border-amber-100",
     iconBg: "bg-amber-100/60 ring-amber-200",
     iconColor: "text-amber-600",
     labelColor: "text-amber-700",
     descColor: "text-amber-600/70",
+    accentClass: "bg-amber-600",
   },
   {
     icon: Mail,
     label: "Cover Letter",
     description: "Draft a matching cover letter",
+    howItWorks:
+      "Generates a fully personalised cover letter in seconds by combining your resume content with the target role, company, and a tone of your choice (professional, enthusiastic, concise). Outputs a ready-to-edit draft you can copy or download — free to generate.",
     href: "/resume/cover-letter",
-    // sky blue
+    featureKey: "resume_cover_letter",
     bg: "bg-sky-50",
     border: "border-sky-100",
     iconBg: "bg-sky-100/60 ring-sky-200",
     iconColor: "text-sky-600",
     labelColor: "text-sky-700",
     descColor: "text-sky-600/70",
+    accentClass: "bg-sky-600",
   },
   {
     icon: KeyRound,
     label: "Keyword Inject",
     description: "Add missing keywords naturally",
+    howItWorks:
+      "Identifies high-value keywords from the job description that are absent from your resume and injects them into appropriate sections — without keyword stuffing. The result reads naturally to human reviewers while significantly boosting ATS match rates.",
     href: "/resume/build",
-    // rose
+    featureKey: "resume_inject_keywords",
     bg: "bg-rose-50",
     border: "border-rose-100",
     iconBg: "bg-rose-100/60 ring-rose-200",
     iconColor: "text-rose-600",
     labelColor: "text-rose-700",
     descColor: "text-rose-600/70",
+    accentClass: "bg-rose-600",
   },
 ] as const;
+
+// ── AIToolInfoDialog ──────────────────────────────────────────────────────────
+// Shows a detail sheet for an AI capability card — description, how it works,
+// and a live credit cost badge fetched from GET /api/credits/feature-costs.
+
+interface FeatureCostRow {
+  featureKey: string;
+  credits: string;
+  label: string;
+}
+
+interface AIToolInfoDialogProps {
+  tool: AiTool | null;
+  onClose: () => void;
+  costs: Record<string, string>; // featureKey → credits string
+  costsLoading: boolean;
+  navigate: (href: string) => void;
+}
+
+function AIToolInfoDialog({ tool, onClose, costs, costsLoading, navigate }: AIToolInfoDialogProps) {
+  if (!tool) return null;
+  const { icon: Icon, label, description, howItWorks, href, featureKey,
+          bg, iconBg, iconColor, labelColor, accentClass } = tool;
+
+  const rawCredits = costs[featureKey];
+  const creditNum = rawCredits !== undefined ? parseFloat(rawCredits) : null;
+  const isFree = creditNum !== null && creditNum === 0;
+  const creditLabel = costsLoading
+    ? null
+    : isFree
+    ? "Free"
+    : creditNum !== null
+    ? `${creditNum} credit${creditNum === 1 ? "" : "s"}`
+    : null;
+
+  return (
+    <Dialog open={!!tool} onOpenChange={(o) => { if (!o) onClose(); }}>
+      <DialogContent className="sm:max-w-lg p-0 overflow-hidden rounded-2xl">
+        {/* Header band */}
+        <div className={`${bg} px-6 pt-6 pb-5 flex items-start gap-4`}>
+          <div className={`h-11 w-11 rounded-xl flex items-center justify-center ring-1 shrink-0 ${iconBg} ${iconColor}`}>
+            <Icon className="h-5 w-5" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <DialogTitle className={`text-[15px] font-bold ${labelColor}`}>{label}</DialogTitle>
+            <DialogDescription className="text-[12px] text-muted-foreground mt-0.5">{description}</DialogDescription>
+          </div>
+          {/* Credit badge */}
+          <div className="shrink-0">
+            {costsLoading ? (
+              <div className="h-6 w-16 rounded-full bg-black/8 animate-pulse" />
+            ) : creditLabel ? (
+              <span className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-full
+                ${isFree ? "bg-emerald-100 text-emerald-700" : "bg-black/8 text-foreground/80"}`}>
+                {!isFree && <Coins className="h-3 w-3" />}
+                {creditLabel}
+              </span>
+            ) : null}
+          </div>
+        </div>
+
+        {/* Body */}
+        <div className="px-6 py-5 space-y-5">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-[0.1em] text-muted-foreground/50 mb-1.5">How it works</p>
+            <p className="text-[13px] text-foreground/80 leading-relaxed">{howItWorks}</p>
+          </div>
+
+          {/* Credit cost detail */}
+          <div className="rounded-xl border border-border bg-muted/40 px-4 py-3 flex items-center gap-3">
+            <Coins className="h-4 w-4 text-muted-foreground shrink-0" />
+            <div className="flex-1">
+              <p className="text-[12px] font-medium text-foreground">
+                {costsLoading ? (
+                  <span className="inline-block h-4 w-28 rounded bg-muted animate-pulse" />
+                ) : isFree ? (
+                  "This tool is completely free to use."
+                ) : creditLabel ? (
+                  <>
+                    Costs <span className="font-bold">{creditLabel}</span> per use from your balance.
+                  </>
+                ) : (
+                  "Credit cost loaded from your plan."
+                )}
+              </p>
+            </div>
+          </div>
+
+          {/* CTA */}
+          <button
+            onClick={() => { onClose(); navigate(href); }}
+            className={`w-full flex items-center justify-center gap-2 h-10 rounded-xl text-[13px] font-semibold text-white transition-opacity hover:opacity-90 ${accentClass}`}
+          >
+            Open {label}
+            <ArrowRight className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 
 export default function BuildResume() {
   const { getToken, isLoaded, isSignedIn } = useAuth();
@@ -747,6 +889,31 @@ export default function BuildResume() {
   const [previewLoadingId, setPreviewLoadingId] = useState<string | null>(null);
   const [duplicatingId, setDuplicatingId]   = useState<string | null>(null);
   const [downloadingId, setDownloadingId]   = useState<string | null>(null);
+
+  // ── AI tool info dialog ────────────────────────────────────────────────────
+  const [selectedTool, setSelectedTool] = useState<AiTool | null>(null);
+  const [toolCosts, setToolCosts]        = useState<Record<string, string>>({});
+  const [costsLoading, setCostsLoading]  = useState(false);
+  const costsFetchedRef                  = useRef(false);
+
+  // Fetch feature costs once on mount (public endpoint, no auth needed).
+  useEffect(() => {
+    if (costsFetchedRef.current) return;
+    costsFetchedRef.current = true;
+    setCostsLoading(true);
+    fetch(ENDPOINTS.creditsFeatureCosts())
+      .then((r) => (r.ok ? r.json() : null))
+      .then((json) => {
+        if (!json?.data) return;
+        const map: Record<string, string> = {};
+        for (const row of json.data as FeatureCostRow[]) {
+          map[row.featureKey] = row.credits;
+        }
+        setToolCosts(map);
+      })
+      .catch(console.error)
+      .finally(() => setCostsLoading(false));
+  }, []);
 
   // ── Resolve userId (fast path: localStorage, slow path: userSynced event) ──
   useEffect(() => {
@@ -949,10 +1116,30 @@ export default function BuildResume() {
       setDownloadingId(id);
       try {
         const token = await getToken();
+
+        // 1. Fetch resume data (templateCode + fields) — same pattern as handlePreview
+        const dataRes = await fetch(ENDPOINTS.resumeBuilderGet(id), {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const dataJson = await dataRes.json();
+        if (!dataRes.ok) throw new Error(dataJson.error || "Failed to load resume");
+        const r = dataJson.resume ?? dataJson;
+        if (!r.templateCode || !r.fields) {
+          throw new Error("Resume template or fields not found");
+        }
+
+        // 2. Populate the HTML template client-side (same function used by preview)
+        const populatedHtml = populateTemplate(
+          r.templateCode,
+          fieldsToResumeData(r.fields as ResumeFields),
+          {},
+        );
+
+        // 3. Send the fully rendered HTML to the PDF export endpoint
         const res = await fetch(ENDPOINTS.resumeBuilderExportPdf(), {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ resumeId: id }),
+          body: JSON.stringify({ resumeId: id, populatedHtml }),
         });
         if (!res.ok) throw new Error("Export failed");
         const blob = await res.blob();
@@ -960,7 +1147,7 @@ export default function BuildResume() {
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = `${entry?.title ?? "resume"}.pdf`;
+        a.download = `${entry?.title ?? r.title ?? "resume"}.pdf`;
         a.click();
         URL.revokeObjectURL(url);
       } catch (err) {
@@ -1106,26 +1293,39 @@ export default function BuildResume() {
             <p className="text-[11px] text-muted-foreground/50">Click any tool to get started</p>
           </div>
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5">
-            {AI_TOOLS.map(({ icon: Icon, label, description, href, bg, border, iconBg, iconColor, labelColor, descColor }) => (
-              <Link
-                key={label}
-                to={href}
-                className={cn(
-                  "group flex flex-col gap-2.5 p-3.5 rounded-xl border transition-all duration-150 hover:shadow-sm hover:brightness-[0.97]",
-                  bg, border,
-                )}
-              >
-                <div className={cn("h-8 w-8 rounded-lg flex items-center justify-center ring-1 shrink-0 transition-transform group-hover:scale-105", iconBg, iconColor)}>
-                  <Icon className="h-4 w-4" />
-                </div>
-                <div>
-                  <p className={cn("text-[12px] font-semibold leading-tight", labelColor)}>{label}</p>
-                  <p className={cn("text-[11px] mt-0.5 leading-snug", descColor)}>{description}</p>
-                </div>
-              </Link>
-            ))}
+            {AI_TOOLS.map((tool) => {
+              const { icon: Icon, label, description, bg, border, iconBg, iconColor, labelColor, descColor } = tool;
+              return (
+                <button
+                  key={label}
+                  type="button"
+                  onClick={() => setSelectedTool(tool)}
+                  className={cn(
+                    "group flex flex-col gap-2.5 p-3.5 rounded-xl border text-left transition-all duration-150 hover:shadow-sm hover:brightness-[0.97]",
+                    bg, border,
+                  )}
+                >
+                  <div className={cn("h-8 w-8 rounded-lg flex items-center justify-center ring-1 shrink-0 transition-transform group-hover:scale-105", iconBg, iconColor)}>
+                    <Icon className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <p className={cn("text-[12px] font-semibold leading-tight", labelColor)}>{label}</p>
+                    <p className={cn("text-[11px] mt-0.5 leading-snug", descColor)}>{description}</p>
+                  </div>
+                </button>
+              );
+            })}
           </div>
         </div>
+
+        {/* ── AI Tool Info Dialog ── */}
+        <AIToolInfoDialog
+          tool={selectedTool}
+          onClose={() => setSelectedTool(null)}
+          costs={toolCosts}
+          costsLoading={costsLoading}
+          navigate={(href) => navigate(href)}
+        />
 
         {/* ── Divider ── */}
         <div className="flex items-center gap-3">

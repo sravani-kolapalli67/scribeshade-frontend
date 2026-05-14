@@ -15,6 +15,11 @@ import {
   type SupportedCurrency,
   type CreditPlan,
 } from "@/hooks/useCreditPlans";
+import {
+  detectUserCurrency,
+  CURRENCY_SYMBOLS,
+  CURRENCY_FLAGS,
+} from "@/lib/userCurrency";
 
 // ── Razorpay types ────────────────────────────────────────────────────────────
 declare global {
@@ -57,18 +62,6 @@ function loadRazorpayScript(): Promise<boolean> {
   });
 }
 
-const CURRENCY_SYMBOLS: Record<SupportedCurrency, string> = {
-  INR: "₹",
-  USD: "$",
-  GBP: "£",
-};
-
-const CURRENCY_FLAGS: Record<SupportedCurrency, string> = {
-  INR: "🇮🇳",
-  USD: "🇺🇸",
-  GBP: "🇬🇧",
-};
-
 const POPULAR_CODE = "standard_60";
 const BEST_VALUE_CODE = "mega_600";
 
@@ -94,7 +87,12 @@ export function BuyCreditsDialog({
   initialCurrency,
 }: BuyCreditsDialogProps) {
   const { getToken } = useAuth();
-  const [currency, setCurrency] = useState<SupportedCurrency>(initialCurrency ?? "INR");
+  // Auto-detect from OS timezone / browser locale (IN → INR, GB → GBP, else → USD).
+  // Explicit user overrides (if any) are stored with an ".explicit" marker so
+  // stale defaults from older code are ignored.
+  const [currency] = useState<SupportedCurrency>(
+    initialCurrency ?? detectUserCurrency(),
+  );
   const [selectedPlan, setSelectedPlan] = useState<CreditPlan | null>(initialPlan ?? null);
   const [paying, setPaying] = useState(false);
 
@@ -279,23 +277,10 @@ export function BuyCreditsDialog({
           </DialogHeader>
 
 
-          {/* Currency tab switcher */}
-          <div className="mt-5 inline-flex rounded-2xl bg-muted/50 p-1.5 gap-1 border border-border/40 shadow-inner">
-            {(["INR", "USD", "GBP"] as SupportedCurrency[]).map((c) => (
-              <button
-                key={c}
-                type="button"
-                onClick={() => { setCurrency(c); setSelectedPlan(null); }}
-                className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand ${
-                  currency === c
-                    ? "bg-white shadow-md text-foreground scale-105"
-                    : "text-muted-foreground hover:text-foreground hover:bg-white/40"
-                }`}
-              >
-                <span className="text-sm">{CURRENCY_FLAGS[c]}</span>
-                {c}
-              </button>
-            ))}
+          {/* Currency indicator — auto-detected, no manual switcher */}
+          <div className="mt-4 inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-muted/60 border border-border/40 text-xs font-semibold text-muted-foreground select-none">
+            <span className="text-sm">{CURRENCY_FLAGS[currency]}</span>
+            <span>{currency}</span>
           </div>
 
         </div>

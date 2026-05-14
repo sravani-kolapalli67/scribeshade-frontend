@@ -23,8 +23,6 @@ import {
   errorRegenJob,
 } from "@/store/aiProjectsSlice";
 import { getPdfCache, setPdfCache, clearPdfCache } from "@/lib/pdfCache";
-import jsPDF from "jspdf";
-import html2canvas from "html2canvas-pro";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -112,49 +110,6 @@ function buildPageSlices(
   }
 
   return slices;
-}
-
-async function generatePdf(reportEl: HTMLElement, title: string): Promise<string> {
-  // Scale 1.5 = 144 dpi equivalent — sharp at print size, ~44% fewer pixels than scale 2.
-  // JPEG at 0.88 quality instead of PNG reduces each page image by ~85-90%.
-  // Together these bring a typical 20-section report from ~65 MB down to ~3-5 MB.
-  const SCALE = 1.5;
-  const canvas = await html2canvas(reportEl, {
-    scale: SCALE,
-    useCORS: true,
-    allowTaint: false,
-    backgroundColor: "#ffffff",
-    logging: false,
-  });
-
-  const mmPerPx       = CONTENT_W_MM / canvas.width;
-  const pageHeightPx  = CONTENT_H_MM / mmPerPx;
-
-  const breakPoints = collectBreakPoints(reportEl, SCALE);
-  const slices      = buildPageSlices(canvas.height, pageHeightPx, breakPoints);
-
-  const pdf = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
-  pdf.setProperties({ title });
-
-  slices.forEach(({ start, end }, i) => {
-    if (i > 0) pdf.addPage();
-
-    const hPx  = end - start;
-    const hMM  = hPx * mmPerPx;
-
-    const slice = document.createElement("canvas");
-    slice.width  = canvas.width;
-    slice.height = Math.ceil(hPx);
-    slice.getContext("2d")!.drawImage(
-      canvas,
-      0, start, canvas.width, hPx,   // source rect
-      0, 0,     canvas.width, hPx,   // destination rect
-    );
-    pdf.addImage(slice.toDataURL("image/jpeg", 0.88), "JPEG", MARGIN_MM, MARGIN_MM, CONTENT_W_MM, hMM);
-  });
-
-
-  return pdf.output("dataurlstring");
 }
 
 // ─── Download / Share helpers ─────────────────────────────────────────────────
@@ -345,13 +300,13 @@ export default function ProjectRecommendations() {
     data?.position ? `${data.position.replace(/\s+/g, "-")}-AI-Projects.pdf` : "AI-Projects.pdf"
   , [data]);
 
-  // Returns a cached or freshly-generated PDF data-URL.
+  // Returns a cached or freshly-generated PDF blob URL.
   // Caller must dispatch setPdfBusy BEFORE calling this so the right button shows a spinner.
   const getOrGenPdf = useCallback(async (): Promise<string | null> => {
     // 1. In-memory Redux hit — instant
     if (pdfDataUrl) return pdfDataUrl;
 
-    // 2. IndexedDB hit — fast, no render needed
+    // 2. IndexedDB hit — fast
     if (projectId) {
       const cached = await getPdfCache(projectId);
       if (cached) {
@@ -360,13 +315,27 @@ export default function ProjectRecommendations() {
       }
     }
 
-    // 3. Render + cache
-    if (!reportRef.current || !projectId) return null;
+    // 3. Call backend Playwright PDF endpoint
+    if (!projectId) return null;
     const tid = "cv-pdf";
     toast.loading("Generating PDF — this may take a moment…", { id: tid });
     try {
-      const title = data?.position ? `${data.position} – AI Projects` : "AI Projects";
-      const url = await generatePdf(reportRef.current, title);
+      const token = await getToken();
+      const res = await fetch(ENDPOINTS.projectsExportPdf(projectId), {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error((err as { error?: string }).error || "PDF generation failed");
+      }
+      const blob = await res.blob();
+      // Convert to data URL so it survives IndexedDB storage and the share flow
+      const url = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
       await setPdfCache(projectId, url);
       dispatch(setPdfResult({ id: projectId, dataUrl: url }));
       toast.success("PDF ready! You can now download or share it.", { id: tid, duration: 4000 });
@@ -376,7 +345,7 @@ export default function ProjectRecommendations() {
       toast.error("PDF generation failed — try again.", { id: tid });
       return null;
     }
-  }, [pdfDataUrl, projectId, data]);
+  }, [pdfDataUrl, projectId, getToken, dispatch]);
 
   const handleExportPDF = useCallback(async () => {
     if (!projectId || pdfBusyFor) return;

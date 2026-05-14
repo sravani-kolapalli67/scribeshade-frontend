@@ -261,6 +261,64 @@ export const useAIChat = () => {
     [isAnswering],
   );
 
+  const handleRegenerate = useCallback(
+    async (sessionId: string, messageId: string, transcript: string, aiModel: string) => {
+      if (isAnswering || !transcript) return;
+
+      setIsAnswering(true);
+
+      // Clear the existing message text so it streams fresh
+      setAiChat((prev) =>
+        prev.map((msg) => (msg.id === messageId ? { ...msg, text: "" } : msg)),
+      );
+
+      try {
+        const response = await fetch(
+          `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionId}/ai-answer`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ transcript, aiModel }),
+          },
+        );
+
+        if (!response.ok) throw new Error("AI request failed");
+
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error("No reader available");
+
+        const decoder = new TextDecoder();
+        let streamedText = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value, { stream: true });
+          streamedText += chunk;
+
+          setAiChat((prev) =>
+            prev.map((msg) =>
+              msg.id === messageId ? { ...msg, text: streamedText } : msg,
+            ),
+          );
+        }
+      } catch (error) {
+        console.error("AI Regenerate error:", error);
+        setAiChat((prev) =>
+          prev.map((msg) =>
+            msg.id === messageId
+              ? { ...msg, text: "Sorry, I couldn't regenerate the answer." }
+              : msg,
+          ),
+        );
+      } finally {
+        setIsAnswering(false);
+      }
+    },
+    [isAnswering],
+  );
+
   return {
     aiChat,
     setAiChat,
@@ -271,5 +329,6 @@ export const useAIChat = () => {
     handleAnalyzeScreen,
     handleAiAnswer,
     handleCustomQuery,
+    handleRegenerate,
   };
 };

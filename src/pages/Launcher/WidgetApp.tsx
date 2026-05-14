@@ -1,44 +1,35 @@
-import React, { useEffect, useState, useCallback, useRef } from "react";
+import React, { useEffect, useRef, useCallback, useMemo, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import { createRoot } from "react-dom/client";
-import {
-  ClerkProvider,
-  useUser,
-  useAuth,
-  useClerk,
-  useSignIn,
-} from "@clerk/clerk-react";
+import { createPortal } from "react-dom";
+import { Provider } from "react-redux";
+import { ClerkProvider, useUser, useAuth } from "@clerk/clerk-react";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
-import { emit, listen } from "@tauri-apps/api/event";
-import { openUrl } from "@tauri-apps/plugin-opener";
-import { start, cancel } from "@fabianlars/tauri-plugin-oauth";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCreditsBalance } from "@/hooks/useCreditsBalance";
+import { useOverlayShortcuts } from "@/hooks/useOverlayShortcuts";
+import { useSafeZoom } from "@/hooks/useSafeZoom";
 import { checkForUpdates } from "@/lib/updater";
 import { cn } from "@/lib/utils";
+import {
+  getPrivateMode,
+  savePrivateMode,
+  OPACITY_MIN,
+  OPACITY_MAX,
+  ZOOM_STEP,
+  ZOOM_DEFAULT,
+  OPACITY_DEFAULT,
+} from "@/lib/overlaySettings";
 import {
   MoreVertical,
   Move,
   ChevronUp,
   ChevronDown,
   X,
-  Coins,
-  Play,
-  Zap,
   Loader2,
-  ExternalLink,
-  LogIn,
-  LogOut,
-  LayoutDashboard,
   Info,
-  Plus,
-  Minus,
-  RotateCcw,
-  User as UserIcon,
   Briefcase,
   FileText,
-  AlertCircle,
-  ChevronLeft,
-  ChevronRight,
   Cpu,
   History,
   Sparkles,
@@ -46,946 +37,263 @@ import {
   Folder,
   Globe,
   Settings,
+  SlidersHorizontal,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 
+// ─── Feature modules ─────────────────────────────────────────────────────────
+import {
+  WIDGET_W,
+  MORE_ACTIONS_POPOVER_W,
+  APP_NAME,
+  AI_MODELS_WIDGET,
+  JOB_DESCRIPTION_REGEX,
+} from "@/features/launcher/constants";
+import type { SessionInfo } from "@/features/launcher/types";
+import { DEFAULT_SESSION_INFO } from "@/features/launcher/types";
+import { useCardPosition } from "@/features/launcher/hooks/useCardPosition";
+import { useCursorPassthrough } from "@/features/launcher/hooks/useCursorPassthrough";
+import { usePopoverAnchor } from "@/features/launcher/hooks/usePopoverAnchor";
+import { useCollapseToggle } from "@/features/launcher/hooks/useCollapseToggle";
+import { CollapsedIcon } from "@/features/launcher/components/CollapsedIcon";
+import { HeaderMenu } from "@/features/launcher/components/HeaderMenu";
+import { TabPills } from "@/features/session/components/TabPills";
+import { SessionSelector } from "@/features/session/components/SessionSelector";
+import { ActionButtons } from "@/features/session/components/ActionButtons";
+import { PastSessionsTab } from "@/features/session/components/PastSessionsTab";
+import { AuthScreen } from "@/features/auth/components/AuthScreen";
+import { useSessionResources } from "@/features/session/hooks/useSessionResources";
+import { useSessionCreation } from "@/features/session/hooks/useSessionCreation";
+import { HoverTooltip } from "@/shared/components/HoverTooltip";
+import { CreditsBadge } from "@/shared/components/CreditsBadge";
+import { WidgetSelect } from "@/shared/components/WidgetSelect";
+import { tauriEvents } from "@/services/tauriEvents";
+import { tauriOverlay } from "@/services/tauriOverlay";
+
+// ─── Redux store ──────────────────────────────────────────────────────────────
+import { store } from "@/store/store";
+import { useAppSelector, useAppDispatch } from "@/store/hooks";
+import { setZoom as setZoom_, setOpacity as setOpacity_, setPrivateMode as setPrivateMode__ } from "@/features/settings/slices/settingsSlice";
+import {
+  setMenuOpen as reduxSetMenuOpen,
+} from "@/features/launcher/slices/overlaySlice";
+import {
+  setTab,
+  setCreationStep,
+  setSelectedKind,
+  updateSessionInfo,
+  resetSessionFlow,
+} from "@/features/session/slices/sessionFlowSlice";
+
 import "@/App.css";
-import { toast } from "sonner";
+
+import { OverlayRoot, OverlayFlags } from "@/overlay";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
-const _rawFrontendUrl: string =
-  import.meta.env.VITE_FRONTEND_URL ??
-  "https://app.scribeshade.org";
-const FRONTEND_URL = _rawFrontendUrl.startsWith("http")
-  ? _rawFrontendUrl
-  : `https://${_rawFrontendUrl}`;
-const WIDGET_W = 460;
-const APP_NAME = "ScribeShade";
-const BACKEND_URL: string = import.meta.env.VITE_BACKEND_URL || "http://localhost:3200";
-const ZOOM_KEY = "scribeshade.widget.zoom";
-const PRIVATE_KEY = "scribeshade.widget.private";
-const AUTODETECT_KEY = "scribeshade.widget.autodetect";
-const ZOOM_STEP = 0.1;
-const ZOOM_MIN = 0.7;
-const ZOOM_MAX = 1.6;
-
-// Safe JSON parser — WKWebView throws "The string did not match the expected
-// pattern" when Response.json() receives non-JSON (e.g. HTML error pages).
-async function safeJson<T = unknown>(res: Response): Promise<T | null> {
-  const text = await res.text();
-  try {
-    return JSON.parse(text) as T;
-  } catch {
-    console.warn("[WidgetApp] Non-JSON response from", res.url, "—", text.slice(0, 120));
-    return null;
-  }
-}
-
-const JOB_DESCRIPTION_REGEX = /^.{2,}/im;
-
-type SessionKind = "free" | "premium";
-type Tab = "create" | "past";
-
-interface Resume {
-  id: string;
-  filename: string;
-  uploadedAt: string;
-}
-
-interface Document {
-  id: string;
-  filename: string;
-  uploadedAt: string;
-}
-
-interface AIProject {
-  id: string;
-  position: string;
-  jobDescription: string;
-  createdAt: string;
-  projects: Array<{ projectHeader?: { title?: string } }>;
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function formatCredits(raw: string | null | undefined): string {
-  if (!raw) return "0";
-  const n = parseFloat(raw);
-  if (isNaN(n)) return "0";
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
-  // Show up to 1 decimal place, strip trailing zero only for whole numbers
-  return n % 1 === 0 ? n.toFixed(0) : n.toFixed(1);
-}
-
-function hasCredits(
-  balance: ReturnType<typeof useCreditsBalance>["balance"],
-): boolean {
-  if (!balance) return false;
-  const total = parseFloat(balance.totalAvailable ?? "0");
-  return !isNaN(total) && total > 0;
-}
-
-// ─── Tooltip (lightweight inline) ─────────────────────────────────────────────
-
-function HoverTooltip({
-  text,
-  children,
-  side = "bottom",
-  className,
-}: {
-  text: string;
-  children: React.ReactNode;
-  side?: "bottom" | "top";
-  className?: string;
-}) {
-  const [open, setOpen] = useState(false);
-  return (
-    <span
-      className={cn("relative inline-flex", className)}
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
-    >
-      {children}
-      {open && (
-        <span
-          className={cn(
-            "absolute z-50 px-3 py-2 rounded-xl bg-zinc-900 text-white text-xs font-medium leading-snug whitespace-pre-line shadow-xl pointer-events-none",
-            "left-1/2 -translate-x-1/2 max-w-[260px] w-max text-center",
-            side === "bottom" ? "top-full mt-1.5" : "bottom-full mb-1.5",
-          )}
-        >
-          {text}
-        </span>
-      )}
-    </span>
-  );
-}
-
-// ─── CreditsBadge ─────────────────────────────────────────────────────────────
-
-function CreditsBadge() {
-  const { isSignedIn } = useAuth();
-  const { balance, isLoading } = useCreditsBalance();
-
-  if (!isSignedIn) return null;
-
-  if (isLoading) {
-    return (
-      <div className="flex items-center gap-1 px-2.5 py-1.5 rounded-full bg-zinc-900 text-white text-xs font-semibold">
-        <Loader2 className="w-3 h-3 animate-spin" />
-      </div>
-    );
-  }
-
-  const creditsOk = hasCredits(balance);
-  const total = balance ? formatCredits(balance.totalAvailable) : "0";
-
-  const badge = (
-    <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-zinc-900 text-white text-xs font-semibold select-none cursor-default">
-      <Coins
-        className={cn("w-3 h-3", creditsOk ? "text-amber-400" : "opacity-50")}
-      />
-      <span>{creditsOk ? `${total} Credits` : "No Credits"}</span>
-    </div>
-  );
-
-  if (!creditsOk) {
-    return (
-      <HoverTooltip
-        text={`You don't have any interview credits.\nBuy some to start a paid session.`}
-      >
-        {badge}
-      </HoverTooltip>
-    );
-  }
-  return badge;
-}
-
-// ─── RadioDot ─────────────────────────────────────────────────────────────────
-
-function RadioDot({ active }: { active: boolean }) {
-  return (
-    <div
-      className={cn(
-        "w-4 h-4 rounded-full border-2 flex-shrink-0 flex items-center justify-center transition-all",
-        active ? "border-zinc-900 bg-zinc-900" : "border-zinc-300 bg-white",
-      )}
-    >
-      {active && <div className="w-1.5 h-1.5 rounded-full bg-white" />}
-    </div>
-  );
-}
-
-// ─── TabPills ─────────────────────────────────────────────────────────────────
-
-function TabPills({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void }) {
-  return (
-    <div className="px-3 pt-2">
-      <div className="grid grid-cols-2 gap-1 p-1 rounded-2xl bg-zinc-100">
-        {(["create", "past"] as const).map((t) => (
-          <button
-            key={t}
-            onClick={() => onChange(t)}
-            className={cn(
-              "py-2 rounded-xl text-sm font-semibold transition-colors",
-              tab === t
-                ? "bg-white text-zinc-900 shadow-sm"
-                : "text-zinc-500 hover:text-zinc-700",
-            )}
-          >
-            {t === "create" ? "Create" : "Past Sessions"}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ─── SessionSelector ──────────────────────────────────────────────────────────
-
-function SessionSelector({
-  selected,
-  onSelect,
-  creditsOk,
-  isLoadingBalance,
-}: {
-  selected: SessionKind;
-  onSelect: (k: SessionKind) => void;
-  creditsOk: boolean;
-  isLoadingBalance: boolean;
-}) {
-  const premiumDisabled = !creditsOk && !isLoadingBalance;
-
-  return (
-    <div className="flex flex-col gap-2 px-3 pt-3">
-      <div className="flex items-center gap-1.5 px-0.5">
-        <span className="text-sm font-bold text-zinc-800">
-          Select Session Type
-        </span>
-        <HoverTooltip text="Free sessions are limited to 5 minutes.\nPremium sessions use 0.5 credits per minute and unlock AI responses.">
-          <Info className="w-3.5 h-3.5 text-zinc-400 cursor-help" />
-        </HoverTooltip>
-      </div>
-    </div>
-  );
-}
-
-// ─── ActionButtons ────────────────────────────────────────────────────────────
-
-function ActionButtons({
-  balance,
-  isLoadingBalance,
-  onStart,
-}: {
-  balance: ReturnType<typeof useCreditsBalance>["balance"];
-  isLoadingBalance: boolean;
-  onStart: (isFree: boolean) => void;
-}) {
-  const noCreditState = !hasCredits(balance) && !isLoadingBalance;
-
-  return (
-    <div className="grid grid-cols-2 gap-2 px-3 pb-3 pt-2">
-      <button
-        onClick={() => onStart(true)}
-        className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-2xl border border-zinc-200 bg-white text-zinc-800 text-sm font-semibold hover:bg-zinc-50 hover:border-zinc-300 transition-all active:scale-[0.97] disabled:opacity-60 disabled:cursor-not-allowed"
-      >
-        <Play className="w-3.5 h-3.5" />
-        Free Session
-      </button>
-
-      <button
-        onClick={async () => {
-          if (noCreditState) {
-            openUrl(`${FRONTEND_URL}/billing`).catch(console.error);
-          } else {
-            onStart(false);
-          }
-        }}
-        disabled={isLoadingBalance}
-        className={cn(
-          "flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-2xl text-sm font-semibold transition-all active:scale-[0.97] disabled:opacity-60 disabled:cursor-not-allowed",
-          noCreditState
-            ? "bg-amber-500 hover:bg-amber-600 text-white"
-            : "bg-zinc-900 hover:bg-zinc-800 text-white",
-        )}
-      >
-        {noCreditState ? (
-          <Coins className="w-3.5 h-3.5" />
-        ) : (
-          <Zap className="w-3.5 h-3.5" />
-        )}
-        {noCreditState ? "Buy Credits" : "Full Session"}
-      </button>
-    </div>
-  );
-}
-
-// ─── PastSessionsTab ──────────────────────────────────────────────────────────
-
-interface PastSession {
-  id: string;
-  companyName?: string;
-  position?: string;
-  status: string;
-  createdAt: string;
-  isFree: boolean;
-}
-
-function sessionStatusLabel(status: string): { label: string; color: string } {
-  switch (status) {
-    case "COMPLETED":    return { label: "Completed",     color: "text-emerald-600 bg-emerald-50" };
-    case "ACTIVE":       return { label: "Active",        color: "text-blue-600 bg-blue-50" };
-    case "PAUSED":       return { label: "Paused",        color: "text-amber-600 bg-amber-50" };
-    case "ABANDONED":    return { label: "Abandoned",     color: "text-zinc-500 bg-zinc-100" };
-    case "FORCE_ENDED":  return { label: "Force Ended",   color: "text-zinc-500 bg-zinc-100" };
-    case "AUTO_ENDED":   return { label: "Auto Ended",    color: "text-zinc-500 bg-zinc-100" };
-    case "CREDIT_EXHAUSTED": return { label: "Credits Used Up", color: "text-red-600 bg-red-50" };
-    default:             return { label: status,          color: "text-zinc-500 bg-zinc-100" };
-  }
-}
-
-function formatRelativeDate(dateStr: string): string {
-  const now = Date.now();
-  const then = new Date(dateStr).getTime();
-  const diff = Math.floor((now - then) / 1000);
-  if (diff < 60)  return "just now";
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  if (diff < 86400 * 7) return `${Math.floor(diff / 86400)}d ago`;
-  return new Date(dateStr).toLocaleDateString();
-}
-
-function PastSessionsTab() {
-  const { getToken } = useAuth();
-  const [sessions, setSessions] = useState<PastSession[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      setLoading(true);
-      try {
-        let userId = localStorage.getItem("userId");
-        if (!userId) {
-          const token = await getToken();
-          if (token) {
-            const meRes = await fetch(`${BACKEND_URL}/api/auth/me`, {
-              headers: { Authorization: `Bearer ${token}` },
-            });
-            if (meRes.ok) {
-              const meData = await safeJson<{ id: string }>(meRes);
-              if (meData?.id) {
-                userId = meData.id;
-                localStorage.setItem("userId", userId);
-              }
-            }
-          }
-        }
-        if (!userId || cancelled) return;
-
-        const token = await getToken();
-        const res = await fetch(
-          `${BACKEND_URL}/api/session/list?userId=${userId}`,
-          { headers: token ? { Authorization: `Bearer ${token}` } : {} },
-        );
-        if (!res.ok || cancelled) return;
-        const data = await safeJson<unknown>(res);
-        const all: PastSession[] = Array.isArray(data)
-          ? data
-          : (data as any)?.data ?? [];
-        if (!cancelled) setSessions(all.slice(0, 3));
-      } catch (e) {
-        console.error("[PastSessionsTab] fetch error", e);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    };
-    load();
-    return () => { cancelled = true; };
-  }, [getToken]);
-
-  const openSession = (id: string) =>
-    openUrl(`${FRONTEND_URL}/sessions/${id}`).catch(console.error);
-
-  return (
-    <div className="flex flex-col gap-2 px-3 pt-3 pb-4">
-      {loading ? (
-        <div className="flex items-center justify-center py-6">
-          <Loader2 className="w-5 h-5 animate-spin text-zinc-400" />
-        </div>
-      ) : sessions.length === 0 ? (
-        <div className="flex flex-col items-center gap-2 py-6">
-          <div className="w-10 h-10 rounded-full bg-zinc-100 flex items-center justify-center">
-            <History className="w-4 h-4 text-zinc-400" />
-          </div>
-          <p className="text-xs text-zinc-500 text-center leading-snug">
-            No past sessions yet. Start your first one!
-          </p>
-        </div>
-      ) : (
-        <>
-          <p className="text-xs font-semibold text-zinc-400 uppercase tracking-wide px-0.5">
-            Recent Sessions
-          </p>
-          {sessions.map((s) => {
-            const { label, color } = sessionStatusLabel(s.status);
-            const title = [s.position, s.companyName].filter(Boolean).join(" @ ") || "Session";
-            return (
-              <button
-                key={s.id}
-                onClick={() => openSession(s.id)}
-                className="w-full flex items-center gap-3 p-3 rounded-2xl bg-zinc-50 hover:bg-zinc-100 border border-zinc-100 hover:border-zinc-200 transition-all active:scale-[0.98] text-left"
-              >
-                <div className="w-8 h-8 rounded-xl bg-zinc-200 flex items-center justify-center flex-shrink-0">
-                  <Briefcase className="w-3.5 h-3.5 text-zinc-500" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs font-semibold text-zinc-800 truncate">{title}</p>
-                  <p className="text-[11px] text-zinc-400 mt-0.5">
-                    {formatRelativeDate(s.createdAt)}
-                    {s.isFree ? " · Free" : " · Premium"}
-                  </p>
-                </div>
-                <div className="flex items-center gap-1.5 flex-shrink-0">
-                  <span className={cn("text-[10px] font-semibold px-2 py-0.5 rounded-full", color)}>
-                    {label}
-                  </span>
-                  <ExternalLink className="w-3 h-3 text-zinc-400" />
-                </div>
-              </button>
-            );
-          })}
-        </>
-      )}
-      <button
-        onClick={() => openUrl(`${FRONTEND_URL}/sessions`).catch(console.error)}
-        className="w-full flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-2xl bg-zinc-900 hover:bg-zinc-800 text-white text-sm font-semibold transition-all active:scale-[0.97] mt-1"
-      >
-        <ExternalLink className="w-3.5 h-3.5" />
-        View All Sessions
-      </button>
-    </div>
-  );
-}
-
-// ─── WidgetSelect (inline dropdown — no portal, window auto-resizes) ────────────
-// Renders the option list inline so the ResizeObserver sees the extra height
-// and win.setSize() expands the Tauri window.  No Radix portal = no aria-hidden.
-
-const AI_MODELS_WIDGET = [
-  { value: "google/gemma-4-26b-a4b-it", label: "Gemma 4 (26B)" },
-  {
-    value: "google/gemini-3.1-flash-lite-preview",
-    label: "Gemini 3.1 Flash Lite",
-  },
-  { value: "google/gemini-3.1-pro-preview", label: "Gemini 3.1 Pro" },
-  { value: "anthropic/claude-sonnet-4.6", label: "Claude 4.6 Sonnet" },
-];
-
-function WidgetSelect({
-  value,
-  onValueChange,
-  placeholder,
-  options,
-  isLoading = false,
-  emptyMessage = "Nothing uploaded yet",
-  className,
-  listClassName,
-}: {
-  value: string;
-  onValueChange: (val: string) => void;
-  placeholder: string;
-  options: { value: string; label: string }[];
-  isLoading?: boolean;
-  emptyMessage?: string;
-  className?: string;
-  listClassName?: string;
-}) {
-  const [open, setOpen] = useState(false);
-  const selected = options.find((o) => o.value === value);
-
-  return (
-    <div className={cn("flex-1 min-w-0", className)}>
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center justify-between gap-2 px-3 h-11 rounded-xl border border-zinc-200 bg-white text-sm text-zinc-800 hover:bg-zinc-50 transition-colors"
-      >
-        <span
-          className={cn(
-            "truncate min-w-0 text-left",
-            !selected && "text-zinc-400",
-          )}
-        >
-          {selected ? selected.label : placeholder}
-        </span>
-        <ChevronDown
-          className={cn(
-            "w-4 h-4 text-zinc-400 shrink-0 transition-transform duration-150",
-            open && "rotate-180",
-          )}
-        />
-      </button>
-
-      {open && (
-        <div className="mt-1 rounded-xl border border-zinc-200 bg-white shadow-md overflow-hidden">
-          {isLoading ? (
-            <div className="flex items-center justify-center py-3">
-              <Loader2 className="w-4 h-4 animate-spin text-zinc-300" />
-            </div>
-          ) : options.length === 0 ? (
-            <p className="py-3 text-center text-xs text-zinc-400">
-              {emptyMessage}
-            </p>
-          ) : (
-            <div className={cn("max-h-44 overflow-y-auto", listClassName)}>
-              {options.map((opt) => (
-                <button
-                  key={opt.value}
-                  type="button"
-                  onClick={() => {
-                    onValueChange(opt.value);
-                    setOpen(false);
-                  }}
-                  className={cn(
-                    "w-full text-left px-3 py-2.5 text-sm truncate hover:bg-zinc-50 transition-colors",
-                    opt.value === value &&
-                      "bg-zinc-100 font-medium text-zinc-900",
-                  )}
-                >
-                  {opt.label}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── AuthScreen (signed-out) ──────────────────────────────────────────────────
-
-// ─── AuthScreen ───────────────────────────────────────────────────────────────
-// Opens the SYSTEM BROWSER at the web sign-in page.
-// The web page, after sign-in, calls the backend to create a Clerk sign-in
-// ticket and redirects to scribeshade://auth-callback?ticket=TOKEN.
-// Rust's on_open_url handler emits "auth:tauri-ticket" to this webview.
-// The useEffect in WidgetContent listens for that event and signs in here.
-//
-// ⚠️  BACKEND REQUIREMENT:
-//   Add endpoint  POST /api/auth/tauri-ticket  (authenticated)
-//   Backend impl: clerk.signInTokens.createSignInToken({ userId })
-//   Response:     { ticket: string }
-// Fixed port for the Tauri auth callback server.
-// This does NOT need to be whitelisted in Clerk because we are not using
-// authenticateWithRedirect — we call the backend for a sign-in ticket and
-// then navigate the browser to http://127.0.0.1:PORT directly.
-const TAURI_AUTH_PORT = 10002;
-
-// Module-level ref so the active server port survives re-renders and can be
-// cancelled before a new one is started (handles the reload-and-retry case).
-let _activeAuthPort: number | undefined;
-
-const AUTH_CALLBACK_HTML = `<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8" /><title>ScribeShade – Signed In</title>
-<style>*{box-sizing:border-box;margin:0;padding:0}body{display:flex;align-items:center;justify-content:center;min-height:100vh;background:#0f0f12;font-family:-apple-system,sans-serif;color:#e5e7eb}.card{background:#1a1a24;border:1px solid #2d2d3a;border-radius:16px;padding:40px 48px;text-align:center;max-width:400px;width:90%}.icon{width:56px;height:56px;background:linear-gradient(135deg,#6366f1,#8b5cf6);border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 20px}.icon svg{width:28px;height:28px}h1{font-size:1.4rem;font-weight:600;color:#f9fafb;margin-bottom:8px}p{font-size:.9rem;color:#9ca3af}</style>
-</head>
-<body><div class="card"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></div><h1>You're signed in!</h1><p>Switch back to the ScribeShade app to continue.</p></div></body>
-</html>`;
-
-function AuthScreen() {
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const { signIn: clerkSignIn, setActive: clerkSetActive } = useSignIn();
-
-  const handleLogin = async () => {
-    if (loading) return;
-    setLoading(true);
-    setError(null);
-
-    let port: number | undefined;
-    let unlisten: (() => void) | undefined;
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-
-    const cleanup = async () => {
-      clearTimeout(timeoutId);
-      unlisten?.();
-      if (port !== undefined) {
-        await cancel(port).catch(() => undefined);
-        _activeAuthPort = undefined;
-        port = undefined;
-      }
-    };
-
-    try {
-      // 1. Cancel any leftover server from a previous attempt (reload-and-retry)
-      if (_activeAuthPort !== undefined) {
-        await cancel(_activeAuthPort).catch(() => undefined);
-        _activeAuthPort = undefined;
-      }
-
-      // 2. Start local HTTP server on fixed port
-      port = await start({
-        ports: [TAURI_AUTH_PORT],
-        response: AUTH_CALLBACK_HTML,
-      });
-      _activeAuthPort = port;
-
-      // 2. Listen for the oauth://url event that fires when the browser hits our server
-      const authPromise = new Promise<string>((resolve, reject) => {
-        timeoutId = setTimeout(
-          () => reject(new Error("Login timed out — please try again")),
-          120_000,
-        );
-        listen<string>("oauth://url", (event) => {
-          clearTimeout(timeoutId);
-          try {
-            const ticket = new URL(event.payload).searchParams.get("ticket");
-            if (ticket) resolve(ticket);
-            else reject(new Error("Auth callback missing ticket"));
-          } catch {
-            reject(new Error("Invalid callback URL"));
-          }
-        }).then((fn) => {
-          unlisten = fn;
-        });
-      });
-
-      // 3. Open system browser at sign-in page with port param
-      await openUrl(`${FRONTEND_URL}/sign-in?from=tauri&port=${port}`);
-
-      // 4. Wait for the ticket to come back via the local server
-      const ticket = await authPromise;
-
-      // 5. Sign in to Clerk with the ticket
-      if (!clerkSignIn || !clerkSetActive) throw new Error("Clerk not ready");
-      const result = await clerkSignIn.create({ strategy: "ticket", ticket });
-      if (result.status === "complete") {
-        await clerkSetActive({ session: result.createdSessionId });
-      } else {
-        throw new Error("Unexpected sign-in status: " + result.status);
-      }
-    } catch (err) {
-      const e = err as { message?: string };
-      setError(e?.message ?? "Login failed");
-      setLoading(false);
-    } finally {
-      await cleanup();
-    }
-  };
-
-  return (
-    <div className="flex flex-col items-center gap-3 px-5 pt-3 pb-5">
-      <h2 className="text-lg font-bold text-zinc-900 text-center">
-        {APP_NAME}
-      </h2>
-      <p className="text-sm text-zinc-500 text-center leading-snug">
-        Login to your {APP_NAME} account to start your interview.
-      </p>
-      {error && <p className="text-xs text-red-500 text-center">{error}</p>}
-      <button
-        onClick={handleLogin}
-        disabled={loading}
-        className="w-full flex items-center justify-center gap-2 px-4 py-3 mt-1 rounded-2xl bg-zinc-900 text-white text-sm font-semibold hover:bg-zinc-800 transition-colors active:scale-[0.97] disabled:opacity-60"
-      >
-        {loading ? (
-          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-        ) : (
-          <LogIn className="w-3.5 h-3.5" />
-        )}
-        {loading ? "Waiting for browser…" : "Login"}
-      </button>
-    </div>
-  );
-}
-
-// ─── MenuToggle (for Private / Auto-detect rows) ──────────────────────────────
-
-function MenuToggle({
-  label,
-  tooltip,
-  checked,
-  onChange,
-  disabled = false,
-}: {
-  label: string;
-  tooltip: string;
-  checked: boolean;
-  onChange: (v: boolean) => void;
-  disabled?: boolean;
-}) {
-  return (
-    <div
-      className={cn(
-        "flex items-center justify-between px-2 py-2 rounded-xl",
-        disabled ? "opacity-50" : "hover:bg-zinc-50",
-      )}
-    >
-      <div className="flex items-center gap-1.5">
-        <span
-          className={cn(
-            "text-sm font-medium",
-            disabled ? "text-zinc-400" : "text-zinc-700",
-          )}
-        >
-          {label}
-        </span>
-        <HoverTooltip text={tooltip}>
-          <Info className="w-3 h-3 text-zinc-400 cursor-help" />
-        </HoverTooltip>
-      </div>
-      <button
-        type="button"
-        role="switch"
-        aria-checked={checked}
-        disabled={disabled}
-        onClick={() => onChange(!checked)}
-        className={cn(
-          "relative w-9 h-5 rounded-full transition-colors",
-          checked && !disabled ? "bg-zinc-900" : "bg-zinc-200",
-          disabled && "cursor-not-allowed",
-        )}
-      >
-        <span
-          className={cn(
-            "absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all",
-            checked ? "left-[18px]" : "left-0.5",
-          )}
-        />
-      </button>
-    </div>
-  );
-}
-
-// ─── HeaderMenu (the 3-dot dropdown body) ─────────────────────────────────────
-
-function HeaderMenu({
-  onClose,
-  zoom,
-  setZoom,
-  privateMode,
-  setPrivateMode,
-}: {
-  onClose: () => void;
-  zoom: number;
-  setZoom: (z: number) => void;
-  privateMode: boolean;
-  setPrivateMode: (v: boolean) => void;
-}) {
-  const { isSignedIn, user } = useUser();
-  const { signOut } = useClerk();
-  const [autoDetect, setAutoDetect] = useState<boolean>(() => {
-    return localStorage.getItem(AUTODETECT_KEY) === "true";
-  });
-
-  const handleAutoDetect = useCallback((v: boolean) => {
-    setAutoDetect(v);
-    localStorage.setItem(AUTODETECT_KEY, v ? "true" : "false");
-  }, []);
-
-  const handlePrivate = useCallback(
-    (v: boolean) => {
-      setPrivateMode(v);
-      localStorage.setItem(PRIVATE_KEY, v ? "true" : "false");
-    },
-    [setPrivateMode],
-  );
-
-  const adjustZoom = useCallback(
-    (delta: number) => {
-      const next = Math.min(
-        ZOOM_MAX,
-        Math.max(ZOOM_MIN, +(zoom + delta).toFixed(2)),
-      );
-      setZoom(next);
-    },
-    [zoom, setZoom],
-  );
-
-  const resetZoom = useCallback(() => setZoom(1), [setZoom]);
-
-  const email =
-    user?.primaryEmailAddress?.emailAddress ??
-    user?.emailAddresses?.[0]?.emailAddress;
-
-  return (
-    <div className="mx-3 mb-3 rounded-2xl bg-white border border-zinc-100 shadow-lg overflow-hidden">
-      {isSignedIn && email && (
-        <>
-          <div className="flex items-center gap-2 px-3 py-2.5">
-            <UserIcon className="w-3.5 h-3.5 text-zinc-400 flex-shrink-0" />
-            <span className="text-xs text-zinc-600 truncate">{email}</span>
-          </div>
-          <div className="h-px bg-zinc-100" />
-        </>
-      )}
-
-      <button
-        onClick={() => {
-          openUrl(`${FRONTEND_URL}/dashboard`).catch(console.error);
-          onClose();
-        }}
-        className="w-full flex items-center justify-between px-3 py-2.5 hover:bg-zinc-50 transition-colors"
-      >
-        <div className="flex items-center gap-2">
-          <LayoutDashboard className="w-3.5 h-3.5 text-zinc-500" />
-          <span className="text-sm font-medium text-zinc-700">Dashboard</span>
-        </div>
-        <ExternalLink className="w-3 h-3 text-zinc-400" />
-      </button>
-
-      <div className="h-px bg-zinc-100" />
-
-      {isSignedIn && (
-        <>
-          <div className="h-px bg-zinc-100" />
-          <button
-            onClick={async () => {
-              onClose();
-              // Pass redirectUrl of the current page so Clerk does NOT navigate
-              // the webview anywhere after sign-out (no new window, no webview redirect).
-              localStorage.removeItem("userId");
-              await signOut({ redirectUrl: window.location.href }).catch(
-                console.error,
-              );
-            //   localStorage.removeItem(`scribeshade-launcher-${user?.id}`);
-            }}
-            className="w-full flex items-center gap-2 px-3 py-2.5 hover:bg-red-50 text-red-600 transition-colors"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            <span className="text-sm font-medium">Logout</span>
-          </button>
-        </>
-      )}
-    </div>
-  );
-}
 
 // ─── WidgetContent ────────────────────────────────────────────────────────────
 
 function WidgetContent() {
   const { isLoaded, isSignedIn, user } = useUser();
-  const { getToken } = useAuth();
-  const [tab, setTab] = useState<Tab>("create");
-  const [collapsed, setCollapsed] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [zoom, setZoomState] = useState<number>(() => {
-    const v = parseFloat(localStorage.getItem(ZOOM_KEY) ?? "1");
-    return isNaN(v) ? 1 : v;
-  });
-  const [privateMode, setPrivateModeState] = useState<boolean>(() => {
-    return localStorage.getItem(PRIVATE_KEY) === "true";
-  });
-  const [autoDetect, setAutoDetect] = useState<boolean>(() => {
-    return localStorage.getItem(AUTODETECT_KEY) === "true";
-  });
+  const dispatch = useAppDispatch();
 
-  const [selectedKind, setSelectedKind] = useState<SessionKind>("premium");
+  // ── Redux state ────────────────────────────────────────────────────────────
+  const zoom = useAppSelector((s) => s.settings.zoom);
+  const opacity = useAppSelector((s) => s.settings.opacity);
+  const privateMode = useAppSelector((s) => s.settings.privateMode);
+  const menuOpen = useAppSelector((s) => s.overlay.menuOpen);
+  const tab = useAppSelector((s) => s.sessionFlow.tab);
+  const creationStep = useAppSelector((s) => s.sessionFlow.creationStep);
+  const selectedKind = useAppSelector((s) => s.sessionFlow.selectedKind);
+  const sessionInfo = useAppSelector((s) => s.sessionFlow.sessionInfo);
 
-  // Flow State
-  const [creationStep, setCreationStep] = useState<0 | 1 | 2>(0);
-  const [sessionInfo, setSessionInfo] = useState({
-    companyName: "",
-    jobDescription: "",
-    resumeId: "",
-    documentId: "",
-    language: "English",
-    simpleLanguage: false,
-    extraContext: "",
-    aiModel: "google/gemma-4-26b-a4b-it",
-    autoGenerateAI: true,
-    saveTranscript: true,
-    isFree: false,
-    projectIds: [] as string[],
-  });
-  const [resumes, setResumes] = useState<Resume[]>([]);
-  const [documents, setDocuments] = useState<Document[]>([]);
-  const [aiProjects, setAIProjects] = useState<AIProject[]>([]);
-  const [isLoadingProjects, setIsLoadingProjects] = useState(false);
-  const [isLoadingResumes, setIsLoadingResumes] = useState(false);
-  const [isLoadingDocs, setIsLoadingDocs] = useState(false);
-  const [isCreating, setIsCreating] = useState(false);
-
-  const {
-    balance,
-    isLoading: isLoadingBalance,
-    refresh: refreshBalance,
-  } = useCreditsBalance();
-
-  const win = getCurrentWindow();
-  const cardRef = useRef<HTMLDivElement>(null);
-
-  // Persist zoom whenever it changes
-  const setZoom = useCallback((z: number) => {
-    setZoomState(z);
-    localStorage.setItem(ZOOM_KEY, String(z));
-  }, []);
-
-  // ── Auto-update check on launch ────────────────────────────────────────────
-  useEffect(() => {
-    checkForUpdates();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // ── Dynamic window height ─────────────────────────────────────────────────
-  useEffect(() => {
-    const el = cardRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver((entries) => {
-      const h = Math.ceil(
-        entries[0]?.borderBoxSize?.[0]?.blockSize ??
-          entries[0]?.contentRect.height ??
-          0,
-      );
-      const w = Math.ceil(
-        entries[0]?.borderBoxSize?.[0]?.inlineSize ??
-          entries[0]?.contentRect.width ??
-          WIDGET_W,
-      );
-      // Ignore zero-height frames — these happen when Clerk is mid-transition
-      // (isLoaded flips false briefly), which would collapse the window.
-      if (h === 0) return;
-      // Only call setSize when dimensions actually changed (avoids jitter).
-      const last = lastKnownSizeRef.current;
-      if (last && last.w === (w || WIDGET_W) && last.h === h) return;
-      lastKnownSizeRef.current = { w: w || WIDGET_W, h };
-      win.setSize(new LogicalSize(w || WIDGET_W, h)).catch(console.error);
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [win]);
-
-  // ── Drag ─────────────────────────────────────────────────────────────────
-  const handleDragStart = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      win.startDragging().catch(console.error);
+  // ── Setters that go through Redux ──────────────────────────────────────────
+  const setZoom = useCallback((z: number) => dispatch(setZoom_(z)), [dispatch]);
+  const setOpacity = useCallback((v: number) => dispatch(setOpacity_(v)), [dispatch]);
+  const setPrivateMode_ = useCallback(
+    (v: boolean) => {
+      dispatch(setPrivateMode__(v));
+      invoke("toggle_content_protection", { protected: v }).catch(console.error);
     },
-    [win],
+    [dispatch],
   );
 
-  const handleCollapseToggle = useCallback(() => setCollapsed((c) => !c), []);
+  // ── Refs ────────────────────────────────────────────────────────────────────
+  const cardRef = useRef<HTMLDivElement>(null);
+  const innerContentRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  // ── Stable Tauri window handle ─────────────────────────────────────────────
+  const win = useMemo(() => getCurrentWindow(), []);
+
+  // ── Credits ───────────────────────────────────────────────────────────────
+  const { balance, isLoading: isLoadingBalance } = useCreditsBalance();
+
+  // ── Safe zoom bounds ───────────────────────────────────────────────────────
+  const { safeMin, safeMax, atMin, atMax } = useSafeZoom(
+    innerContentRef,
+    zoom,
+    setZoom,
+    true,
+  );
+
+  // ── Keyboard shortcuts ────────────────────────────────────────────────────
+  useOverlayShortcuts({
+    opacity,
+    setOpacity,
+    zoom,
+    setZoom,
+    privateMode,
+    setPrivateMode: setPrivateMode_,
+    safeZoomMin: safeMin,
+    safeZoomMax: safeMax,
+  });
+
+  // ── Card position + drag ───────────────────────────────────────────────────
+  const { cardPos, isDraggingRef, handleDragStart } = useCardPosition();
+
+  // ── Cursor passthrough ────────────────────────────────────────────────────
+  useCursorPassthrough({ isDraggingRef });
+
+  // ── Collapse toggle ────────────────────────────────────────────────────────
+  const {
+    collapsed,
+    setCollapsed,
+    handleCollapseToggle,
+    handleCollapsedDragStart,
+    handleCollapsedClick,
+  } = useCollapseToggle({ handleDragStart });
+
+  // ── Menu anchor ───────────────────────────────────────────────────────────
+  const menuAnchor = usePopoverAnchor({
+    menuOpen,
+    triggerRef,
+    cardRef,
+    zoom,
+    cardPosX: cardPos.x,
+    cardPosY: cardPos.y,
+    collapsed,
+  });
+
+  const handleMenuOpenChange = useCallback(
+    (open: boolean) => dispatch(reduxSetMenuOpen(open)),
+    [dispatch],
+  );
+
+  // ── Session resources ──────────────────────────────────────────────────────
+  const {
+    resumes,
+    documents,
+    aiProjects,
+    isLoadingResumes,
+    isLoadingDocs,
+    isLoadingProjects,
+  } = useSessionResources(isSignedIn, user?.id);
+
+  // ── Session creation ───────────────────────────────────────────────────────
+  const {
+    isCreating,
+    handleCreateSession: createSession,
+    conflict,
+    clearConflict,
+    endConflictAndCreate,
+    joinConflictSession,
+  } = useSessionCreation();
+
+  // Tracks whether a session is currently active (launched from this window).
+  // Used to lock private mode toggle during active sessions (Feature 4).
+  const [isSessionActive, setIsSessionActive] = useState(false);
+
+  const handleCreateSession = useCallback(
+    () => {
+      // Only mark session active after the creation flow succeeds.
+      // The hook hides the launcher on success; if a conflict dialog appears
+      // the launcher stays visible and isSessionActive must stay false.
+      const result = createSession(sessionInfo);
+      result.then(() => {
+        // If no conflict was set, the window was hidden — session is live
+        setIsSessionActive(true);
+      }).catch(() => {});
+      return result;
+    },
+    [createSession, sessionInfo],
+  );
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  const handleStartFlow = useCallback((isFree: boolean) => {
+    dispatch(updateSessionInfo({ isFree }));
+    dispatch(setCreationStep(1));
+  }, [dispatch]);
+
   const handleClose = useCallback(
     () => win.close().catch(console.error),
     [win],
   );
 
-  // ── Sign-out broadcast from main window ───────────────────────────────────
+  const handleOpenInspect = useCallback(async () => {
+    const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+    const existing = await WebviewWindow.getByLabel("inspect");
+    if (existing) {
+      await existing.show().catch(console.error);
+      await existing.setFocus().catch(console.error);
+      return;
+    }
+    const sw = window.screen.availWidth;
+    const sh = window.screen.availHeight;
+    new WebviewWindow("inspect", {
+      url: "inspect.html",
+      title: "ScribeShade – Inspect",
+      width: 360,
+      height: Math.min(560, sh - 120),
+      decorations: true,
+      shadow: true,
+      resizable: false,
+      alwaysOnTop: false,
+      x: sw - 380,
+      y: 80,
+    });
+  }, []);
+
+  // ── On-mount: apply stored private mode ───────────────────────────────────
+  useEffect(() => {
+    if (getPrivateMode()) {
+      invoke("toggle_content_protection", { protected: true }).catch(
+        console.error,
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Auto-update check ──────────────────────────────────────────────────────
+  useEffect(() => {
+    checkForUpdates();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Auth signed-out broadcast ─────────────────────────────────────────────
   useEffect(() => {
     let unlisten: (() => void) | undefined;
-    listen<void>("auth:signed-out", () => {
-      setSelectedKind("free");
-      setTab("create");
-      setMenuOpen(false);
-      setCreationStep(0);
-    })
+    tauriEvents
+      .onAuthSignedOut(() => {
+        dispatch(resetSessionFlow());
+        dispatch(reduxSetMenuOpen(false));
+        setCollapsed(false);
+      })
       .then((fn) => {
         unlisten = fn;
       })
@@ -993,266 +301,133 @@ function WidgetContent() {
     return () => {
       unlisten?.();
     };
-  }, []);
+  }, [dispatch, setCollapsed]);
 
-  // ── Session ended — reset creation state so launcher reopens at step 0 ────
+  // ── Session ended — reset ALL state to clean defaults ─────────────────────
   useEffect(() => {
     let unlisten: (() => void) | undefined;
-    listen<void>("session:reset", () => {
-      setCreationStep(0);
-      setIsCreating(false);
-      setSessionInfo({
-        companyName: "",
-        jobDescription: "",
-        resumeId: "",
-        documentId: "",
-        language: "English",
-        simpleLanguage: false,
-        extraContext: "",
-        aiModel: "google/gemma-4-26b-a4b-it",
-        autoGenerateAI: true,
-        saveTranscript: true,
-        isFree: false,
-        projectIds: [],
-      });
-      setTab("create");
-      setCollapsed(false);
-    })
-      .then((fn) => { unlisten = fn; })
+    tauriEvents
+      .onSessionReset(() => {
+        // 1. Reset Redux session creation flow
+        dispatch(resetSessionFlow());
+        // 2. Clear the session-active lock so private mode toggle is unblocked
+        setIsSessionActive(false);
+        // 3. Sync Redux settings with what resetOverlaySettings() wrote to localStorage
+        //    (mini window calls resetOverlaySettings() before closing, so localStorage
+        //    already has the right values — we just need to push them into Redux)
+        dispatch(setPrivateMode__(true));
+        dispatch(setZoom_(ZOOM_DEFAULT));
+        dispatch(setOpacity_(OPACITY_DEFAULT));
+        // 4. Re-apply content protection in Rust (private=true → protection ON)
+        invoke("toggle_content_protection", { protected: true }).catch(console.error);
+        // 5. Expand the widget
+        setCollapsed(false);
+      })
+      .then((fn) => {
+        unlisten = fn;
+      })
       .catch(console.error);
-    return () => { unlisten?.(); };
-  }, []);
-
-  // Fetch resumes and documents
-  useEffect(() => {
-    if (!isSignedIn || !user?.id) return;
-
-    let cancelled = false;
-
-    const fetchData = async () => {
-      setIsLoadingResumes(true);
-      setIsLoadingDocs(true);
-      setIsLoadingProjects(true);
-
-      try {
-        // Resolve the backend internal userId — the Clerk user.id is NOT the same.
-        // On a fresh client machine localStorage may be empty, so we call /api/auth/me
-        // with the Clerk Bearer token to get and cache the correct DB userId.
-        let userId = localStorage.getItem("userId");
-        if (!userId) {
-          const token = await getToken();
-          if (token) {
-            const meRes = await fetch(
-              `${BACKEND_URL}/api/auth/me`,
-              { headers: { Authorization: `Bearer ${token}` } },
-            );
-            if (meRes.ok) {
-              const meData = await safeJson<{ id: string }>(meRes);
-              if (meData?.id) {
-                userId = meData.id as string;
-                localStorage.setItem("userId", userId);
-              }
-            }
-          }
-        }
-
-        if (!userId || cancelled) return;
-
-        const token = await getToken();
-        const authHeaders: HeadersInit = token
-          ? { Authorization: `Bearer ${token}` }
-          : {};
-
-        const [resumeRes, docRes, projectsRes] = await Promise.all([
-          fetch(
-            `${BACKEND_URL}/api/resume/list?userId=${userId}`,
-            { headers: authHeaders },
-          ),
-          fetch(
-            `${BACKEND_URL}/api/document/list?userId=${userId}`,
-            { headers: authHeaders },
-          ),
-          fetch(
-            `${BACKEND_URL}/api/projects/user/${userId}`,
-            { headers: authHeaders },
-          ),
-        ]);
-
-        if (!cancelled) {
-          const resumeData = resumeRes.ok ? await safeJson<unknown>(resumeRes) : null;
-          setResumes(
-            Array.isArray(resumeData) ? resumeData : (resumeData as any)?.data || [],
-          );
-
-          const docData = docRes.ok ? await safeJson<unknown>(docRes) : null;
-          setDocuments(Array.isArray(docData) ? docData : (docData as any)?.data || []);
-
-          const projectsData = projectsRes.ok ? await safeJson<unknown>(projectsRes) : null;
-          const rawProjects = Array.isArray(projectsData) ? projectsData : (projectsData as any)?.data || [];
-          setAIProjects(rawProjects as AIProject[]);
-        }
-      } catch (err) {
-        console.error("[WidgetApp] Failed to fetch resumes/documents:", err);
-      } finally {
-        if (!cancelled) {
-          setIsLoadingResumes(false);
-          setIsLoadingDocs(false);
-          setIsLoadingProjects(false);
-        }
-      }
-    };
-
-    fetchData();
     return () => {
-      cancelled = true;
+      unlisten?.();
     };
-  }, [isSignedIn, user?.id, getToken]);
+  }, [dispatch, setCollapsed]);
 
-  const handleStartFlow = (isFree: boolean) => {
-    setSessionInfo((prev) => ({ ...prev, isFree }));
-    setCreationStep(1);
-  };
-
-  const handleCreateSession = async () => {
-    if (isCreating) return;
-    setIsCreating(true);
-
-    // Always use the cached backend userId; it was resolved during the resume fetch.
-    const userId = localStorage.getItem("userId");
-    if (!userId) {
-       toast.error(
-         "User session not initialized. Please try logging in again.",
-       );
-      setIsCreating(false);
-      return;
-    }
-
-    try {
-      // 1. Create Session
-      const formData = new FormData();
-      formData.append("userId", userId);
-      formData.append("free", sessionInfo.isFree.toString());
-      formData.append("companyName", sessionInfo.companyName);
-      formData.append("jobDescription", sessionInfo.jobDescription);
-      formData.append("resumeId", sessionInfo.resumeId);
-      formData.append("documentId", sessionInfo.documentId);
-      formData.append("language", sessionInfo.language);
-      formData.append("simpleLanguage", sessionInfo.simpleLanguage.toString());
-      formData.append("extraContext", sessionInfo.extraContext);
-      formData.append("aiModel", sessionInfo.aiModel);
-      formData.append("autoGenerateAI", sessionInfo.autoGenerateAI.toString());
-      formData.append("saveTranscript", sessionInfo.saveTranscript.toString());
-      if (sessionInfo.projectIds.length > 0) {
-        formData.append("projectIds", JSON.stringify(sessionInfo.projectIds));
-      }
-
-      const createRes = await fetch(
-        `${BACKEND_URL}/api/session/create-session`,
-        {
-          method: "POST",
-          body: formData,
-        },
-      );
-
-      if (!createRes.ok) {
-        if (createRes.status === 409) {
-          const errData = await safeJson<{ message?: string }>(createRes);
-          const msg = errData?.message ?? "";
-          if (msg.startsWith("ACTIVE_SESSION_EXISTS")) {
-            toast.error("You already have an active session. Please end it before starting a new one.", {
-              action: {
-                label: "View Session",
-                onClick: () => openUrl(`${FRONTEND_URL}/sessions`).catch(console.error),
-              },
-              duration: 8000,
-            });
-            setIsCreating(false);
-            return;
-          }
-        }
-        throw new Error("Failed to create session");
-      }
-      const createData = await safeJson<{ id?: string; sessionId?: string }>(createRes);
-      if (!createData) throw new Error("Invalid response from create session");
-      const sessionId = createData.id || createData.sessionId;
-
-      // 2. Activate Session
-      const activateRes = await fetch(
-        `${BACKEND_URL}/api/session/${sessionId}/activate`,
-        {
-          method: "POST",
-        },
-      );
-
-      if (!activateRes.ok) {
-        if (activateRes.status === 409) {
-          const errData = await safeJson<{ message?: string }>(activateRes);
-          const msg = errData?.message ?? "";
-          if (msg.startsWith("ACTIVE_SESSION_EXISTS")) {
-            toast.error("Another session became active. Please end it first.", {
-              action: {
-                label: "View Session",
-                onClick: () => openUrl(`${FRONTEND_URL}/sessions`).catch(console.error),
-              },
-              duration: 8000,
-            });
-            setIsCreating(false);
-            return;
-          }
-        }
-        throw new Error("Failed to activate session");
-      }
-      const activateData = await safeJson<{ startedAt?: string; maxAllowedMinutes?: number }>(activateRes) ?? {};
-
-      // 3. Send session context directly to the mini window via event
-      await emit("session-init", {
-        sessionId,
-        isFree: sessionInfo.isFree,
-        aiModel: sessionInfo.aiModel,
-        language: sessionInfo.language,
-        companyName: sessionInfo.companyName,
-        startedAt: activateData.startedAt ?? null,
-        maxAllowedMinutes: activateData.maxAllowedMinutes ?? null,
-      });
-
-      // 4. Trigger Mini Screen
-      await invoke("show_mini_top_center");
-
-      // 5. Close current launcher
-      await getCurrentWindow().hide();
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setIsCreating(false);
-    }
-  };
-
-  const creditsOk = hasCredits(balance);
-
-  // Keep a ref to the last known size so the ResizeObserver ignores
-  // zero-height flashes that happen while Clerk is loading / transitioning.
-  const lastKnownSizeRef = useRef<{ w: number; h: number } | null>(null);
+  const creditsOk = !!(balance && parseFloat(balance.totalAvailable ?? "0") > 0);
 
   return (
-    <div className="w-full select-none">
+    // Fullscreen transparent canvas — pointer-events disabled so transparent
+    // areas pass mouse events through to the OS.
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        pointerEvents: "none",
+        background: "transparent",
+        overflow: "visible",
+        userSelect: "none",
+      }}
+    >
+      {/* Active-session conflict dialog — shown when server returns ACTIVE_SESSION_EXISTS */}
+      <AlertDialog open={!!conflict} onOpenChange={(open) => { if (!open) { clearConflict(); setIsSessionActive(false); } }}>
+        <AlertDialogContent style={{ pointerEvents: "auto" }}>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Session already running</AlertDialogTitle>
+            <AlertDialogDescription>
+              {conflict?.companyName
+                ? <>You have an active session for <strong>{conflict.companyName}</strong>. Do you want to end it and start a new one?</>
+                : "You already have an ongoing session. End it to start a new one, or go back to it."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => { clearConflict(); setIsSessionActive(false); }}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-zinc-800 text-white hover:bg-zinc-700"
+              onClick={() => joinConflictSession()}
+            >
+              Go to session
+            </AlertDialogAction>
+            <AlertDialogAction
+              className="bg-red-600 text-white hover:bg-red-700"
+              onClick={() => endConflictAndCreate()}
+            >
+              End &amp; start new
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      {/* Positional shell — shared anchor for both collapsed icon and expanded card */}
       <div
-        ref={cardRef}
         style={{
-          width: WIDGET_W * zoom,
+          position: "absolute",
+          left: cardPos.x,
+          top: cardPos.y,
+          opacity,
+          pointerEvents: "auto",
         }}
       >
+        <AnimatePresence mode="wait" initial={false}>
+          {collapsed ? (
+            /* ── Collapsed floating icon ──────────────────────────────── */
+            <motion.div
+              key="collapsed"
+              data-interactive
+              initial={{ opacity: 0, scale: 0.7 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.7 }}
+              transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+              style={{ originX: 0, originY: 0 }}
+              onMouseDown={handleCollapsedDragStart}
+              onClick={handleCollapsedClick}
+            >
+              <CollapsedIcon />
+            </motion.div>
+          ) : (
+            /* ── Expanded full launcher ───────────────────────────────── */
+            <motion.div
+              key="expanded"
+              data-interactive
+              initial={{ opacity: 0, scale: 0.96 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.96 }}
+              transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+              style={{ originX: 0, originY: 0 }}
+            >
+      <div
+        ref={cardRef}
+        className="rounded-3xl bg-white shadow-2xl shadow-black/20 overflow-hidden"
+      >
         <div
-          className="rounded-3xl bg-white shadow-2xl shadow-black/20 overflow-hidden"
+          ref={innerContentRef}
           style={{
+            zoom: zoom,
             width: WIDGET_W,
-            transform: `scale(${zoom})`,
             transformOrigin: "top left",
           }}
         >
           {/* ── Header ─────────────────────────────────────────────────────── */}
           <div className="flex items-center gap-2 px-3 py-2.5">
             <div
-              className="flex items-center gap-2 flex-1 min-w-0 cursor-grab active:cursor-grabbing"
+              className="flex items-center gap-2 flex-1 min-w-0 cursor-default"
               onMouseDown={handleDragStart}
             >
               <HoverTooltip text={APP_NAME}>
@@ -1270,28 +445,39 @@ function WidgetContent() {
             <CreditsBadge />
 
             <div className="flex items-center gap-0.5 ml-1">
-              <HoverTooltip text="Menu" side="bottom">
-                <button
-                  onClick={() => setMenuOpen((o) => !o)}
-                  className={cn(
-                    "p-1.5 rounded-xl transition-colors border",
-                    menuOpen
-                      ? "bg-zinc-100 border-zinc-200 text-zinc-700"
-                      : "border-transparent hover:bg-zinc-100 text-zinc-400 hover:text-zinc-600",
-                  )}
-                >
-                  <MoreVertical className="w-3.5 h-3.5" />
-                </button>
-              </HoverTooltip>
+              <button
+                    ref={triggerRef}
+                    onClick={() => handleMenuOpenChange(!menuOpen)}
+                    className={cn(
+                      "p-1.5 rounded-xl transition-colors border",
+                      menuOpen
+                        ? "bg-zinc-100 border-zinc-200 text-zinc-700"
+                        : "border-transparent hover:bg-zinc-100 text-zinc-400 hover:text-zinc-600",
+                    )}
+                    aria-label="Menu"
+                  >
+                    <MoreVertical className="w-3.5 h-3.5" />
+                  </button>
               <HoverTooltip text="Drag" side="bottom">
                 <button
                   onMouseDown={handleDragStart}
-                  className="p-1.5 rounded-xl border border-zinc-200 hover:bg-zinc-100 text-zinc-500 hover:text-zinc-700 transition-colors cursor-grab active:cursor-grabbing"
+                  className="p-1.5 rounded-xl border border-zinc-200 hover:bg-zinc-100 text-zinc-500 hover:text-zinc-700 transition-colors cursor-default"
                 >
                   <Move className="w-3.5 h-3.5" />
                 </button>
               </HoverTooltip>
-              <HoverTooltip text={collapsed ? "Expand" : "Collapse"} side="bottom">
+              <HoverTooltip text="Inspect" side="bottom">
+                <button
+                  onClick={handleOpenInspect}
+                  className="p-1.5 rounded-xl border border-zinc-200 hover:bg-zinc-100 text-zinc-500 hover:text-zinc-700 transition-colors"
+                >
+                  <SlidersHorizontal className="w-3.5 h-3.5" />
+                </button>
+              </HoverTooltip>
+              <HoverTooltip
+                text={collapsed ? "Expand" : "Collapse"}
+                side="bottom"
+              >
                 <button
                   onClick={handleCollapseToggle}
                   className="p-1.5 rounded-xl border border-zinc-200 hover:bg-zinc-100 text-zinc-500 hover:text-zinc-700 transition-colors"
@@ -1314,20 +500,8 @@ function WidgetContent() {
             </div>
           </div>
 
-          {/* ── Inline header menu ────────────────────────────────────────── */}
-          {menuOpen && (
-            <HeaderMenu
-              onClose={() => setMenuOpen(false)}
-              zoom={zoom}
-              setZoom={setZoom}
-              privateMode={privateMode}
-              setPrivateMode={setPrivateModeState}
-            />
-          )}
-
           {/* ── Body ────────────────────────────────────────────────────────── */}
-          {!collapsed && (
-            <>
+          <>
               {!isLoaded && (
                 <div className="flex items-center justify-center py-10">
                   <Loader2 className="w-5 h-5 animate-spin text-zinc-300" />
@@ -1338,7 +512,7 @@ function WidgetContent() {
 
               {isLoaded && isSignedIn && (
                 <>
-                  <TabPills tab={tab} onChange={setTab} />
+                  <TabPills tab={tab} onChange={(t) => dispatch(setTab(t))} />
 
                   <div className="flex-1 overflow-y-auto no-scrollbar">
                     <div className="min-h-full">
@@ -1348,7 +522,7 @@ function WidgetContent() {
                             <>
                               <SessionSelector
                                 selected={selectedKind}
-                                onSelect={setSelectedKind}
+                                onSelect={(k) => dispatch(setSelectedKind(k))}
                                 creditsOk={creditsOk}
                                 isLoadingBalance={isLoadingBalance}
                               />
@@ -1377,10 +551,7 @@ function WidgetContent() {
                                     placeholder="Microsoft..."
                                     value={sessionInfo.companyName}
                                     onChange={(e) =>
-                                      setSessionInfo((p) => ({
-                                        ...p,
-                                        companyName: e.target.value,
-                                      }))
+                                      dispatch(updateSessionInfo({ companyName: e.target.value }))
                                     }
                                     className="rounded-xl border-zinc-200 focus:ring-zinc-500 h-11"
                                   />
@@ -1400,10 +571,7 @@ function WidgetContent() {
                                     placeholder="Software Engineer versed in Python, SQL, and AWS..."
                                     value={sessionInfo.jobDescription}
                                     onChange={(e) =>
-                                      setSessionInfo((p) => ({
-                                        ...p,
-                                        jobDescription: e.target.value,
-                                      }))
+                                      dispatch(updateSessionInfo({ jobDescription: e.target.value }))
                                     }
                                     className="rounded-xl border-zinc-200 focus:ring-zinc-500 min-h-25 max-h-45 resize-none overflow-y-auto"
                                   />
@@ -1423,10 +591,7 @@ function WidgetContent() {
                                     <WidgetSelect
                                       value={sessionInfo.resumeId}
                                       onValueChange={(val) =>
-                                        setSessionInfo((p) => ({
-                                          ...p,
-                                          resumeId: val,
-                                        }))
+                                        dispatch(updateSessionInfo({ resumeId: val }))
                                       }
                                       placeholder="Select resume"
                                       options={resumes.map((r) => ({
@@ -1440,10 +605,7 @@ function WidgetContent() {
                                     {sessionInfo.resumeId && (
                                       <button
                                         onClick={() =>
-                                          setSessionInfo((p) => ({
-                                            ...p,
-                                            resumeId: "",
-                                          }))
+                                          dispatch(updateSessionInfo({ resumeId: "" }))
                                         }
                                         className="p-2.5 rounded-xl border border-zinc-200 hover:bg-zinc-50 text-zinc-400 hover:text-zinc-600 transition-colors"
                                       >
@@ -1467,10 +629,7 @@ function WidgetContent() {
                                     <WidgetSelect
                                       value={sessionInfo.documentId}
                                       onValueChange={(val) =>
-                                        setSessionInfo((p) => ({
-                                          ...p,
-                                          documentId: val,
-                                        }))
+                                        dispatch(updateSessionInfo({ documentId: val }))
                                       }
                                       placeholder="Select documents"
                                       options={documents.map((d) => ({
@@ -1484,10 +643,7 @@ function WidgetContent() {
                                     {sessionInfo.documentId && (
                                       <button
                                         onClick={() =>
-                                          setSessionInfo((p) => ({
-                                            ...p,
-                                            documentId: "",
-                                          }))
+                                          dispatch(updateSessionInfo({ documentId: "" }))
                                         }
                                         className="p-2.5 rounded-xl border border-zinc-200 hover:bg-zinc-50 text-zinc-400 hover:text-zinc-600 transition-colors"
                                       >
@@ -1500,41 +656,49 @@ function WidgetContent() {
 
                               <div className="grid grid-cols-2 gap-2 pt-2">
                                 <button
-                                  onClick={() => setCreationStep(0)}
+                                  onClick={() => dispatch(setCreationStep(0))}
                                   className="py-2.5 rounded-2xl border border-zinc-200 bg-white text-zinc-800 text-sm font-bold hover:bg-zinc-50 transition-all active:scale-[0.98]"
                                 >
                                   Back
                                 </button>
                                 {(() => {
-                                  const jdTrimmed = sessionInfo.jobDescription.trim();
-                                  const jdValid = !jdTrimmed || JOB_DESCRIPTION_REGEX.test(jdTrimmed);
+                                  const jdTrimmed =
+                                    sessionInfo.jobDescription.trim();
+                                  const jdValid =
+                                    !jdTrimmed ||
+                                    JOB_DESCRIPTION_REGEX.test(jdTrimmed);
                                   const canProceed =
                                     !!sessionInfo.companyName.trim() &&
                                     !!sessionInfo.resumeId &&
                                     jdValid;
-                                  const tooltipMsg = !sessionInfo.companyName.trim()
-                                    ? "Enter the company name to continue."
-                                    : !sessionInfo.resumeId
-                                      ? "Select a resume to continue."
-                                      : !jdValid
-                                        ? "Job description is too short — add more detail."
-                                        : "";
+                                  const tooltipMsg =
+                                    !sessionInfo.companyName.trim()
+                                      ? "Enter the company name to continue."
+                                      : !sessionInfo.resumeId
+                                        ? "Select a resume to continue."
+                                        : !jdValid
+                                          ? "Job description is too short — add more detail."
+                                          : "";
                                   return (
-                                <HoverTooltip text={tooltipMsg} side="top" className="w-full">
-                                <button
-                                  onClick={() => setCreationStep(2)}
-                                  disabled={!canProceed}
-                                  aria-disabled={!canProceed}
-                                  className={cn(
-                                    "w-full py-2.5 rounded-2xl text-sm font-bold transition-all active:scale-[0.98]",
-                                    canProceed
-                                      ? "bg-zinc-900 text-white hover:bg-zinc-800 shadow-lg shadow-black/10"
-                                      : "bg-zinc-200 text-zinc-400 cursor-not-allowed",
-                                  )}
-                                >
-                                  Next
-                                </button>
-                                </HoverTooltip>
+                                    <HoverTooltip
+                                      text={tooltipMsg}
+                                      side="top"
+                                      className="w-full"
+                                    >
+                                      <button
+                                        onClick={() => dispatch(setCreationStep(2))}
+                                        disabled={!canProceed}
+                                        aria-disabled={!canProceed}
+                                        className={cn(
+                                          "w-full py-2.5 rounded-2xl text-sm font-bold transition-all active:scale-[0.98]",
+                                          canProceed
+                                            ? "bg-zinc-900 text-white hover:bg-zinc-800 shadow-lg shadow-black/10"
+                                            : "bg-zinc-200 text-zinc-400 cursor-not-allowed",
+                                        )}
+                                      >
+                                        Next
+                                      </button>
+                                    </HoverTooltip>
                                   );
                                 })()}
                               </div>
@@ -1558,10 +722,7 @@ function WidgetContent() {
                                     <WidgetSelect
                                       value={sessionInfo.language}
                                       onValueChange={(val) =>
-                                        setSessionInfo((p) => ({
-                                          ...p,
-                                          language: val,
-                                        }))
+                                        dispatch(updateSessionInfo({ language: val }))
                                       }
                                       placeholder="Language"
                                       options={[
@@ -1585,10 +746,7 @@ function WidgetContent() {
                                       <Switch
                                         checked={sessionInfo.simpleLanguage}
                                         onCheckedChange={(val) =>
-                                          setSessionInfo((p) => ({
-                                            ...p,
-                                            simpleLanguage: val,
-                                          }))
+                                          dispatch(updateSessionInfo({ simpleLanguage: val }))
                                         }
                                       />
                                     </div>
@@ -1609,10 +767,7 @@ function WidgetContent() {
                                     placeholder="Use javascript, react, nodeJs for code generation"
                                     value={sessionInfo.extraContext}
                                     onChange={(e) =>
-                                      setSessionInfo((p) => ({
-                                        ...p,
-                                        extraContext: e.target.value,
-                                      }))
+                                      dispatch(updateSessionInfo({ extraContext: e.target.value }))
                                     }
                                     className="rounded-xl border-zinc-200 focus:ring-zinc-500 min-h-[60px] resize-none"
                                   />
@@ -1631,10 +786,7 @@ function WidgetContent() {
                                   <WidgetSelect
                                     value={sessionInfo.aiModel}
                                     onValueChange={(val) =>
-                                      setSessionInfo((p) => ({
-                                        ...p,
-                                        aiModel: val,
-                                      }))
+                                      dispatch(updateSessionInfo({ aiModel: val }))
                                     }
                                     placeholder="Select AI model"
                                     options={AI_MODELS_WIDGET}
@@ -1659,10 +811,7 @@ function WidgetContent() {
                                     <Switch
                                       checked={sessionInfo.autoGenerateAI}
                                       onCheckedChange={(val) =>
-                                        setSessionInfo((p) => ({
-                                          ...p,
-                                          autoGenerateAI: val,
-                                        }))
+                                        dispatch(updateSessionInfo({ autoGenerateAI: val }))
                                       }
                                     />
                                   </div>
@@ -1680,17 +829,15 @@ function WidgetContent() {
                                     <Switch
                                       checked={sessionInfo.saveTranscript}
                                       onCheckedChange={(val) =>
-                                        setSessionInfo((p) => ({
-                                          ...p,
-                                          saveTranscript: val,
-                                        }))
+                                        dispatch(updateSessionInfo({ saveTranscript: val }))
                                       }
                                     />
                                   </div>
                                 </div>
 
                                 {/* ── AI Projects context ── */}
-                                {(aiProjects.length > 0 || isLoadingProjects) && (
+                                {(aiProjects.length > 0 ||
+                                  isLoadingProjects) && (
                                   <div className="space-y-1.5">
                                     <div className="flex items-center gap-1.5">
                                       <Folder className="w-4 h-4 text-zinc-600" />
@@ -1712,20 +859,30 @@ function WidgetContent() {
                                     ) : (
                                       <div className="flex flex-col gap-1 max-h-[110px] overflow-y-auto pr-0.5">
                                         {aiProjects.map((proj) => {
-                                          const isSelected = sessionInfo.projectIds.includes(proj.id);
-                                          const firstTitle = proj.projects?.[0]?.projectHeader?.title;
-                                          const label = firstTitle || proj.position || "AI Project";
+                                          const isSelected =
+                                            sessionInfo.projectIds.includes(
+                                              proj.id,
+                                            );
+                                          const firstTitle =
+                                            proj.projects?.[0]?.projectHeader
+                                              ?.title;
+                                          const label =
+                                            firstTitle ||
+                                            proj.position ||
+                                            "AI Project";
                                           return (
                                             <button
                                               key={proj.id}
                                               type="button"
                                               onClick={() =>
-                                                setSessionInfo((p) => ({
-                                                  ...p,
-                                                  projectIds: isSelected
-                                                    ? p.projectIds.filter((id) => id !== proj.id)
-                                                    : [...p.projectIds, proj.id],
-                                                }))
+                                                dispatch(updateSessionInfo({ projectIds: isSelected
+                                                    ? sessionInfo.projectIds.filter(
+                                                        (id: string) => id !== proj.id,
+                                                      )
+                                                    : [
+                                                        ...sessionInfo.projectIds,
+                                                        proj.id,
+                                                      ] }))
                                               }
                                               className={cn(
                                                 "flex items-center gap-2 px-2.5 py-1.5 rounded-xl text-xs font-medium border transition-all text-left",
@@ -1743,14 +900,31 @@ function WidgetContent() {
                                                 )}
                                               >
                                                 {isSelected && (
-                                                  <svg className="w-2 h-2 text-white" fill="none" stroke="currentColor" strokeWidth={3} viewBox="0 0 12 12">
-                                                    <path strokeLinecap="round" strokeLinejoin="round" d="M2 6l3 3 5-5" />
+                                                  <svg
+                                                    className="w-2 h-2 text-white"
+                                                    fill="none"
+                                                    stroke="currentColor"
+                                                    strokeWidth={3}
+                                                    viewBox="0 0 12 12"
+                                                  >
+                                                    <path
+                                                      strokeLinecap="round"
+                                                      strokeLinejoin="round"
+                                                      d="M2 6l3 3 5-5"
+                                                    />
                                                   </svg>
                                                 )}
                                               </div>
-                                              <span className="truncate">{label}</span>
+                                              <span className="truncate">
+                                                {label}
+                                              </span>
                                               <span className="ml-auto flex-shrink-0 text-[10px] text-zinc-400">
-                                                {proj.projects?.length ?? 0} project{(proj.projects?.length ?? 0) !== 1 ? "s" : ""}
+                                                {proj.projects?.length ?? 0}{" "}
+                                                project
+                                                {(proj.projects?.length ??
+                                                  0) !== 1
+                                                  ? "s"
+                                                  : ""}
                                               </span>
                                             </button>
                                           );
@@ -1763,7 +937,7 @@ function WidgetContent() {
 
                               <div className="grid grid-cols-2 gap-2 pt-2">
                                 <button
-                                  onClick={() => setCreationStep(1)}
+                                  onClick={() => dispatch(setCreationStep(1))}
                                   className="py-2.5 rounded-2xl border border-zinc-200 bg-white text-zinc-800 text-sm font-bold hover:bg-zinc-50 transition-all active:scale-[0.98]"
                                 >
                                   Back
@@ -1790,10 +964,110 @@ function WidgetContent() {
                   </div>
                 </>
               )}
-            </>
-          )}
+          </>
         </div>
       </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+
+      {/*
+        Fixed portal overlay — renders at document.body, positioned via
+        getBoundingClientRect() of the trigger button.
+        - NOT inside the zoom container → no scale distortion
+        - Fixed within the fullscreen Tauri window → never clipped
+        - data-interactive on both backdrop and panel so cursor passthrough
+          turns OFF while the menu is visible
+      */}
+      {menuOpen && menuAnchor && createPortal(
+        <>
+          {/* Backdrop — captures outside clicks */}
+          <div
+            data-interactive
+            style={{ position: "fixed", inset: 0, zIndex: 9998 }}
+            onMouseDown={() => handleMenuOpenChange(false)}
+          />
+          {/* Menu panel */}
+          <div
+            data-interactive
+            style={{
+              position: "fixed",
+              top: menuAnchor.top,
+              left: menuAnchor.left,
+              zIndex: 9999,
+              width: MORE_ACTIONS_POPOVER_W,
+              borderRadius: 16,
+              background: "rgba(255,255,255,0.97)",
+              border: "1px solid rgba(0,0,0,0.07)",
+              boxShadow: "0 8px 28px rgba(0,0,0,0.10), 0 1px 4px rgba(0,0,0,0.05)",
+              overflow: "hidden",
+              transformOrigin: menuAnchor.direction === "up" ? "bottom center" : "top center",
+              animation: menuAnchor.direction === "up"
+                ? "menuInUp 140ms cubic-bezier(0.16,1,0.3,1) both"
+                : "menuIn 140ms cubic-bezier(0.16,1,0.3,1) both",
+            }}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <style>{`
+              @keyframes menuIn {
+                from { opacity: 0; transform: scale(0.95) translateY(-4px); }
+                to   { opacity: 1; transform: scale(1) translateY(0); }
+              }
+              @keyframes menuInUp {
+                from { opacity: 0; transform: scale(0.95) translateY(4px); }
+                to   { opacity: 1; transform: scale(1) translateY(0); }
+              }
+              /* Native range slider — clean dark circular thumb */
+              input[type="range"].slider-track::-webkit-slider-runnable-track {
+                height: 4px;
+                border-radius: 9999px;
+                background: transparent;
+              }
+              input[type="range"].slider-track::-webkit-slider-thumb {
+                -webkit-appearance: none;
+                appearance: none;
+                width: 14px;
+                height: 14px;
+                border-radius: 9999px;
+                background: #18181b;
+                border: 2px solid #ffffff;
+                box-shadow: 0 1px 2px rgba(0,0,0,0.18);
+                margin-top: -5px;
+                cursor: pointer;
+              }
+              input[type="range"].slider-track::-moz-range-track {
+                height: 4px;
+                border-radius: 9999px;
+                background: transparent;
+              }
+              input[type="range"].slider-track::-moz-range-thumb {
+                width: 14px;
+                height: 14px;
+                border-radius: 9999px;
+                background: #18181b;
+                border: 2px solid #ffffff;
+                box-shadow: 0 1px 2px rgba(0,0,0,0.18);
+                cursor: pointer;
+              }
+            `}</style>
+            <HeaderMenu
+              opacity={opacity}
+              setOpacity={setOpacity}
+              zoom={zoom}
+              setZoom={setZoom}
+              privateMode={privateMode}
+              setPrivateMode={setPrivateMode_}
+              safeMin={safeMin}
+              safeMax={safeMax}
+              atMin={atMin}
+              atMax={atMax}
+              sessionLocked={isSessionActive}
+            />
+          </div>
+        </>,
+        document.body,
+      )}
     </div>
   );
 }
@@ -1804,14 +1078,34 @@ function WidgetApp() {
   if (!PUBLISHABLE_KEY) {
     return <div className="text-xs text-red-500 p-4">Missing Clerk key</div>;
   }
-  return (
-    <ClerkProvider
-      publishableKey={PUBLISHABLE_KEY}
-      allowedRedirectProtocols={["tauri:", "http:", "https:"]}
-    >
-      <WidgetContent />
-    </ClerkProvider>
+
+  const content = (
+    <Provider store={store}>
+      <ClerkProvider
+        publishableKey={PUBLISHABLE_KEY}
+        allowedRedirectProtocols={["tauri:", "http:", "https:"]}
+      >
+        {OverlayFlags.USE_UNIFIED_OVERLAY ? (
+          /*
+           * Phase 4+: Unified fullscreen overlay runtime.
+           * OverlayRoot coordinates LauncherLayer / SessionLayer transitions
+           * and provides the OverlayPortalProvider for all menus/popovers.
+           * WidgetContent is passed as launcherContent — its JSX is unchanged;
+           * only the outer coordination layer changes.
+           */
+          <OverlayRoot launcherContent={<WidgetContent />} />
+        ) : (
+          /*
+           * Phase 1–3 (current): existing WidgetContent renders directly.
+           * Zero behavioral change until USE_UNIFIED_OVERLAY is enabled.
+           */
+          <WidgetContent />
+        )}
+      </ClerkProvider>
+    </Provider>
   );
+
+  return content;
 }
 
 createRoot(document.getElementById("launcher-root")!).render(

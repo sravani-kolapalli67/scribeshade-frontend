@@ -7,12 +7,14 @@ interface ChatMessageListProps {
   messages: Message[];
   isStreaming: boolean;
   isFullscreen?: boolean;
+  onRegenerate?: (messageId: string) => void;
 }
 
 export const ChatMessageList = ({
   messages,
   isStreaming,
   isFullscreen = false,
+  onRegenerate,
 }: ChatMessageListProps) => {
   return (
     <div className="flex-1 overflow-y-auto p-8 relative no-scrollbar">
@@ -43,6 +45,7 @@ export const ChatMessageList = ({
             isStreaming={
               isStreaming && chat.id === messages[messages.length - 1].id
             }
+            onRegenerate={onRegenerate ? () => onRegenerate(chat.id) : undefined}
           />
         ))
       )}

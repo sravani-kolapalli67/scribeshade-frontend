@@ -90,6 +90,7 @@ export const ENDPOINTS = {
   projectCategories:   (roleType?: string) =>
     `${api()}/api/project-categories${roleType ? `?role_type=${roleType}` : ""}`,
   projectsGenerate:       () => `${api()}/api/projects/generate`,
+  projectsMine:            () => `${api()}/api/projects/mine`,
   projectsList:  (userId: string) => `${api()}/api/projects/user/${userId}`,
   projectsGet:        (id: string) => `${api()}/api/projects/${id}`,
   projectsDelete:     (id: string) => `${api()}/api/projects/${id}`,
@@ -98,4 +99,5 @@ export const ENDPOINTS = {
   projectsVersions:        (id: string) => `${api()}/api/projects/${id}/versions`,
   projectsRollback:  (id: string, versionId: string) => `${api()}/api/projects/${id}/versions/${versionId}/rollback`,
   projectsEditComponent: (id: string) => `${api()}/api/projects/${id}/edit-component`,
+  projectsExportPdf:     (id: string) => `${api()}/api/projects/${id}/export-pdf`,
 } as const;

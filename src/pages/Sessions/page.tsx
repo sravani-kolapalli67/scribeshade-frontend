@@ -23,6 +23,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
+import { toast } from "sonner";
+
 type SessionStatus =
   | "PRE_CHECK"
   | "ACTIVE"
@@ -63,6 +65,10 @@ export default function Sessions() {
   const [isBulkDeleteDialogOpen, setIsBulkDeleteDialogOpen] = useState(false);
   const [bulkIdsToDelete, setBulkIdsToDelete] = useState<string[]>([]);
   const [isBulkDeleting, setIsBulkDeleting] = useState(false);
+  // Force-end + delete state (for sessions still ACTIVE/in-progress)
+  const [isForceDeleteDialogOpen, setIsForceDeleteDialogOpen] = useState(false);
+  const [sessionToForceDelete, setSessionToForceDelete] = useState<string | null>(null);
+  const [isForceDeleting, setIsForceDeleting] = useState(false);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
     null,
   );
@@ -136,19 +142,62 @@ export default function Sessions() {
     try {
       const res = await fetch(
         `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionToDelete}`,
-        {
-          method: "DELETE",
-        },
+        { method: "DELETE" },
       );
       if (res.ok) {
         setRefreshKey((prev) => prev + 1);
         setIsDeleteDialogOpen(false);
+        toast.success("Session deleted.");
+      } else if (res.status === 409) {
+        // Session is still active — offer a force-end + delete path
+        setIsDeleteDialogOpen(false);
+        setSessionToForceDelete(sessionToDelete);
+        setIsForceDeleteDialogOpen(true);
+      } else {
+        toast.error("Failed to delete session. Please try again.");
       }
     } catch (error) {
       console.error("Delete error:", error);
+      toast.error("Failed to delete session. Please try again.");
     } finally {
       setIsDeleting(false);
       setSessionToDelete(null);
+    }
+  };
+
+  /** Force-ends an active session then deletes it. */
+  const confirmForceDelete = async () => {
+    if (!sessionToForceDelete) return;
+    setIsForceDeleting(true);
+    try {
+      // 1. End the session gracefully so the backend transitions it to COMPLETED
+      await fetch(
+        `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionToForceDelete}/deactivate`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ transcript: "", aiUsage: 0 }),
+        },
+      ).catch(() => {}); // best-effort — session may already be ending
+
+      // 2. Now delete
+      const res = await fetch(
+        `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionToForceDelete}`,
+        { method: "DELETE" },
+      );
+      if (res.ok) {
+        setRefreshKey((prev) => prev + 1);
+        toast.success("Session ended and deleted.");
+      } else {
+        toast.error("Could not delete session. Please try again.");
+      }
+    } catch (err) {
+      console.error("Force delete error:", err);
+      toast.error("Could not delete session. Please try again.");
+    } finally {
+      setIsForceDeleting(false);
+      setSessionToForceDelete(null);
+      setIsForceDeleteDialogOpen(false);
     }
   };
 
@@ -156,18 +205,32 @@ export default function Sessions() {
     if (bulkIdsToDelete.length === 0) return;
     setIsBulkDeleting(true);
     try {
-      await Promise.all(
+      const results = await Promise.allSettled(
         bulkIdsToDelete.map((id) =>
           fetch(`${import.meta.env.VITE_BACKEND_URL}/api/session/${id}`, {
             method: "DELETE",
           }),
         ),
       );
+      const blocked = results.filter(
+        (r) => r.status === "fulfilled" && (r as PromiseFulfilledResult<Response>).value.status === 409,
+      ).length;
+      const failed = results.filter((r) => r.status === "rejected").length;
       setRefreshKey((prev) => prev + 1);
       setIsBulkDeleteDialogOpen(false);
       setBulkIdsToDelete([]);
+      if (blocked > 0) {
+        toast.warning(
+          `${blocked} session${blocked > 1 ? "s" : ""} could not be deleted because they are still active. End them first.`,
+        );
+      } else if (failed > 0) {
+        toast.error(`${failed} deletion${failed > 1 ? "s" : ""} failed. Please try again.`);
+      } else {
+        toast.success("Sessions deleted.");
+      }
     } catch (error) {
       console.error("Bulk delete error:", error);
+      toast.error("Failed to delete sessions. Please try again.");
     } finally {
       setIsBulkDeleting(false);
     }
@@ -397,11 +460,7 @@ export default function Sessions() {
               className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50 disabled:pointer-events-none"
               disabled={!row.original.endedAt}
             >
-              {row.original.endedAt && !(row.original as any).feedback ? (
-                <div className="h-4 w-4 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
-              ) : (
-                <BarChart3 className="h-4 w-4" />
-              )}
+              <BarChart3 className="h-4 w-4" />
             </Button>
             <Button
               variant="ghost"
@@ -536,6 +595,41 @@ export default function Sessions() {
               disabled={isDeleting}
             >
               {isDeleting ? "Deleting..." : "Delete"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Force-End + Delete Dialog (session still ACTIVE) */}
+      <Dialog open={isForceDeleteDialogOpen} onOpenChange={setIsForceDeleteDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-xl font-bold">Session Still Active</DialogTitle>
+            <DialogDescription className="text-base text-muted-foreground mt-2">
+              This session is currently active or in progress. To delete it, it must be ended first.
+              <br /><br />
+              Do you want to <strong>force-end and delete</strong> this session?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="flex flex-row justify-end gap-3 mt-6">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setIsForceDeleteDialogOpen(false);
+                setSessionToForceDelete(null);
+              }}
+              className="px-6 h-11 font-medium rounded-xl"
+              disabled={isForceDeleting}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={confirmForceDelete}
+              className="px-6 h-11 font-medium rounded-xl transition-colors"
+              disabled={isForceDeleting}
+            >
+              {isForceDeleting ? "Ending & Deleting..." : "End & Delete"}
             </Button>
           </DialogFooter>
         </DialogContent>

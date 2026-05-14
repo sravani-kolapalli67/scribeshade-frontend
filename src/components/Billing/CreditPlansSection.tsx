@@ -7,9 +7,13 @@ import { Coins, Zap, TrendingUp, CheckCircle2, Sparkles, ShieldCheck, TimerOff, 
 import { Button } from "@/components/ui/button";
 import {
   useCreditPlans,
-  type SupportedCurrency,
   type CreditPlan,
 } from "@/hooks/useCreditPlans";
+import { useUserCurrency } from "@/hooks/useUserCurrency";
+import {
+  CURRENCY_SYMBOLS,
+  CURRENCY_FLAGS,
+} from "@/lib/userCurrency";
 
 // ─── Razorpay types ───────────────────────────────────────────────────────────
 declare global {
@@ -46,8 +50,6 @@ function loadRazorpayScript(): Promise<boolean> {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
-const CURRENCY_SYMBOLS: Record<SupportedCurrency, string> = { INR: "₹", USD: "$", GBP: "£" };
-const CURRENCY_FLAGS:   Record<SupportedCurrency, string> = { INR: "🇮🇳", USD: "🇺🇸", GBP: "🇬🇧" };
 const POPULAR_CODE    = "standard_60";
 const BEST_VALUE_CODE = "mega_600";
 
@@ -64,7 +66,8 @@ interface CreditPlansSectionProps {
 
 export function CreditPlansSection({ onSuccess }: CreditPlansSectionProps) {
   const { getToken } = useAuth();
-  const [currency, setCurrency]         = useState<SupportedCurrency>("INR");
+  // Resolved once synchronously — no flicker, no switcher shown to user.
+  const { currency }               = useUserCurrency();
   const [selectedPlan, setSelectedPlan] = useState<CreditPlan | null>(null);
   const [paying, setPaying]             = useState(false);
 
@@ -237,23 +240,10 @@ export function CreditPlansSection({ onSuccess }: CreditPlansSectionProps) {
         </div>
       </div>
 
-      {/* ── Currency switcher ── */}
-      <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">
-        {(["INR", "USD", "GBP"] as SupportedCurrency[]).map((c) => (
-          <button
-            key={c}
-            type="button"
-            onClick={() => { setCurrency(c); setSelectedPlan(null); }}
-            className={`inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-xs font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand ${
-              currency === c
-                ? "bg-white text-slate-950 shadow-sm"
-                : "text-slate-500 hover:bg-white hover:text-slate-900"
-            }`}
-          >
-            <span className="text-sm">{CURRENCY_FLAGS[c]}</span>
-            {c}
-          </button>
-        ))}
+      {/* ── Currency badge (read-only, derived from location) ── */}
+      <div className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-500 select-none">
+        <span className="text-sm">{CURRENCY_FLAGS[currency]}</span>
+        <span>{currency}</span>
       </div>
 
       {/* ── Plan grid ── */}

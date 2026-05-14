@@ -1,12 +1,20 @@
-import React, { useEffect, useState, useRef, useCallback } from "react";
+import React, { useEffect, useState, useRef, useCallback, memo } from "react";
 import { createRoot } from "react-dom/client";
-import { listen, emit } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { Provider } from "react-redux";
+import { ClerkProvider } from "@clerk/clerk-react";
 import { invoke } from "@tauri-apps/api/core";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { useOverlayShortcuts } from "@/hooks/useOverlayShortcuts";
+import { useSafeZoom } from "@/hooks/useSafeZoom";
+import { useCursorPassthrough } from "@/features/launcher/hooks/useCursorPassthrough";
+import {
+  getOpacity, saveOpacity,
+  getZoom, saveZoom,
+  getPrivateMode, savePrivateMode,
+} from "@/lib/overlaySettings";
 import {
   Send,
   Copy,
@@ -20,18 +28,18 @@ import {
   ChevronUp,
   ChevronLeft,
   ChevronRight,
-  MessageSquare,
   Star,
   LogOut,
   Loader2,
   AlignJustify,
+  HelpCircle,
 } from "lucide-react";
 import { ChatActionButtons } from "./components/ChatActionButtons";
 import { ModelSelector } from "./components/ModelSelector";
-import { useFreeSessionTimer } from "@/hooks/useFreeSessionTimer";
-import { useAIChat } from "@/hooks/useAIChat";
-import { useSessionHeartbeat } from "@/hooks/useSessionHeartbeat";
-import { useSessionEvents } from "@/hooks/useSessionEvents";
+import { SessionMenu } from "@/features/session/components/SessionMenu";
+import { FloatingSurface } from "@/features/session/components/FloatingSurface";
+import { SessionTranscript } from "@/features/session/components/SessionTranscript";
+import { useFloatingSession } from "@/features/session/hooks/useFloatingSession";
 import { cn } from "@/lib/utils";
 import {
   Tooltip,
@@ -40,7 +48,8 @@ import {
   TooltipProvider,
 } from "@/components/ui/tooltip";
 import "@/App.css";
-import { toast, Toaster } from "sonner";
+import { Toaster } from "sonner";
+import { store } from "@/store/store";
 
 const KEYWORD_CONFIGS = [
   { color: "text-blue-400" },
@@ -60,23 +69,6 @@ const getKeywordConfig = (text: string) => {
 };
 
 // â”€â”€â”€ Types
-interface SessionInitData {
-  sessionId: string;
-  isFree: boolean;
-  aiModel: string;
-  language: string;
-  companyName: string;
-  startedAt: string | null;
-  maxAllowedMinutes: number | null;
-}
-
-interface TranscriptMessage {
-  id: string;
-  sender: "User" | "Interviewer";
-  text: string;
-  timestamp: number;
-}
-
 interface AIDisplayResponse {
   text: string;
   isStreaming: boolean;
@@ -98,8 +90,6 @@ const getLanguageCode = (lang: string): string => {
   return mapping[lang] || "en";
 };
 
-const DEEPGRAM_KEY = import.meta.env.VITE_DEEPGRAM_API_KEY || "";
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "";
 
 //  CodeBlock (for markdown rendering)
 const CodeBlock = ({
@@ -242,6 +232,27 @@ const InlineCopyButton: React.FC<{ text: string; label?: string }> = ({ text, la
   );
 };
 
+/**
+ * sanitizeStreamingMarkdown — removes unterminated markdown syntax characters
+ * that appear mid-stream before the closing marker arrives. Prevents raw `**`,
+ * `*`, `__`, `_` from flickering in the UI during progressive rendering.
+ * Safe to apply to fully-completed text too (no-op on valid markdown).
+ */
+function sanitizeStreamingMarkdown(text: string): string {
+  return (
+    text
+      // Strip trailing lone ***/** / * or ___ / __ / _
+      .replace(/(\*{1,3}|_{1,3})$/, "")
+      // Strip trailing backtick sequences
+      .replace(/`{1,3}$/, "")
+      // Strip lone ** or * that appear on their own line (orphaned bold/italic markers)
+      .replace(/^\*{1,3}\s*$/gm, "")
+      // Strip orphaned ** at the very beginning of the string before any word char
+      .replace(/^\*{1,3}(?=\s|\n|$)/, "")
+      .trimStart()
+  );
+}
+
 // Answer Area
 const AnswerArea: React.FC<{
   responses: AIDisplayResponse[];
@@ -261,23 +272,46 @@ const AnswerArea: React.FC<{
       className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-4 scroll-smooth no-scrollbar"
     >
       {responses.map((resp) => {
-        const parsed = parseAIResponse(resp.text);
+        // Apply streaming sanitizer to prevent raw markdown syntax during generation
+        const displayText = resp.isStreaming
+          ? sanitizeStreamingMarkdown(resp.text)
+          : resp.text;
+        const parsed = parseAIResponse(displayText);
+
+        // Universal "Copy All" payload — always includes the question (when
+        // present) followed by the answer, so users can paste a self-contained
+        // Q&A snippet into notes / Slack / docs in one click.
+        const copyAllPayload = parsed.question
+          ? `Question:\n${parsed.question}\n\nAnswer:\n${parsed.answer}`
+          : parsed.answer;
+
         return (
           <div
             key={resp.messageId}
             className="animate-in fade-in slide-in-from-bottom-1 duration-300"
           >
-            {/* Summarized Question Header */}
+            {/*
+              Question section — rendered whenever the AI response contains a
+              parsed question (always for AI Answer; sometimes for Analyze
+              Screen). Hovering reveals an inline copy button that copies just
+              the question text.  The transcript panel shows raw transcripts;
+              this block shows the AI's *summarized* version so the user can
+              copy the cleaned-up phrasing the AI is actually answering.
+            */}
             {parsed.question && (
-              <div className="flex items-start gap-2 mb-3 text-[13.5px] leading-relaxed text-white">
-                <MessageSquare className="h-4 w-4 mt-0.5 shrink-0 text-white/60" />
-                <div className="flex-1 wrap-break-word">
-                  <span className="font-bold">Question:</span>{" "}
-                  <span className="font-medium text-white/90">
-                    {parsed.question}
+              <div className="mb-3 group/question">
+                <div className="flex items-center gap-2 mb-1">
+                  <HelpCircle className="h-3.5 w-3.5 text-blue-400 shrink-0" />
+                  <span className="text-[12px] font-bold uppercase tracking-wider text-blue-300/90">
+                    Question
+                  </span>
+                  <span className="opacity-0 group-hover/question:opacity-100 transition-opacity">
+                    <InlineCopyButton text={parsed.question} />
                   </span>
                 </div>
-                <InlineCopyButton text={parsed.question} label="COPY" />
+                <div className="text-[12.5px] leading-relaxed text-white/80 italic pl-5 border-l-2 border-blue-400/30 wrap-break-word">
+                  {parsed.question}
+                </div>
               </div>
             )}
 
@@ -287,7 +321,7 @@ const AnswerArea: React.FC<{
                 Answer:
               </span>
               {!resp.isStreaming && parsed.answer && (
-                <InlineCopyButton text={parsed.answer} label="COPY ALL" />
+                <InlineCopyButton text={copyAllPayload} label="COPY ALL" />
               )}
             </div>
 
@@ -423,729 +457,264 @@ function compressScreenshotToBlob(dataUrl: string): Promise<Blob> {
 }
 
 const FloatingApp: React.FC = () => {
-  // â”€â”€ Session context (received from launcher via "session-init" event) â”€â”€â”€
-  const [sessionInfo, setSessionInfo] = useState<SessionInitData | null>(() => {
-    try {
-      const stored = sessionStorage.getItem("scribeshade.session-init");
-      return stored ? (JSON.parse(stored) as SessionInitData) : null;
-    } catch {
-      return null;
-    }
-  });
-  const [selectedModel, setSelectedModel] = useState(() => {
-    try {
-      const stored = sessionStorage.getItem("scribeshade.session-init");
-      if (stored) {
-        const info = JSON.parse(stored) as SessionInitData;
-        return info.aiModel || "google/gemma-4-26b-a4b-it";
-      }
-    } catch {}
-    return "google/gemma-4-26b-a4b-it";
-  });
+  // ── Overlay settings (opacity / zoom / private mode) — stays local ────────
+  // These have their own persistence via overlaySettings and are not Redux state.
+  const [overlayOpacity, setOverlayOpacityState] = useState(() => getOpacity());
+  const [overlayZoom, setOverlayZoomState] = useState(() => getZoom());
+  const [overlayPrivate, setOverlayPrivateState] = useState(() => getPrivateMode());
 
-  const [messages, setMessages] = useState<TranscriptMessage[]>([]);
-  const [isEnding, setIsEnding] = useState(false);
-  const [isWindowCollapsed, setIsWindowCollapsed] = useState(false);
-  const [isResponsesExpanded, setIsResponsesExpanded] = useState(false);
-  const [isTranscriptExpanded, setIsTranscriptExpanded] = useState(false);
-  const [currentResponseIndex, setCurrentResponseIndex] = useState(0);
-  const [inputValue, setInputValue] = useState("");
-  const [creditWarning, setCreditWarning] = useState<number | null>(null);
-
-  const rootRef = useRef<HTMLDivElement>(null);
-  const lastSentHeightRef = useRef<number>(185);
-  const heightDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isEmittingRef = useRef(false);
-  const isAnalyzeEmittingRef = useRef(false);
-  const [isCapturing, setIsCapturing] = useState(false);
-
-  // â”€â”€ Stable refs so event-listeners never stale â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  const sessionInfoRef = useRef<SessionInitData | null>(null);
-  const messagesRef = useRef<TranscriptMessage[]>([]);
-  const selectedModelRef = useRef(selectedModel);
-
-  sessionInfoRef.current = sessionInfo;
-  messagesRef.current = messages;
-  selectedModelRef.current = selectedModel;
-
-  // â”€â”€ AI Chat (direct backend calls) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  const {
-    aiChat,
-    isAnalyzing,
-    isAnswering,
-    handleAiAnswer,
-    handleAnalyzeScreen,
-    handleCustomQuery,
-  } = useAIChat();
-
-  // AI messages are always sender="AI" in aiChat
-  const aiResponses = aiChat;
-
-  const endSessionNow = useCallback(async () => {
-    if (isEnding) return;
-    setIsEnding(true);
-    const info = sessionInfoRef.current;
-    if (!info) {
-      await getCurrentWindow().close();
-      return;
-    }
-    try {
-      const transcript = messagesRef.current
-        .map((m) => `[${m.sender}]: ${m.text}`)
-        .join("\n");
-      const aiUsage = parseInt(
-        localStorage.getItem(`aiUsage_${info.sessionId}`) || "0",
-      );
-
-      // Calculate elapsed minutes so the backend can apply the free-zone rule
-      const FREE_ZONE_MINUTES = 5;
-      const durationMinutes = info.startedAt
-        ? Math.ceil((Date.now() - new Date(info.startedAt).getTime()) / 60_000)
-        : null;
-
-      // Parallelize cleanup operations: call backend, reset Rust state, and notify main window
-      await Promise.all([
-        fetch(`${BACKEND_URL}/api/session/${info.sessionId}/deactivate`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ transcript, aiUsage, durationMinutes }),
-        }).catch((err) => console.error("Deactivate fetch failed:", err)),
-        invoke("set_session_active", { active: false }).catch(() => {}),
-        emit("overlay-end-session-direct").catch(() => {}),
-      ]);
-
-      localStorage.removeItem(`aiUsage_${info.sessionId}`);
-      try { sessionStorage.removeItem("scribeshade.session-init"); } catch {}
-
-      // Show free-zone toast if applicable (mini window ends quickly)
-      if (durationMinutes !== null && durationMinutes <= FREE_ZONE_MINUTES) {
-        toast.success("Session ended — no credits charged (under 5 min)");
-      }
-    } catch (err) {
-      console.error("Error ending session:", err);
-    } finally {
-      // Notify launcher to reset session state before showing it
-      await emit("session:reset").catch(() => {});
-      // Show the launcher widget instead of just closing the window
-      invoke("show_launcher_widget").catch(() => {});
-      await getCurrentWindow().close();
-    }
-  }, [isEnding]);
-
-  const endSessionNowRef = useRef(endSessionNow);
-  endSessionNowRef.current = endSessionNow;
-
-  const onTimeUp = useCallback(() => {
-    toast.info("Free session time is up!");
-    endSessionNowRef.current();
+  const setOverlayOpacity = useCallback((v: number) => { setOverlayOpacityState(v); saveOpacity(v); }, []);
+  const setOverlayZoom    = useCallback((v: number) => { setOverlayZoomState(v);    saveZoom(v);    }, []);
+  const setOverlayPrivate = useCallback((v: boolean) => {
+    setOverlayPrivateState(v);
+    savePrivateMode(v);
+    invoke("toggle_content_protection", { protected: v }).catch(console.error);
   }, []);
 
-  const { formattedTime } = useFreeSessionTimer({
-    sessionId: sessionInfo?.sessionId,
-    onTimeUp,
-    maxAllowedMinutes: sessionInfo?.maxAllowedMinutes ?? null,
-  });
+  // Ref for safe zoom measurement (points to the FloatingSurface root).
+  const floatRootRef = useRef<HTMLDivElement>(null);
+  const isPrivateLockedRef = useRef(false);
 
-  // â”€â”€ Credit callbacks (stable) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  const handleExhausted = useCallback(() => {
-    toast.error("Session ended â€” credits exhausted.", { duration: 6000 });
-    endSessionNowRef.current();
-  }, []);
-
-  const handleCreditWarning = useCallback((remaining: number) => {
-    setCreditWarning(remaining);
-    toast.warning(
-      `Only ${remaining} minute${remaining === 1 ? "" : "s"} of credit remaining!`,
-      { duration: 8000 },
-    );
-  }, []);
-
-  // â”€â”€ Heartbeat (paid sessions) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  useSessionHeartbeat({
-    sessionId: sessionInfo?.sessionId,
-    enabled: !!(sessionInfo && !sessionInfo.isFree && sessionInfo.startedAt),
-    startedAt: sessionInfo?.startedAt ?? null,
-    onExhausted: handleExhausted,
-    onWarning: handleCreditWarning,
-  });
-
-  // â”€â”€ SSE events (paid sessions) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  useSessionEvents({
-    sessionId: sessionInfo?.sessionId,
-    enabled: !!(sessionInfo && !sessionInfo.isFree && sessionInfo.startedAt),
-    onExhausted: handleExhausted,
-    onWarning: handleCreditWarning,
-  });
-
-  // â”€â”€ Stable transcript callbacks (use refs so Deepgram WS never stales) â”€â”€
-  const handleUserTranscript = useCallback(
-    (text: string, isFinal: boolean) => {
-      if (!isFinal || !text.trim()) return;
-      const sid = sessionInfoRef.current?.sessionId;
-      setMessages((prev) => {
-        const now = Date.now();
-        const normalized = text.toLowerCase().trim().replace(/[.!?]/g, "");
-        // Deduplicate against existing User messages only — prevents double-add
-        // when both the native mic path and overlay-transcript event both fire
-        // for the same utterance.
-        const isDupe = prev.some((m) => {
-          if (m.sender !== "User") return false;
-          if (now - m.timestamp > 2000) return false;
-          const existing = m.text.toLowerCase().trim().replace(/[.!?]/g, "");
-          return (
-            existing === normalized ||
-            existing.includes(normalized) ||
-            normalized.includes(existing)
-          );
-        });
-        if (isDupe) return prev;
-        if (sid) {
-          fetch(`${BACKEND_URL}/api/session/${sid}/save-message`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              role: "USER",
-              question: text,
-              answer: "",
-              time: new Date().toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-              }),
-            }),
-          }).catch(console.error);
-        }
-        return [
-          ...prev,
-          {
-            id: Math.random().toString(36).slice(7),
-            sender: "User" as const,
-            text,
-            timestamp: now,
-          },
-        ];
-      });
-    },
-    [], // no deps â€” reads sessionInfoRef
+  const { safeMin: floatSafeMin, safeMax: floatSafeMax } = useSafeZoom(
+    floatRootRef,
+    overlayZoom,
+    setOverlayZoom,
+    true,
   );
 
-  const handleInterviewerTranscript = useCallback(
-    (text: string, isFinal: boolean) => {
-      if (!isFinal || !text.trim()) return;
-      const sid = sessionInfoRef.current?.sessionId;
-      setMessages((prev) => {
-        const now = Date.now();
-        const normalized = text.toLowerCase().trim().replace(/[.!?]/g, "");
-        // Deduplicate against existing Interviewer messages only
-        const isDupe = prev.some((m) => {
-          if (m.sender !== "Interviewer") return false;
-          if (now - m.timestamp > 2000) return false;
-          const existing = m.text.toLowerCase().trim().replace(/[.!?]/g, "");
-          return (
-            existing === normalized ||
-            existing.includes(normalized) ||
-            normalized.includes(existing)
-          );
-        });
-        if (isDupe) return prev;
-        if (sid) {
-          fetch(`${BACKEND_URL}/api/session/${sid}/save-message`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              role: "INTERVIEWER",
-              question: text,
-              answer: "",
-              time: new Date().toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-              }),
-            }),
-          }).catch(console.error);
-        }
-        return [
-          ...prev,
-          {
-            id: Math.random().toString(36).slice(7),
-            sender: "Interviewer" as const,
-            text,
-            timestamp: now,
-          },
-        ];
+  useOverlayShortcuts({
+    opacity: overlayOpacity, setOpacity: setOverlayOpacity,
+    zoom: overlayZoom,       setZoom: setOverlayZoom,
+    privateMode: overlayPrivate, setPrivateMode: setOverlayPrivate,
+    safeZoomMin: floatSafeMin,
+    safeZoomMax: floatSafeMax,
+    isPrivateLocked: isPrivateLockedRef.current,
+  });
+
+  // ── Session business logic — delegated to Redux-backed hook ───────────────
+  const session = useFloatingSession();
+
+  // Keep private-mode lock in sync with whether a session is active
+  isPrivateLockedRef.current = !!session.sessionInfo;
+
+  // ── Click-through passthrough (Layer 1 = fullscreen, Layer 2 = widget) ────
+  // Identical pattern to the launcher window. Polls cursor position at ~30fps
+  // and calls setIgnoreCursorEvents based on [data-interactive] hit-testing.
+  // The mini overlay never uses custom mouse drag, so isDraggingRef is always false.
+  const isDraggingRef = useRef(false);
+  useCursorPassthrough({ isDraggingRef });
+
+  // ── CSS-based widget drag (fullscreen window stays fixed; widget moves inside it)
+  const [widgetPos, setWidgetPos] = useState<{ top: number; left: number } | null>(null);
+  const layer2Ref = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{
+    startMouseX: number; startMouseY: number;
+    startLeft: number;  startTop: number;
+  } | null>(null);
+
+  const handleGripMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isDraggingRef.current = true;
+    const rect = layer2Ref.current?.getBoundingClientRect();
+    if (!rect) { isDraggingRef.current = false; return; }
+    dragRef.current = {
+      startMouseX: e.clientX, startMouseY: e.clientY,
+      startLeft: rect.left,   startTop: rect.top,
+    };
+    const onMouseMove = (ev: MouseEvent) => {
+      const d = dragRef.current;
+      if (!d) return;
+      setWidgetPos({
+        left: d.startLeft + (ev.clientX - d.startMouseX),
+        top:  Math.max(0, d.startTop + (ev.clientY - d.startMouseY)),
       });
-    },
-    [], // no deps â€” reads sessionInfoRef
-  );
+    };
+    const onMouseUp = () => {
+      isDraggingRef.current = false;
+      dragRef.current = null;
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup",   onMouseUp);
+    };
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup",   onMouseUp);
+  }, []);
 
-  // ── Rust-native STT state ────────────────────────────────────────────────
-  // The floating window never touches raw audio or Deepgram WebSockets.
-  // Rust captures PCM, owns the DG connection, and emits Tauri events.
-  const [isMicActive, setIsMicActive] = useState(false);
-  const [isMicConnecting, setIsMicConnecting] = useState(false);
-  const [micInterimTranscript, setMicInterimTranscript] = useState("");
-  const [tabStatus, setTabStatus] = useState<"idle" | "connecting" | "transcribing" | "error">("idle");
-  const [tabError, setTabError] = useState<string | null>(null);
-  const [tabInterimTranscript, setTabInterimTranscript] = useState("");
+  // ── Keyboard shortcuts (must live here so they fire with no element focused)
+  // Cmd/Ctrl+G → AI Answer  |  Cmd/Ctrl+K → Analyze Screen
+  const handleAiAnswerClickRef = useRef(session.handleAiAnswerClick);
+  const handleAnalyzeScreenCaptureRef = useRef<() => void>(() => {});
+  handleAiAnswerClickRef.current = session.handleAiAnswerClick;
 
-  // captureArmed = the user just started a session in the launcher (live
-  // "session-init" event arrived in this run of the app).  Hydrating
-  // sessionInfo from sessionStorage on mount must NOT trigger native capture
-  // — that was the source of the launch-time "System audio failed" toast.
-  const [captureArmed, setCaptureArmed] = useState(false);
+  // Local "is the screen-capture phase running" flag.  The hook's `isCapturing`
+  // only flips AFTER the screenshot has already been captured + compressed —
+  // those steps can take 1-3 seconds, during which the user sees no feedback
+  // on the Analyze Screen button.  We flip this immediately on click so the
+  // button shows the spinner the moment it is pressed.
+  const [isCapturePhase, setIsCapturePhase] = useState(false);
 
-  const handleInterviewerTranscriptRef = useRef(handleInterviewerTranscript);
-  handleInterviewerTranscriptRef.current = handleInterviewerTranscript;
-
-  const handleUserTranscriptRef = useRef(handleUserTranscript);
-  handleUserTranscriptRef.current = handleUserTranscript;
-
-  const startSystemAudio = useCallback(async () => {
-    if (!sessionInfoRef.current) return;
-    const lang = getLanguageCode(sessionInfoRef.current.language ?? "English");
-    setTabError(null);
-    setTabStatus("connecting");
+  // Capture + compress screenshot, then delegate to hook
+  const handleAnalyzeScreenCapture = useCallback(async () => {
+    if (session.isAnalyzing || session.isAnswering || isCapturePhase) return;
+    setIsCapturePhase(true);
+    // Open the responses panel immediately so the "Capturing screen…" loader
+    // is visible from the very first click.
+    session.expandResponses();
     try {
-      await invoke("start_system_audio_transcription", {
-        language: lang, model: "nova-3",
-      });
-    } catch (e: unknown) {
-      const msg = String(e);
-      setTabError(msg);
-      setTabStatus("error");
-    }
-  }, []);
-
-  // Transcript + status listeners are unconditional so a late-arriving
-  // session-init still wires correctly.  No capture is started here.
-  useEffect(() => {
-    let unlistenTx: (() => void) | undefined;
-    let unlistenSt: (() => void) | undefined;
-
-    listen<{ text: string; is_final: boolean }>("stt:system-audio", (event) => {
-      const { text, is_final } = event.payload;
-      if (is_final) {
-        setTabInterimTranscript("");
-        handleInterviewerTranscriptRef.current(text, true);
-      } else {
-        setTabInterimTranscript(text);
-      }
-    }).then(fn => { unlistenTx = fn; }).catch(() => {});
-
-    listen<{ status: string; error?: string }>("stt:status:system", (event) => {
-      const { status, error } = event.payload;
-      setTabStatus(status as "idle" | "connecting" | "transcribing" | "error");
-      if (status === "error" && error) {
-        setTabError(error);
-      } else if (status === "transcribing") {
-        setTabError(null);
-      }
-    }).then(fn => { unlistenSt = fn; }).catch(() => {});
-
-    return () => {
-      unlistenTx?.();
-      unlistenSt?.();
-    };
-  }, []);
-
-  // Arm → start.  The ONLY trigger for native system audio is a live
-  // session-init event setting captureArmed.  App launch / window reload /
-  // sessionStorage hydration never fire this on their own.
-  useEffect(() => {
-    if (!captureArmed || !sessionInfo) return;
-    void startSystemAudio();
-    return () => {
-      invoke("stop_system_audio_transcription").catch(() => {});
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [captureArmed, sessionInfo?.sessionId]);
-
-  // Mic: user-controlled (off by default). Transcripts arrive via stt:mic events.
-  useEffect(() => {
-    let unlistenTx: (() => void) | undefined;
-    let unlistenSt: (() => void) | undefined;
-
-    listen<{ text: string; is_final: boolean }>("stt:mic", (event) => {
-      const { text, is_final } = event.payload;
-      if (is_final) {
-        setMicInterimTranscript("");
-        handleUserTranscriptRef.current(text, true);
-      } else {
-        setMicInterimTranscript(text);
-      }
-    }).then(fn => { unlistenTx = fn; }).catch(() => {});
-
-    listen<{ status: string; error?: string }>("stt:status:mic", (event) => {
-      const { status, error } = event.payload;
-      if (status === "transcribing") {
-        setIsMicActive(true);
-        setIsMicConnecting(false);
-      } else if (status === "connecting") {
-        setIsMicConnecting(true);
-      } else {
-        setIsMicActive(false);
-        setIsMicConnecting(false);
-      }
-      if (status === "error" && error) {
-        toast.error(`Mic: ${error}`, { duration: 6000 });
-      }
-    }).then(fn => { unlistenSt = fn; }).catch(() => {});
-
-    return () => {
-      unlistenTx?.();
-      unlistenSt?.();
-    };
-  }, []);
-useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    listen<SessionInitData>("session-init", (event) => {
-      const info = event.payload;
-      try { sessionStorage.setItem("scribeshade.session-init", JSON.stringify(info)); } catch {}
-      setSessionInfo(info);
-      setSelectedModel(info.aiModel || "google/gemma-4-26b-a4b-it");
-      // Notify Rust that a session is now active
-      invoke("set_session_active", { active: true }).catch(() => {});
-      // Arm capture: this is the only path that triggers native system audio.
-      // Hydrating sessionInfo from sessionStorage on mount is intentionally
-      // NOT enough — we require a live event in this run of the app so that
-      // app launch / window reload never auto-starts capture.
-      setCaptureArmed(true);
-      // Mic is OFF by default — user must toggle it on.
-    })
-      .then((fn) => {
-        unlisten = fn;
-      })
-      .catch(console.error);
-    return () => {
-      unlisten?.();
-    };
-  }, []);
-
-  // Listen for structured transcript events from the main window
-  // page.tsx emits overlay-transcript for every finalized message from BOTH mic and tab audio.
-  // We deduplicate against messages already added by the native audio path.
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    listen<{ sender: "User" | "Interviewer"; text: string; timestamp: number }>(
-      "overlay-transcript",
-      (event) => {
-        const { sender, text, timestamp } = event.payload;
-        if (!text.trim()) return;
-        setMessages((prev) => {
-          const normalized = text.toLowerCase().trim().replace(/[.!?]/g, "");
-          // Skip if already present (added by native mic/tab audio path)
-          const alreadyExists = prev.some((m) => {
-            if (m.sender !== sender) return false;
-            if (Math.abs(m.timestamp - timestamp) > 3000) return false;
-            const existing = m.text.toLowerCase().trim().replace(/[.!?]/g, "");
-            return (
-              existing === normalized ||
-              existing.includes(normalized) ||
-              normalized.includes(existing)
-            );
-          });
-          if (alreadyExists) return prev;
-          return [
-            ...prev,
-            {
-              id: Math.random().toString(36).slice(7),
-              sender,
-              text,
-              timestamp,
-            },
-          ];
-        });
-      },
-    )
-      .then((fn) => {
-        unlisten = fn;
-      })
-      .catch(console.error);
-    return () => {
-      unlisten?.();
-    };
-  }, []);
-
-  // â”€â”€ Auto-expand responses panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  useEffect(() => {
-    if (aiResponses.length > 0) {
-      setCurrentResponseIndex(aiResponses.length - 1);
-      setIsResponsesExpanded(true);
-    }
-  }, [aiResponses.length]);
-
-  useEffect(() => {
-    if (isAnswering || isAnalyzing) {
-      setIsResponsesExpanded(true);
-    }
-  }, [isAnswering, isAnalyzing]);
-
-  // â”€â”€â”€ Derived state machine â€” single source of truth for the OS window â”€â”€â”€
-  type MiniState = "badge" | "bar" | "expanded";
-  const miniState: MiniState = isWindowCollapsed
-    ? "badge"
-    : isAnswering ||
-        isAnalyzing ||
-        (aiResponses.length > 0 && isResponsesExpanded)
-      ? "expanded"
-      : "bar";
-
-  // Push discrete state transitions to Rust
-  useEffect(() => {
-    if (miniState === "expanded") return;
-    invoke("set_mini_state", { state: miniState }).catch(() => {});
-  }, [miniState]);
-
-  // While expanded, forward real DOM height to Rust (debounced ~60ms)
-  useEffect(() => {
-    if (!rootRef.current || miniState !== "expanded") return;
-
-    const send = (h: number) => {
-      if (Math.abs(h - lastSentHeightRef.current) < 2) return;
-      lastSentHeightRef.current = h;
-      invoke("set_mini_state", { state: "expanded", height: h }).catch(
-        () => {},
-      );
-    };
-
-    const observer = new ResizeObserver((entries) => {
-      const h = Math.ceil(entries[0]?.contentRect.height ?? 0);
-      if (h < 10) return;
-      if (heightDebounceRef.current) clearTimeout(heightDebounceRef.current);
-      heightDebounceRef.current = setTimeout(() => send(h), 60);
-    });
-
-    observer.observe(rootRef.current);
-    send(Math.ceil(rootRef.current.getBoundingClientRect().height));
-
-    return () => {
-      observer.disconnect();
-      if (heightDebounceRef.current) clearTimeout(heightDebounceRef.current);
-      // Reset the dedup guard so the next expansion always fires a Rust resize.
-      // Without this, collapsing then re-expanding would see the same height as
-      // last time and skip the invoke(), leaving the window stuck at bar size.
-      lastSentHeightRef.current = 0;
-    };
-  }, [miniState]);
-
-
-  const handleAiAnswerClick = useCallback(async () => {
-    if (isEmittingRef.current || isAnswering) return;
-    const info = sessionInfoRef.current;
-    if (!info) return;
-
-    const msgs = messagesRef.current;
-    const interimMic = micInterimTranscript;
-    const interimTab = tabInterimTranscript;
-    const combined = msgs
-      .map((m) => `[${m.sender === "User" ? "YOU" : "Interviewer"}]: ${m.text}`)
-      .join("\n");
-    const fullTranscript =
-      combined +
-      (interimMic ? `\n[YOU]: ${interimMic}` : "") +
-      (interimTab ? `\n[Interviewer]: ${interimTab}` : "");
-
-    if (!fullTranscript.trim()) return;
-
-    isEmittingRef.current = true;
-    try {
-      await handleAiAnswer(
-        info.sessionId,
-        fullTranscript,
-        selectedModelRef.current,
-      );
-    } finally {
-      setTimeout(() => {
-        isEmittingRef.current = false;
-      }, 800);
-    }
-  }, [
-    isAnswering,
-    handleAiAnswer,
-    micInterimTranscript,
-    tabInterimTranscript,
-  ]);
-
-  const handleAnalyzeScreenClick = useCallback(async () => {
-    if (isAnalyzeEmittingRef.current || isAnalyzing) return;
-    const info = sessionInfoRef.current;
-    if (!info) return;
-
-    isAnalyzeEmittingRef.current = true;
-    setIsCapturing(true);
-    try {
-      // Capture raw PNG from Tauri, then compress to JPEG via Canvas before upload.
-      // This reduces the upload payload from ~10 MB (PNG) to ~200-400 KB (JPEG),
-      // eliminating most of the backend processing delay before streaming starts.
       const screenshotData = await invoke<string>("capture_screen");
       const blob = await compressScreenshotToBlob(screenshotData);
-      await handleAnalyzeScreen(info.sessionId, blob, selectedModelRef.current);
+      await session.handleAnalyzeScreenClick(blob);
     } catch (err) {
       console.error("Failed to capture screen:", err);
+      const { toast } = await import("sonner");
       toast.error("Failed to capture screen");
     } finally {
-      setIsCapturing(false);
-      setTimeout(() => {
-        isAnalyzeEmittingRef.current = false;
-      }, 800);
+      setIsCapturePhase(false);
     }
-  }, [isAnalyzing, handleAnalyzeScreen]);
-
-  // ── Keyboard shortcuts ────────────────────────────────────────────────────
-  // ⌘G / Ctrl+G → AI Answer
-  // ⌘K / Ctrl+K → Analyze Screen
-  // These must live here (not in a child) so they fire even when no element is focused.
-  const handleAiAnswerClickRef = useRef(handleAiAnswerClick);
-  const handleAnalyzeScreenClickRef = useRef(handleAnalyzeScreenClick);
-  handleAiAnswerClickRef.current = handleAiAnswerClick;
-  handleAnalyzeScreenClickRef.current = handleAnalyzeScreenClick;
+  }, [session, isCapturePhase]);
+  handleAnalyzeScreenCaptureRef.current = handleAnalyzeScreenCapture;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // Ignore if typing in an input / textarea
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
-
       const mod = e.metaKey || e.ctrlKey;
       if (!mod) return;
-
       if (e.key.toLowerCase() === "g") {
         e.preventDefault();
         handleAiAnswerClickRef.current();
       } else if (e.key.toLowerCase() === "k") {
         e.preventDefault();
-        handleAnalyzeScreenClickRef.current();
+        void handleAnalyzeScreenCaptureRef.current();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const handleSend = useCallback(async () => {
-    if (!inputValue.trim() || !sessionInfoRef.current) return;
-    const query = inputValue.trim();
-    setInputValue("");
-    handleCustomQuery(
-      sessionInfoRef.current.sessionId,
-      query,
-      selectedModelRef.current,
-    );
-  }, [inputValue, handleCustomQuery]);
-
-  const handleToggleMic = useCallback(async () => {
-    if (isMicActive || isMicConnecting) {
-      await invoke("stop_mic_transcription").catch(() => {});
-      setIsMicActive(false);
-      setIsMicConnecting(false);
-      setMicInterimTranscript("");
-    } else if (sessionInfoRef.current) {
-      setIsMicConnecting(true);
-      try {
-        await invoke("start_mic_transcription", {
-          language: getLanguageCode(sessionInfoRef.current.language ?? "English"),
-          model: "nova-3",
-        });
-      } catch (e: unknown) {
-        toast.error(`Mic: ${String(e)}`);
-        setIsMicConnecting(false);
-      }
-    }
-  }, [isMicActive, isMicConnecting]);
-
-  const handleClearTranscript = useCallback(() => {
-    setMicInterimTranscript("");
-    setTabInterimTranscript("");
-    setMessages([]);
-  }, []);
-
-  const handleExit = useCallback(() => {
-    endSessionNowRef.current();
-  }, []);
-
-  const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
-  const lastTranscriptLine = lastMessage?.text ?? "";
-  const lastTranscriptSender = lastMessage?.sender ?? null;
-  const interimTranscript = micInterimTranscript || tabInterimTranscript;
-  const isTabActive = tabStatus === "transcribing";
-  const isTabConnecting = tabStatus === "connecting";
-
-  if (isWindowCollapsed) {
-    return (
-      <div ref={rootRef} className="w-full h-full flex items-center">
-        <Tooltip delayDuration={300}>
-          <TooltipTrigger asChild>
-            <button
-              onClick={() => setIsWindowCollapsed(false)}
-              className="w-full h-full flex items-center justify-center gap-2 px-3 bg-zinc-900/95 backdrop-blur-2xl rounded-xl border border-white/10 hover:border-blue-500/40 hover:bg-zinc-800/90 transition-all active:scale-95 group"
-            >
-              <div className="w-2 h-2 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)] animate-pulse shrink-0" />
-              {aiResponses.length > 0 && (
-                <span className="ml-1 flex items-center justify-center w-3.5 h-3.5 rounded-full bg-blue-500/30 border border-blue-500/50">
-                  <span className="text-[8px] font-bold text-blue-300">
-                    {aiResponses.length}
-                  </span>
-                </span>
-              )}
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">Expand ScribeShade</TooltipContent>
-        </Tooltip>
-      </div>
-    );
-  }
+  // ── Layer 1 + Layer 2 layout ──────────────────────────────────────────────
+  //
+  // Layer 1: fullscreen transparent overlay div (pointer-events: none).
+  //          Spans the entire native window (which show_mini_top_center now
+  //          sizes to the full monitor). Empty areas are click-through.
+  //
+  // Layer 2: the actual widget shell, positioned absolutely at top-center.
+  //          pointer-events: auto + data-interactive so useCursorPassthrough
+  //          enables interaction exactly over the visible widget bounds.
+  //          Width switches between badge (180px) and full widget (700px).
+  //
+  // All portals (SessionMenu, ModelSelector dropdowns, tooltips) target
+  // #floating-portal-root which is already `position: fixed; inset: 0` in
+  // floating.html — they render inside the fullscreen window and can never
+  // be clipped by any native boundary.
 
   return (
+    // ── Layer 1: fullscreen transparent canvas ────────────────────────────
     <div
-      ref={rootRef}
-      className="w-full flex flex-col outline-none bg-zinc-900/95 backdrop-blur-2xl rounded-xl overflow-hidden"
+      style={{
+        position: "fixed",
+        inset: 0,
+        pointerEvents: "none",
+        background: "transparent",
+        overflow: "visible",
+        userSelect: "none",
+      }}
     >
-      <Toaster
-        position="top-center"
-        theme="dark"
-        toastOptions={{ style: { fontSize: "12px" } }}
-      />
+      {/* ── Layer 2: widget shell — sized to content, draggable ─────────── */}
+      <div
+        ref={layer2Ref}
+        data-interactive
+        style={{
+          position: "absolute",
+          // Use stored position after drag; fall back to centered at top.
+          top:       widgetPos?.top ?? 10,
+          left:      widgetPos ? widgetPos.left : "50%",
+          transform: widgetPos ? "none" : "translateX(-50%)",
+          pointerEvents: "auto",
+          // Width tracks badge vs full widget so useCursorPassthrough
+          // hit-tests the correct region and transparent gaps stay click-through.
+          width: session.isWindowCollapsed ? 180 : 700,
+        }}
+      >
+        {/* ── Collapsed badge view ─────────────────────────────────────── */}
+        {session.isWindowCollapsed ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                onClick={session.expandWindow}
+                style={{ height: 36 }}
+                className="w-full flex items-center justify-center gap-2.5 px-3 bg-zinc-950/90 backdrop-blur-2xl rounded-xl border border-white/8 hover:border-blue-500/30 hover:bg-zinc-900/95 transition-all active:scale-95 group"
+              >
+                <div className="shrink-0 w-5 h-5 rounded-lg bg-gradient-to-br from-blue-500 to-violet-600 flex items-center justify-center shadow-[0_0_10px_rgba(99,102,241,0.4)]">
+                  <span className="text-[10px] font-black text-white leading-none">S</span>
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  <div className={cn(
+                    "w-1.5 h-1.5 rounded-full transition-colors",
+                    session.isMicActive || session.isTabActive
+                      ? "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)] animate-pulse"
+                      : "bg-blue-400/60 animate-pulse",
+                  )} />
+                </div>
+                <span className="text-[11px] font-semibold text-white/60 group-hover:text-white/90 transition-colors tracking-tight">
+                  ScribeShade
+                </span>
+                {session.aiResponses.length > 0 && (
+                  <span className="shrink-0 flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-blue-500/25 border border-blue-500/40 text-[9px] font-bold text-blue-300">
+                    {session.aiResponses.length}
+                  </span>
+                )}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">Expand ScribeShade</TooltipContent>
+          </Tooltip>
+        ) : (
+          /* ── Expanded widget view ──────────────────────────────────────── */
+          <FloatingSurface
+            opacity={overlayOpacity}
+            zoom={overlayZoom}
+            divRef={floatRootRef}
+          >
+            <Toaster
+              position="top-center"
+              theme="dark"
+              toastOptions={{ style: { fontSize: "12px" } }}
+            />
 
-      {/* â”€â”€â”€ Top Card: Controls â”€â”€â”€ */}
+      {/* Top Card: Controls */}
       <div className="shrink-0">
         {/* Header */}
         <div className="px-4 py-2 flex items-center justify-between border-b border-white/5 relative group/header cursor-default no-drag">
-          {/* Left: Title & Drag Handle */}
-          <div className="flex items-center gap-3 data-tauri-drag-region">
+          <div className="flex items-center gap-3">
             <div className="flex items-center gap-2 drag">
-              <Tooltip delayDuration={300}>
+              <Tooltip>
                 <TooltipTrigger asChild>
                   <div className="w-2 h-2 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)] animate-pulse cursor-default" />
                 </TooltipTrigger>
-                <TooltipContent
-                  side="bottom"
-                  className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
-                >
+                <TooltipContent side="bottom" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
                   ScribeShade
                 </TooltipContent>
               </Tooltip>
             </div>
-            <Tooltip delayDuration={500}>
+            <Tooltip>
               <TooltipTrigger asChild>
                 <div
-                  data-tauri-drag-region
-                  className="p-1 rounded bg-white/25 text-white/20 group-hover/header:text-white/40 cursor-grab active:cursor-grabbing transition-colors"
+                  className="p-1 rounded bg-white/25 text-white/20 group-hover/header:text-white/40 cursor-grab active:cursor-grabbing transition-colors select-none"
+                  onMouseDown={handleGripMouseDown}
                 >
                   <GripHorizontal size={14} className="pointer-events-none" />
                 </div>
               </TooltipTrigger>
-              <TooltipContent
-                side="bottom"
-                className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
-              >
+              <TooltipContent side="bottom" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
                 Drag to move
               </TooltipContent>
             </Tooltip>
           </div>
 
-          {/* Right: Model + Timer + Actions */}
           <div className="flex items-center gap-2">
             <div className="scale-90 origin-right">
               <ModelSelector
-                value={selectedModel}
-                onChange={setSelectedModel}
+                value={session.selectedModel}
+                onChange={session.onModelChange}
                 isFullscreen={true}
               />
             </div>
@@ -1153,52 +722,56 @@ useEffect(() => {
             <div className="flex items-center gap-2 bg-white/5 px-3 h-9 rounded-xl border border-white/10 shadow-inner transition-all hover:bg-white/10 group">
               <Clock className="h-3.5 w-3.5 text-blue-400 group-hover:animate-pulse" />
               <span className="text-[13px] font-mono font-bold text-white/90 tabular-nums tracking-tight">
-                {formattedTime || "00:00"}
+                {session.formattedTime || "00:00"}
               </span>
             </div>
 
             <div className="flex items-center gap-1 bg-white/5 p-1 rounded-xl border border-white/10 h-9">
-              <Tooltip delayDuration={300}>
+              <SessionMenu
+                opacity={overlayOpacity}
+                setOpacity={setOverlayOpacity}
+                zoom={overlayZoom}
+                setZoom={setOverlayZoom}
+                privateMode={overlayPrivate}
+                setPrivateMode={setOverlayPrivate}
+                safeMin={floatSafeMin}
+                safeMax={floatSafeMax}
+                onEndSession={session.endSession}
+                sessionActive={!!session.sessionInfo}
+              />
+
+              <Tooltip>
                 <TooltipTrigger asChild>
                   <button
-                    onClick={() => setIsWindowCollapsed(true)}
+                    onClick={session.collapseWindow}
                     className="p-2 hover:bg-white/10 rounded-lg transition-all text-zinc-300 hover:text-blue-400 active:scale-95 flex items-center justify-center"
                   >
                     <ChevronDown size={16} />
                   </button>
                 </TooltipTrigger>
-                <TooltipContent
-                  side="bottom"
-                  className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
-                >
+                <TooltipContent side="bottom" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
                   Collapse to Icon
                 </TooltipContent>
               </Tooltip>
 
               <div className="w-px h-4 bg-white/10 mx-0.5" />
 
-              <Tooltip delayDuration={300}>
+              <Tooltip>
                 <TooltipTrigger asChild>
                   <button
-                    onClick={handleExit}
-                    disabled={isEnding}
+                    onClick={session.endSession}
+                    disabled={session.isEnding}
                     className={cn(
                       "p-2 rounded-lg transition-all flex items-center justify-center",
-                      isEnding
+                      session.isEnding
                         ? "bg-rose-500/20 text-rose-400 cursor-not-allowed"
                         : "text-zinc-300 hover:bg-rose-500/10 hover:text-rose-400 active:scale-95",
                     )}
                   >
-                    <LogOut
-                      size={16}
-                      className={isEnding ? "animate-pulse" : ""}
-                    />
+                    <LogOut size={16} className={session.isEnding ? "animate-pulse" : ""} />
                   </button>
                 </TooltipTrigger>
-                <TooltipContent
-                  side="bottom"
-                  className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
-                >
+                <TooltipContent side="bottom" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
                   End Session
                 </TooltipContent>
               </Tooltip>
@@ -1209,76 +782,63 @@ useEffect(() => {
         {/* Live Monitor Row */}
         <div className="px-4 py-2 flex items-center justify-between bg-white/2 border-b border-white/5">
           <div className="flex-1 flex items-center gap-2 overflow-hidden mr-3">
-            {/* Dual status dots: green = mic, purple = remote */}
             <div className="flex gap-1 shrink-0">
-              <div
-                className={cn(
-                  "w-1.5 h-1.5 rounded-full transition-all duration-300",
-                  isMicConnecting
-                    ? "bg-amber-500 animate-pulse shadow-[0_0_8px_rgba(245,158,11,0.5)]"
-                    : isMicActive
-                      ? "bg-emerald-500 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)]"
-                      : "bg-white/20",
-                )}
-              />
-              <div
-                className={cn(
-                  "w-1.5 h-1.5 rounded-full transition-all duration-300",
-                  isTabConnecting
-                    ? "bg-amber-500 animate-pulse shadow-[0_0_8px_rgba(245,158,11,0.5)]"
-                    : isTabActive
-                      ? "bg-purple-500 animate-pulse shadow-[0_0_8px_rgba(168,85,247,0.5)]"
-                      : "bg-white/20",
-                )}
-              />
+              <div className={cn(
+                "w-1.5 h-1.5 rounded-full transition-all duration-300",
+                session.isMicConnecting
+                  ? "bg-amber-500 animate-pulse shadow-[0_0_8px_rgba(245,158,11,0.5)]"
+                  : session.isMicActive
+                    ? "bg-emerald-500 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)]"
+                    : "bg-white/20",
+              )} />
+              <div className={cn(
+                "w-1.5 h-1.5 rounded-full transition-all duration-300",
+                session.isTabConnecting
+                  ? "bg-amber-500 animate-pulse shadow-[0_0_8px_rgba(245,158,11,0.5)]"
+                  : session.isTabActive
+                    ? "bg-purple-500 animate-pulse shadow-[0_0_8px_rgba(168,85,247,0.5)]"
+                    : "bg-white/20",
+              )} />
             </div>
 
             <div className="flex-1 truncate text-[12px] font-medium text-white italic">
-              {isEnding ? (
-                <span className="text-rose-400 font-bold animate-pulse">
-                  Ending Session...
-                </span>
-              ) : !sessionInfo ? (
+              {session.isEnding ? (
+                <span className="text-rose-400 font-bold animate-pulse">Ending Session...</span>
+              ) : !session.sessionInfo ? (
                 <span className="text-white/20 flex items-center gap-1.5">
                   <Loader2 size={11} className="animate-spin shrink-0" />
                   Waiting for session...
                 </span>
-              ) : lastTranscriptLine || interimTranscript ? (
+              ) : session.lastTranscriptLine || session.interimTranscript ? (
                 <>
-                  {lastTranscriptLine && (
-                    <span
-                      className={cn(
-                        "font-bold mr-1.5 text-[9px] uppercase tracking-wider not-italic",
-                        lastTranscriptSender === "User"
-                          ? "text-blue-400"
-                          : "text-purple-400",
-                      )}
-                    >
-                      {lastTranscriptSender === "User" ? "You •" : "System •"}
+                  {session.lastTranscriptLine && (
+                    <span className={cn(
+                      "font-bold mr-1.5 text-[9px] uppercase tracking-wider not-italic",
+                      session.lastTranscriptSender === "User" ? "text-blue-400" : "text-purple-400",
+                    )}>
+                      {session.lastTranscriptSender === "User" ? "You •" : "System •"}
                     </span>
                   )}
-                  {lastTranscriptLine}
-                  {interimTranscript && (
-                    <span className="text-white/30 ml-1">
-                      {interimTranscript}
-                    </span>
+                  {session.lastTranscriptLine}
+                  {session.interimTranscript && (
+                    <span className="text-white/30 ml-1">{session.interimTranscript}</span>
                   )}
                 </>
-              ) : tabStatus === "error" ? (
+              ) : session.tabStatus === "error" ? (
                 <span className="flex items-center gap-2 text-rose-300/90">
-                  <Tooltip delayDuration={300}>
+                  <Tooltip>
                     <TooltipTrigger asChild>
                       <span className="text-[11px] font-semibold truncate max-w-[260px] cursor-default">
-                        {tabError ?? "System audio unavailable"}
+                        {session.tabError ?? "System audio unavailable"}
                       </span>
                     </TooltipTrigger>
                     <TooltipContent side="top" className="max-w-[280px]">
-                      {tabError ?? "System audio unavailable"}
+                      {session.tabError ?? "System audio unavailable"}
                     </TooltipContent>
                   </Tooltip>
                   <button
                     type="button"
-                    onClick={() => { void startSystemAudio(); }}
+                    onClick={() => { void session.startSystemAudio(); }}
                     className="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider bg-white/10 hover:bg-white/20 text-white border border-white/10 transition-colors"
                   >
                     Retry
@@ -1293,272 +853,125 @@ useEffect(() => {
                 </span>
               ) : (
                 <span className="text-white/20">
-                  {isMicActive
-                    ? "Listening for speech..."
-                    : "Waiting for audio..."}
+                  {session.isMicActive ? "Listening for speech..." : "Waiting for audio..."}
                 </span>
               )}
             </div>
           </div>
 
           <div className="flex items-center gap-1.5 shrink-0">
-            {/* Transcript expand/collapse */}
-            <Tooltip delayDuration={300}>
+            <Tooltip>
               <TooltipTrigger asChild>
                 <button
-                  onClick={() => setIsTranscriptExpanded((v) => !v)}
-                  disabled={!sessionInfo || messages.length === 0}
+                  onClick={session.toggleTranscriptExpanded}
+                  disabled={!session.sessionInfo || session.messages.length === 0}
                   className={cn(
                     "p-2 rounded-xl transition-all active:scale-95 border",
-                    isTranscriptExpanded
+                    session.isTranscriptExpanded
                       ? "bg-blue-500/20 text-blue-400 border-blue-500/30"
                       : "bg-white/10 text-zinc-300 border-white/10 hover:bg-blue-500/10 hover:text-blue-400",
-                    (!sessionInfo || messages.length === 0) &&
-                      "opacity-40 cursor-not-allowed",
+                    (!session.sessionInfo || session.messages.length === 0) && "opacity-40 cursor-not-allowed",
                   )}
                 >
                   <AlignJustify size={14} />
                 </button>
               </TooltipTrigger>
-              <TooltipContent
-                side="left"
-                className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
-              >
-                {isTranscriptExpanded ? "Hide Transcript" : "Show Transcript"}
+              <TooltipContent side="left" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
+                {session.isTranscriptExpanded ? "Hide Transcript" : "Show Transcript"}
               </TooltipContent>
             </Tooltip>
 
-            {/* User mic toggle */}
-            <Tooltip delayDuration={300}>
+            <Tooltip>
               <TooltipTrigger asChild>
                 <button
-                  onClick={handleToggleMic}
-                  disabled={!sessionInfo}
+                  onClick={session.handleToggleMic}
+                  disabled={!session.sessionInfo}
                   className={cn(
                     "p-2 rounded-xl transition-all active:scale-95 border",
-                    isMicActive
+                    session.isMicActive
                       ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/30 shadow-[0_0_15px_rgba(16,185,129,0.2)]"
                       : "bg-white/10 text-zinc-300 border-white/10 hover:bg-emerald-500/10 hover:text-emerald-400",
-                    !sessionInfo && "opacity-40 cursor-not-allowed",
+                    !session.sessionInfo && "opacity-40 cursor-not-allowed",
                   )}
                 >
-                  {isMicConnecting ? (
+                  {session.isMicConnecting ? (
                     <Loader2 size={14} className="animate-spin" />
-                  ) : isMicActive ? (
+                  ) : session.isMicActive ? (
                     <Mic size={14} />
                   ) : (
                     <MicOff size={14} />
                   )}
                 </button>
               </TooltipTrigger>
-              <TooltipContent
-                side="left"
-                className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
-              >
-                {isMicActive ? "Disable Mic" : "Enable Mic (optional)"}
+              <TooltipContent side="left" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
+                {session.isMicActive ? "Disable Mic" : "Enable Mic (optional)"}
               </TooltipContent>
             </Tooltip>
 
-            {/* Remote (interviewer) audio toggle */}
-            {/* <Tooltip delayDuration={300}>
+            <Tooltip>
               <TooltipTrigger asChild>
                 <button
-                  onClick={handleToggleTab}
-                  disabled={!sessionInfo}
-                  className={cn(
-                    "p-2 rounded-xl transition-all active:scale-95 border",
-                    isTabEnabled
-                      ? "bg-purple-500/20 text-purple-400 border-purple-500/30 shadow-[0_0_15px_rgba(168,85,247,0.2)]"
-                      : "bg-white/10 text-zinc-300 border-white/10 hover:bg-purple-500/10 hover:text-purple-400",
-                    !sessionInfo && "opacity-40 cursor-not-allowed",
-                  )}
-                >
-                  {isTabConnecting ? (
-                    <Loader2 size={14} className="animate-spin" />
-                  ) : isTabEnabled ? (
-                    <Headphones size={14} />
-                  ) : (
-                    <HeadphoneOff size={14} />
-                  )}
-                </button>
-              </TooltipTrigger>
-              <TooltipContent
-                side="left"
-                className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
-              >
-                {isTabEnabled ? "Disable Remote Audio" : "Enable Remote Audio"}
-              </TooltipContent>
-            </Tooltip> */}
-
-            {/* Clear transcript */}
-            <Tooltip delayDuration={300}>
-              <TooltipTrigger asChild>
-                <button
-                  onClick={handleClearTranscript}
-                  disabled={!sessionInfo}
+                  onClick={session.handleClearTranscript}
+                  disabled={!session.sessionInfo}
                   className={cn(
                     "p-2 rounded-xl bg-white/10 text-zinc-300 border border-white/10 hover:bg-rose-500/20 hover:text-rose-400 hover:border-rose-500/30 transition-all active:scale-95 flex items-center justify-center",
-                    !sessionInfo && "opacity-40 cursor-not-allowed",
+                    !session.sessionInfo && "opacity-40 cursor-not-allowed",
                   )}
                 >
                   <Trash2 size={14} />
                 </button>
               </TooltipTrigger>
-              <TooltipContent
-                side="left"
-                className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
-              >
+              <TooltipContent side="left" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
                 Clear Transcript
               </TooltipContent>
             </Tooltip>
           </div>
         </div>
 
-        {/* Collapsible Transcript Panel — full conversation log.
-            Layout convention: incoming "System" (interviewer / system audio)
-            shows on the LEFT, outgoing "You" (mic) shows on the RIGHT —
-            matches WhatsApp / iMessage / Slack so users instantly know who
-            spoke. */}
-        {isTranscriptExpanded && (
-          <div className="border-b border-white/10 max-h-52 overflow-y-auto no-scrollbar px-3 py-2.5 space-y-2.5">
-            {messages.length === 0 ? (
-              <p className="text-[11px] text-white/30 text-center py-2">
-                No transcript yet…
-              </p>
-            ) : (
-              messages.map((m) => {
-                const isYou = m.sender === "User";
-                return (
-                  <div
-                    key={m.id}
-                    className={cn(
-                      "flex gap-2 items-start",
-                      isYou ? "flex-row-reverse" : "flex-row",
-                    )}
-                  >
-                    <span
-                      className={cn(
-                        "shrink-0 mt-1.5 h-1.5 w-1.5 rounded-full",
-                        isYou
-                          ? "bg-blue-400 shadow-[0_0_6px_rgba(96,165,250,0.6)]"
-                          : "bg-purple-400 shadow-[0_0_6px_rgba(192,132,252,0.6)]",
-                      )}
-                    />
-                    <div
-                      className={cn(
-                        "flex flex-col max-w-[82%]",
-                        isYou ? "items-end" : "items-start",
-                      )}
-                    >
-                      <span
-                        className={cn(
-                          "text-[9px] font-bold uppercase tracking-[0.12em] mb-0.5",
-                          isYou ? "text-blue-400" : "text-purple-400",
-                        )}
-                      >
-                        {isYou ? "You" : "System"}
-                      </span>
-                      <span
-                        className={cn(
-                          "px-3 py-1.5 rounded-2xl text-[12.5px] leading-snug font-medium break-words",
-                          isYou
-                            ? "bg-blue-500/15 text-blue-50 rounded-tr-sm"
-                            : "bg-purple-500/15 text-purple-50 rounded-tl-sm",
-                        )}
-                      >
-                        {m.text}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })
-            )}
-            {/* Live interim bubble — same direction rules as final messages. */}
-            {(micInterimTranscript || tabInterimTranscript) && (() => {
-              const isYou = !!micInterimTranscript;
-              const text = micInterimTranscript || tabInterimTranscript;
-              return (
-                <div
-                  className={cn(
-                    "flex gap-2 items-start opacity-60",
-                    isYou ? "flex-row-reverse" : "flex-row",
-                  )}
-                >
-                  <span
-                    className={cn(
-                      "shrink-0 mt-1.5 h-1.5 w-1.5 rounded-full animate-pulse",
-                      isYou ? "bg-blue-400" : "bg-purple-400",
-                    )}
-                  />
-                  <div
-                    className={cn(
-                      "flex flex-col max-w-[82%]",
-                      isYou ? "items-end" : "items-start",
-                    )}
-                  >
-                    <span
-                      className={cn(
-                        "text-[9px] font-bold uppercase tracking-[0.12em] mb-0.5",
-                        isYou ? "text-blue-400" : "text-purple-400",
-                      )}
-                    >
-                      {isYou ? "You" : "System"}
-                    </span>
-                    <span
-                      className={cn(
-                        "px-3 py-1.5 rounded-2xl text-[12.5px] leading-snug font-medium italic break-words",
-                        isYou
-                          ? "bg-blue-500/10 text-blue-100 rounded-tr-sm"
-                          : "bg-purple-500/10 text-purple-100 rounded-tl-sm",
-                      )}
-                    >
-                      {text}
-                    </span>
-                  </div>
-                </div>
-              );
-            })()}
-          </div>
+        {/* Collapsible Transcript Panel */}
+        {session.isTranscriptExpanded && (
+          <SessionTranscript
+            messages={session.messages}
+            micInterim={session.micInterimTranscript}
+            tabInterim={session.tabInterimTranscript}
+          />
         )}
 
         {/* Action Bar */}
         <div className="px-4 py-2.5 flex items-center justify-between gap-3">
           <ChatActionButtons
-            onAiAnswer={handleAiAnswerClick}
-            onAnalyzeScreen={handleAnalyzeScreenClick}
-            isAnswering={isAnswering}
-            isAnalyzing={isAnalyzing || isCapturing}
-            canAnswer={!!sessionInfo && messages.length > 0}
-            canAnalyze={!!sessionInfo}
+            onAiAnswer={session.handleAiAnswerClick}
+            onAnalyzeScreen={() => { void handleAnalyzeScreenCapture(); }}
+            isAnswering={session.isAnswering}
+            isAnalyzing={session.isAnalyzing || session.isCapturing || isCapturePhase}
+            canAnswer={!!session.sessionInfo && session.messages.length > 0}
+            canAnalyze={!!session.sessionInfo}
             isFullscreen={true}
           />
           <div className="relative flex-1">
             <input
               className="w-full h-10 rounded-xl pl-4 pr-12 text-sm font-medium bg-white/5 border border-white/10 text-white placeholder:text-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500/50 transition-all"
               placeholder="Ask AI anything..."
-              value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
+              value={session.inputValue}
+              onChange={(e) => session.setInputValue(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
-                  handleSend();
+                  void session.handleSend();
                 }
               }}
             />
-            <Tooltip delayDuration={300}>
+            <Tooltip>
               <TooltipTrigger asChild>
                 <button
-                  onClick={handleSend}
-                  disabled={!inputValue.trim() || !sessionInfo}
+                  onClick={() => { void session.handleSend(); }}
+                  disabled={!session.inputValue.trim() || !session.sessionInfo}
                   className="absolute right-1 top-1 h-8 w-10 rounded-lg bg-blue-500 hover:bg-blue-600 disabled:bg-white/10 flex items-center justify-center text-white transition-all active:scale-95 shadow-lg shadow-blue-500/20"
                 >
                   <Send size={14} />
                 </button>
               </TooltipTrigger>
-              <TooltipContent
-                side="top"
-                className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
-              >
+              <TooltipContent side="top" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
                 Send Message
               </TooltipContent>
             </Tooltip>
@@ -1566,110 +979,117 @@ useEffect(() => {
         </div>
       </div>
 
-      {/* â”€â”€â”€ AI Responses Panel â”€â”€â”€ */}
-      {(isAnswering || isAnalyzing || aiResponses.length > 0) && (
+      {/* AI Responses Panel */}
+      {(session.isAnswering || session.isAnalyzing || isCapturePhase || session.aiResponses.length > 0) && (
         <div className="flex flex-col border-t border-white/10">
-          {/* Nav Row */}
           <div className="px-3 py-2 flex items-center justify-between shrink-0">
             <div className="flex items-center gap-1">
               <button
-                onClick={() =>
-                  setCurrentResponseIndex((i) => Math.max(0, i - 1))
-                }
-                disabled={
-                  currentResponseIndex === 0 || aiResponses.length === 0
-                }
+                onClick={session.goToPrevResponse}
+                disabled={session.currentResponseIndex === 0 || session.aiResponses.length === 0}
                 className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-25 disabled:cursor-not-allowed text-white transition-all active:scale-95"
               >
                 <ChevronLeft size={14} />
               </button>
               <button
-                onClick={() =>
-                  setCurrentResponseIndex((i) =>
-                    Math.min(aiResponses.length - 1, i + 1),
-                  )
-                }
-                disabled={currentResponseIndex >= aiResponses.length - 1}
+                onClick={session.goToNextResponse}
+                disabled={session.currentResponseIndex >= session.aiResponses.length - 1}
                 className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-25 disabled:cursor-not-allowed text-white transition-all active:scale-95"
               >
                 <ChevronRight size={14} />
               </button>
-              {aiResponses.length > 1 && (
+              {session.aiResponses.length > 1 && (
                 <span className="text-[11px] text-white/40 ml-1 font-mono">
-                  {currentResponseIndex + 1}/{aiResponses.length}
+                  {session.currentResponseIndex + 1}/{session.aiResponses.length}
                 </span>
               )}
-              {(isAnswering || isAnalyzing) && aiResponses.length === 0 && (
+              {(session.isAnswering || session.isAnalyzing || isCapturePhase) && session.aiResponses.length === 0 && (
                 <span className="flex items-center gap-1.5 ml-1 text-[11px] text-blue-400/80">
                   <Loader2 size={11} className="animate-spin" />
-                  Generating...
+                  {isCapturePhase ? "Capturing screen..." : "Generating..."}
                 </span>
               )}
             </div>
-            <Tooltip delayDuration={300}>
+            <Tooltip>
               <TooltipTrigger asChild>
                 <button
-                  onClick={() => setIsResponsesExpanded((v) => !v)}
+                  onClick={session.toggleResponsesExpanded}
                   className="w-7 h-7 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 hover:text-blue-400 text-white/50 transition-all active:scale-95"
                 >
-                  {isResponsesExpanded ? (
-                    <ChevronDown size={13} />
-                  ) : (
-                    <ChevronUp size={13} />
-                  )}
+                  {session.isResponsesExpanded ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
                 </button>
               </TooltipTrigger>
-              <TooltipContent
-                side="left"
-                className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
-              >
-                {isResponsesExpanded ? "Collapse" : "Expand"}
+              <TooltipContent side="left" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
+                {session.isResponsesExpanded ? "Collapse" : "Expand"}
               </TooltipContent>
             </Tooltip>
           </div>
 
-          {isResponsesExpanded && aiResponses.length > 0 && (
+          {session.isResponsesExpanded && session.aiResponses.length > 0 && (
             <div className="border-t border-white/10 max-h-120 overflow-y-auto overflow-x-hidden no-scrollbar">
               <AnswerArea
                 responses={[
                   {
-                    messageId: aiResponses[currentResponseIndex]?.id ?? "",
-                    text: aiResponses[currentResponseIndex]?.text ?? "",
+                    messageId: session.aiResponses[session.currentResponseIndex]?.id ?? "",
+                    text: session.aiResponses[session.currentResponseIndex]?.text ?? "",
                     isStreaming:
-                      currentResponseIndex === aiResponses.length - 1 &&
-                      (isAnswering || isAnalyzing),
+                      session.currentResponseIndex === session.aiResponses.length - 1 &&
+                      (session.isAnswering || session.isAnalyzing),
                   },
                 ].filter((r) => r.messageId)}
-                isStreaming={isAnswering || isAnalyzing}
+                isStreaming={session.isAnswering || session.isAnalyzing}
               />
             </div>
           )}
 
-          {isResponsesExpanded &&
-            (isAnswering || isAnalyzing) &&
-            aiResponses.length === 0 && (
+          {session.isResponsesExpanded &&
+            (session.isAnswering || session.isAnalyzing || isCapturePhase) &&
+            session.aiResponses.length === 0 && (
               <div className="flex items-center justify-center py-8 gap-2 text-blue-400/70">
                 <Loader2 size={16} className="animate-spin" />
                 <span className="text-[13px] font-medium">
-                  Generating response...
+                  {isCapturePhase
+                    ? "Capturing screen..."
+                    : session.isAnalyzing
+                      ? "Analyzing screen..."
+                      : "Generating response..."}
                 </span>
               </div>
             )}
         </div>
       )}
+        </FloatingSurface>
+        )}
+      </div>
     </div>
   );
 };
 
-// Mount the app
+// Mount the app — Provider required for useFloatingSession (Redux)
 const rootElement = document.getElementById("mini-app-root");
+const PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as
+  | string
+  | undefined;
 if (rootElement) {
   const root = createRoot(rootElement);
   root.render(
     <React.StrictMode>
-      <TooltipProvider>
-        <FloatingApp />
-      </TooltipProvider>
+      <Provider store={store}>
+        {PUBLISHABLE_KEY ? (
+          <ClerkProvider
+            publishableKey={PUBLISHABLE_KEY}
+            allowedRedirectProtocols={["tauri:", "http:", "https:"]}
+          >
+            <TooltipProvider delayDuration={0}>
+              <FloatingApp />
+            </TooltipProvider>
+          </ClerkProvider>
+        ) : (
+          <TooltipProvider delayDuration={0}>
+            <FloatingApp />
+          </TooltipProvider>
+        )}
+      </Provider>
     </React.StrictMode>,
   );
 }
