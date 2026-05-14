@@ -67,12 +67,16 @@ export function saveAutoDetect(v: boolean): void {
 }
 
 /**
- * Reset overlay settings to their post-session defaults:
- *   opacity → 100%, zoom → 100%, private → true
- * Called when the mini window closes so the next session starts clean.
+ * Reset overlay display settings to their post-session defaults.
+ *
+ * IMPORTANT: privateMode (content protection) is intentionally NOT reset.
+ * It is a user privacy preference and must persist across sessions —
+ * AI actions, screen analysis, and session lifecycle events must NEVER
+ * mutate it. Only an explicit user toggle (HeaderMenu / SessionMenu /
+ * keyboard shortcut) is allowed to change it.
  */
 export function resetOverlaySettings(): void {
   saveOpacity(OPACITY_DEFAULT);
   saveZoom(ZOOM_DEFAULT);
-  savePrivateMode(true);
+  // Do NOT touch privateMode — it is a user-owned privacy setting.
 }

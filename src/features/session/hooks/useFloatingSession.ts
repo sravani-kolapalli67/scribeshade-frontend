@@ -425,12 +425,30 @@ export function useFloatingSession() {
 
   // ── Auto-expand responses panel ─────────────────────────────────────────────
 
+  // Track the previous count so we can distinguish "first response arrived"
+  // (jump to it) vs "another response was appended while user is reading an
+  // earlier one" (stay put). Also track whether the user was at the tail
+  // immediately before — if so we follow the new tail; otherwise we never
+  // disturb their position mid-read.
+  const prevResponsesLenRef = useRef(0);
+
   useEffect(() => {
-    if (aiResponses.length > 0) {
-      dispatch(setCurrentResponseIndex(aiResponses.length - 1));
+    const prev = prevResponsesLenRef.current;
+    const curr = aiResponses.length;
+
+    if (curr > 0 && prev === 0) {
+      // First response — open the panel and focus it.
+      dispatch(setCurrentResponseIndex(0));
       dispatch(setIsResponsesExpanded(true));
+    } else if (curr > prev && currentResponseIndex === prev - 1) {
+      // User was viewing the previous tail; follow the new tail.
+      dispatch(setCurrentResponseIndex(curr - 1));
     }
-  }, [aiResponses.length, dispatch]);
+    // Otherwise: user has navigated away (e.g. clicked Prev to read an earlier
+    // answer while the model is still streaming new ones). Do NOT jump.
+
+    prevResponsesLenRef.current = curr;
+  }, [aiResponses.length, currentResponseIndex, dispatch]);
 
   // Auto-expand the responses panel the moment the user triggers a generation
   // (AI Answer or Analyze Screen) so the "Generating response…" loader is

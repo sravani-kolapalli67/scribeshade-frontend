@@ -118,18 +118,91 @@ export const ChatMessage = ({
 }: ChatMessageProps) => {
   const isAI = message.sender !== "User";
 
-  // Parse Question and Answer if markers exist
-  const questionMatch = message.text.match(
-    /\*\*QUESTION:\*\*\s*([\s\S]*?)\s*(?=\*\*ANSWER:\*\*|$)/i,
-  );
-  const answerMatch = message.text.match(/\*\*ANSWER:\*\*\s*([\s\S]*)/i);
+  // ── Sanitization: strip stray markdown artifacts ─────────────────────────
+  // The model emits `**QUESTION:** ... **ANSWER:** ...` blocks. During and
+  // after streaming we may see leftover `**` artifacts:
+  //   - lone trailing `*` / `**` while the closing marker hasn't arrived
+  //   - orphan `**` lines (e.g. `**\nQUESTION:` → renders as literal `**`)
+  //   - duplicated `**` inside the question text (`**QUESTION:** ** Foo? **`)
+  //   - leading `**` line at the start of a segment
+  //   - bullet runs collapsed to inline `• a • b • c` paragraphs
+  const sanitize = (raw: string): string => {
+    if (!raw) return raw;
+    let out = raw;
+    // Drop a lone trailing `**` or `*` left over from in-flight streaming
+    out = out.replace(/\*{1,2}\s*$/g, "");
+    // Strip lines that are JUST `**` or `*` (orphaned bold markers on their own line)
+    out = out.replace(/^\s*\*{1,3}\s*$/gm, "");
+    // Strip `**` immediately after `**QUESTION:**` / `**ANSWER:**` markers
+    // (catches `**QUESTION:** ** Foo?` patterns)
+    out = out.replace(/(\*\*(?:QUESTION|ANSWER):\*\*)\s*\*{1,3}\s*/gi, "$1 ");
+    // Strip trailing `**` immediately before EOL on a question/answer line
+    out = out.replace(/\s*\*{1,3}\s*$/gm, "");
+    // Remove orphaned `**` (odd count on a single line) — drop the LAST one
+    out = out
+      .split("\n")
+      .map((line) => {
+        const count = (line.match(/\*\*/g) || []).length;
+        if (count % 2 === 1) {
+          const idx = line.lastIndexOf("**");
+          return line.slice(0, idx) + line.slice(idx + 2);
+        }
+        return line;
+      })
+      .join("\n");
+    // Convert inline `• a • b • c` paragraphs into proper markdown lists so
+    // the existing <ul>/<li> renderer (with per-bullet copy buttons) fires.
+    if (out.includes("•")) {
+      out = out
+        .split(/\n{2,}/)
+        .map((para) => {
+          if (/^\s*[-*]\s/m.test(para)) return para;
+          if (!para.includes("•")) return para;
+          const parts = para.split(/\s*•\s+/);
+          if (parts.length < 2) return para;
+          const intro = parts[0].trim();
+          const items = parts.slice(1).map((s) => `- ${s.trim()}`).join("\n");
+          return intro ? `${intro}\n\n${items}` : items;
+        })
+        .join("\n\n");
+    }
+    // Collapse leading whitespace/blank lines so the QUESTION block is the
+    // visual anchor of the card.
+    out = out.replace(/^\s+/, "");
+    return out;
+  };
 
-  const displayQuestion = questionMatch ? questionMatch[1].trim() : "";
+  const cleanText = sanitize(message.text);
+
+  // ── Multi-question handling ──────────────────────────────────────────────
+  // Server-stream splitting now happens upstream in useAIChat: when the model
+  // emits `===NEXT_QUESTION===`, the consumer spawns a NEW Message record per
+  // segment instead of producing one giant pager. So at this layer we just
+  // strip any leftover separator (defensive — should never appear) and treat
+  // each Message as exactly one Q/A.
+  const currentText = cleanText.replace(/\n?={3,}NEXT_QUESTION={3,}\n?/g, "\n");
+
+  // Parse Question and Answer if markers exist. Question matcher tolerates a
+  // missing closing `**` while streaming; answer matcher consumes the rest.
+  const questionMatch = currentText.match(
+    /\*\*\s*QUESTION\s*:?\s*\*?\*?\s*([\s\S]*?)\s*(?=\*\*\s*ANSWER\s*:|$)/i,
+  );
+  const answerMatch = currentText.match(/\*\*\s*ANSWER\s*:?\s*\*?\*?\s*([\s\S]*)/i);
+
+  // Strip residual `**`/`*` and surrounding punctuation noise from extracted
+  // question text (e.g. `** Difference between... ?**` → `Difference between...?`).
+  const cleanInline = (s: string) =>
+    s
+      .replace(/^\s*\*{1,3}\s*/, "")
+      .replace(/\s*\*{1,3}\s*$/, "")
+      .trim();
+
+  const displayQuestion = questionMatch ? cleanInline(questionMatch[1]) : "";
   const displayAnswer = answerMatch
     ? answerMatch[1].trim()
     : questionMatch
       ? ""
-      : message.text;
+      : currentText;
 
   if (!isAI) {
     return (
@@ -143,20 +216,43 @@ export const ChatMessage = ({
 
   return (
     <div className="mb-8 animate-in fade-in slide-in-from-bottom-2">
-      {/* Question Section */}
+      {/* Question Section — large, bold, with horizontal divider beneath */}
       {displayQuestion && (
-        <div className="group/ques relative mb-5 flex items-start gap-2.5">
-          <div className="mt-0.5 shrink-0 text-slate-400">
-            <MessageSquare className="h-4.5 w-4.5" />
+        <div className="group/ques relative mb-5">
+          <div className="flex items-start gap-3">
+            <div className="mt-1 shrink-0 text-brand">
+              <MessageSquare className="h-5 w-5" />
+            </div>
+            <div className="flex-1 pr-10 min-w-0">
+              <div
+                className={cn(
+                  "text-[11px] font-semibold uppercase tracking-[0.12em] mb-1",
+                  isFullscreen ? "text-brand/80" : "text-brand",
+                )}
+              >
+                Question
+              </div>
+              <div
+                className={cn(
+                  "text-[17px] leading-snug font-bold break-words",
+                  isFullscreen ? "text-white" : "text-slate-900",
+                )}
+              >
+                {displayQuestion}
+              </div>
+            </div>
+            <CopyButton
+              text={displayQuestion}
+              label="Question"
+              className="absolute top-1 right-0 opacity-0 group-hover/ques:opacity-100"
+            />
           </div>
-          <div className="flex-1 text-[14.5px] leading-relaxed pr-10">
-            <span className="font-bold text-slate-900 mr-1.5">Question:</span>
-            <span className="text-slate-700">{displayQuestion}</span>
-          </div>
-          <CopyButton
-            text={displayQuestion}
-            label="Question"
-            className="absolute top-0 right-0 opacity-0 group-hover/ques:opacity-100"
+          {/* Horizontal divider visually separating Question from Answer */}
+          <div
+            className={cn(
+              "mt-4 h-px w-full",
+              isFullscreen ? "bg-white/15" : "bg-slate-200",
+            )}
           />
         </div>
       )}

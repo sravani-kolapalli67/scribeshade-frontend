@@ -65,6 +65,9 @@ export function TranscriptDialog({
   const [isLoading, setIsLoading] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  // True when this session was created with transcript saving disabled —
+  // disables download, notes generation, and other persistence-dependent actions.
+  const [isEphemeral, setIsEphemeral] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Fetch session details and notes from backend
@@ -79,7 +82,9 @@ export function TranscriptDialog({
           );
           if (res.ok) {
             const data = await res.json();
-            setMessages(data.messages || []);
+            const sessionData = data.data ?? data;
+            setMessages(sessionData.messages || []);
+            setIsEphemeral(sessionData.saveTranscription === false);
           }
 
           // Fetch Existing Notes
@@ -295,15 +300,22 @@ export function TranscriptDialog({
 
           {/* ACTION BAR: Integrated utility */}
           <div className="flex items-center justify-between mb-8 shrink-0">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={downloadTranscript}
-              className="h-11 px-8 rounded-full border-slate-200 hover:bg-slate-50 font-bold gap-3 text-[13px] shadow-sm transition-all"
-            >
-              <Download className="size-4 text-brand" />
-              Download Transcript
-            </Button>
+            {isEphemeral ? (
+              <div className="flex items-center gap-2 text-xs font-medium text-slate-500 bg-slate-100 rounded-full px-4 py-2">
+                <span>🔒</span>
+                <span>Ephemeral session — transcript saving was disabled. Nothing was persisted.</span>
+              </div>
+            ) : (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={downloadTranscript}
+                className="h-11 px-8 rounded-full border-slate-200 hover:bg-slate-50 font-bold gap-3 text-[13px] shadow-sm transition-all"
+              >
+                <Download className="size-4 text-brand" />
+                Download Transcript
+              </Button>
+            )}
           </div>
 
           {/* SCROLLABLE BODY */}
@@ -540,19 +552,22 @@ export function TranscriptDialog({
                       <Sparkles className="size-10 text-brand" />
                     </div>
                     <h3 className="text-xl font-bold text-slate-800 mb-2">
-                      Generate AI Notes
+                      {isEphemeral ? "AI Notes Unavailable" : "Generate AI Notes"}
                     </h3>
                     <p className="text-slate-500 text-center max-w-xs mb-8">
-                      Get a professional summary and a list of all questions
-                      asked during this session.
+                      {isEphemeral
+                        ? "This was an ephemeral session. Transcript saving was disabled, so AI notes cannot be generated or stored."
+                        : "Get a professional summary and a list of all questions asked during this session."}
                     </p>
-                    <Button
-                      onClick={generateNotes}
-                      className="h-14 px-10 rounded-2xl bg-brand hover:bg-brand/90 text-white font-bold gap-3 shadow-lg shadow-brand/20 transition-all hover:scale-[1.02] active:scale-95"
-                    >
-                      <Sparkles className="size-5" />
-                      Generate Now
-                    </Button>
+                    {!isEphemeral && (
+                      <Button
+                        onClick={generateNotes}
+                        className="h-14 px-10 rounded-2xl bg-brand hover:bg-brand/90 text-white font-bold gap-3 shadow-lg shadow-brand/20 transition-all hover:scale-[1.02] active:scale-95"
+                      >
+                        <Sparkles className="size-5" />
+                        Generate Now
+                      </Button>
+                    )}
                   </div>
                 ) : (
                   <div className="max-w-4xl mx-auto px-4 pb-10">

@@ -148,6 +148,7 @@ export default function CreateSessionDialog({
               language: sessionData.language,
               simpleLanguage: sessionData.simpleLanguage,
               aiModel: sessionData.aiModel,
+              saveTranscript: sessionData.saveTranscript,
             },
           },
         });

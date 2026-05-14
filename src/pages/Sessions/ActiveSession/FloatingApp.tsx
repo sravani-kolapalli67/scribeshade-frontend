@@ -189,19 +189,22 @@ const parseAIResponse = (raw: string): ParsedSection => {
   const text = raw.trim();
 
   // Match patterns like:
+  //   **QUESTION:** ...\n**ANSWER:** ...
+  //   Question: ... \n Answer: ...
   //   Summarized question: ...\nAnswer: ...
-  //   Question: ...\nAnswer: ...
-  //   QUESTION: ...\nANSWER: ...
+  // Tolerates extra `**`, missing colons, no newlines.
   const re =
-    /^\s*(?:\*\*)?(?:summarized\s+question|question)(?:\*\*)?\s*[:\-]\s*([\s\S]*?)\n+\s*(?:\*\*)?answer(?:\*\*)?\s*[:\-]\s*([\s\S]*)$/i;
+    /^\s*(?:\*+\s*)?(?:summarized\s+question|question)\s*:?\s*(?:\*+)?\s*([\s\S]*?)\s*(?:\*+\s*)?(?:answer)\s*:?\s*(?:\*+)?\s*([\s\S]*)$/i;
   const m = text.match(re);
   if (m) {
-    return { question: m[1].trim(), answer: m[2].trim() };
+    const cleanInline = (s: string) =>
+      s.replace(/^\s*\*{1,3}\s*/, "").replace(/\s*\*{1,3}\s*$/, "").trim();
+    return { question: cleanInline(m[1]), answer: cleanInline(m[2]) };
   }
 
   // Answer-only marker
   const ansOnly = text.match(
-    /^\s*(?:\*\*)?answer(?:\*\*)?\s*[:\-]\s*([\s\S]*)$/i,
+    /^\s*(?:\*+)?\s*answer\s*:?\s*(?:\*+)?\s*([\s\S]*)$/i,
   );
   if (ansOnly) return { answer: ansOnly[1].trim() };
 
@@ -240,17 +243,56 @@ const InlineCopyButton: React.FC<{ text: string; label?: string }> = ({ text, la
  */
 function sanitizeStreamingMarkdown(text: string): string {
   return (
-    text
-      // Strip trailing lone ***/** / * or ___ / __ / _
-      .replace(/(\*{1,3}|_{1,3})$/, "")
-      // Strip trailing backtick sequences
-      .replace(/`{1,3}$/, "")
-      // Strip lone ** or * that appear on their own line (orphaned bold/italic markers)
-      .replace(/^\*{1,3}\s*$/gm, "")
-      // Strip orphaned ** at the very beginning of the string before any word char
-      .replace(/^\*{1,3}(?=\s|\n|$)/, "")
-      .trimStart()
+    normalizeBulletParagraphs(
+      text
+        // Strip trailing lone ***/** / * or ___ / __ / _
+        .replace(/(\*{1,3}|_{1,3})$/, "")
+        // Strip trailing backtick sequences
+        .replace(/`{1,3}$/, "")
+        // Strip lone ** or * that appear on their own line (orphaned bold/italic markers)
+        .replace(/^\s*\*{1,3}\s*$/gm, "")
+        // Strip orphaned ** at the very beginning of the string before any word char
+        .replace(/^\*{1,3}(?=\s|\n|$)/, "")
+        // Collapse `**QUESTION:** ** Foo` → `**QUESTION:** Foo`
+        .replace(/(\*\*\s*(?:QUESTION|ANSWER)\s*:?\s*\*\*)\s*\*{1,3}\s*/gi, "$1 ")
+        // Drop the ===NEXT_QUESTION=== marker if it leaks through to the renderer
+        .replace(/\n?={3,}NEXT_QUESTION={3,}\n?/g, "\n")
+        .trimStart(),
+    )
   );
+}
+
+/**
+ * Converts paragraphs that mash multiple bullets together with `•` separators
+ * into proper markdown list syntax (one `-` item per line).
+ *
+ * Handles both:
+ *   "• a • b • c"            → "- a\n- b\n- c"
+ *   "Some intro. • a • b"     → "Some intro.\n\n- a\n- b"
+ *
+ * Without this transform, `•`-separated bullets render as one long paragraph
+ * with no spacing and no per-bullet copy buttons (the `<li>` renderer never
+ * fires). With it, the existing list/li renderer + per-bullet copy buttons
+ * work as designed.
+ */
+function normalizeBulletParagraphs(text: string): string {
+  if (!text || !text.includes("•")) return text;
+  return text
+    .split(/\n{2,}/)
+    .map((para) => {
+      // Skip if this paragraph already contains real markdown list lines.
+      if (/^\s*[-*]\s/m.test(para)) return para;
+      if (!para.includes("•")) return para;
+
+      // Split on ` • ` boundaries; first segment may be intro prose.
+      const parts = para.split(/\s*•\s+/);
+      if (parts.length < 2) return para;
+
+      const intro = parts[0].trim();
+      const items = parts.slice(1).map((s) => `- ${s.trim()}`).join("\n");
+      return intro ? `${intro}\n\n${items}` : items;
+    })
+    .join("\n\n");
 }
 
 // Answer Area
@@ -299,19 +341,21 @@ const AnswerArea: React.FC<{
               copy the cleaned-up phrasing the AI is actually answering.
             */}
             {parsed.question && (
-              <div className="mb-3 group/question">
-                <div className="flex items-center gap-2 mb-1">
-                  <HelpCircle className="h-3.5 w-3.5 text-blue-400 shrink-0" />
-                  <span className="text-[12px] font-bold uppercase tracking-wider text-blue-300/90">
+              <div className="mb-4 group/question">
+                <div className="flex items-center gap-2 mb-1.5">
+                  <HelpCircle className="h-4 w-4 text-blue-400 shrink-0" />
+                  <span className="text-[11px] font-bold uppercase tracking-[0.12em] text-blue-300">
                     Question
                   </span>
                   <span className="opacity-0 group-hover/question:opacity-100 transition-opacity">
                     <InlineCopyButton text={parsed.question} />
                   </span>
                 </div>
-                <div className="text-[12.5px] leading-relaxed text-white/80 italic pl-5 border-l-2 border-blue-400/30 wrap-break-word">
+                <div className="text-[15px] leading-snug font-bold text-white wrap-break-word">
                   {parsed.question}
                 </div>
+                {/* Horizontal divider separating Question from Answer */}
+                <div className="mt-3 h-px w-full bg-white/15" />
               </div>
             )}
 
@@ -330,8 +374,8 @@ const AnswerArea: React.FC<{
               className={[
                 "text-[13px] leading-relaxed font-medium text-white wrap-break-word",
                 "[&_p]:mb-3 [&_p:last-child]:mb-0",
-                "[&_ul]:list-disc [&_ul]:pl-5 [&_ul]:mb-3 [&_ul]:space-y-1",
-                "[&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:mb-3 [&_ol]:space-y-1",
+                "[&_ul]:pl-1 [&_ul]:mb-3 [&_ul]:space-y-2 [&_ul]:list-none",
+                "[&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:mb-3 [&_ol]:space-y-2",
                 "[&_li]:mb-0 [&_li]:marker:text-white/60",
                 "[&_em]:text-amber-200 [&_em]:not-italic [&_em]:font-semibold",
                 "[&_a]:text-blue-300 [&_a]:underline",
@@ -370,8 +414,12 @@ const AnswerArea: React.FC<{
                       return extract(children);
                     })();
                     return (
-                      <li className="mb-0 marker:text-white/60 flex items-start gap-1 group/li">
-                        <span className="flex-1">{children}</span>
+                      <li className="mb-0 flex items-start gap-2 group/li">
+                        <span
+                          aria-hidden="true"
+                          className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-blue-300/80"
+                        />
+                        <span className="flex-1 min-w-0">{children}</span>
                         {text && (
                           <span className="opacity-0 group-hover/li:opacity-100 transition-opacity shrink-0 mt-0.5">
                             <InlineCopyButton text={text} />

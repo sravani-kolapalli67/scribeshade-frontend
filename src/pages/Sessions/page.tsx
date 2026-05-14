@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useMemo } from "react";
-import { useNavigate } from "react-router-dom";
+import { useState, useMemo, useEffect } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { ColumnDef } from "@tanstack/react-table";
 import { DataTable } from "@/components/data-table/data-table";
 import { Button } from "@/components/ui/button";
@@ -55,6 +55,7 @@ interface Session extends ExportableData {
 
 export default function Sessions() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const userId = localStorage.getItem("userId");
   const [refreshKey, setRefreshKey] = useState(0);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
@@ -73,6 +74,18 @@ export default function Sessions() {
     null,
   );
   const [isTranscriptDialogOpen, setIsTranscriptDialogOpen] = useState(false);
+
+  // Auto-open the transcript dialog when arriving with ?view=<sessionId>.
+  // Used by the Tauri launcher (PastSessionsTab) to land on a completed
+  // session's summary instead of the live ActiveSession page.
+  useEffect(() => {
+    const viewId = searchParams.get("view");
+    if (viewId) {
+      setSelectedSessionId(viewId);
+      setIsTranscriptDialogOpen(true);
+    }
+    // Run only on initial mount / explicit URL change.
+  }, [searchParams]);
   const [isAnalyticsDialogOpen, setIsAnalyticsDialogOpen] = useState(false);
   const [selectedSessionForAnalytics, setSelectedSessionForAnalytics] =
     useState<Session | null>(null);
@@ -640,6 +653,12 @@ export default function Sessions() {
         onClose={() => {
           setIsTranscriptDialogOpen(false);
           setSelectedSessionId(null);
+          // Strip ?view=… from the URL so a refresh won't re-open the dialog.
+          if (searchParams.get("view")) {
+            const next = new URLSearchParams(searchParams);
+            next.delete("view");
+            setSearchParams(next, { replace: true });
+          }
         }}
         sessionId={selectedSessionId || ""}
         onDelete={(id: string) => {

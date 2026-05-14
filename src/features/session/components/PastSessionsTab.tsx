@@ -59,8 +59,18 @@ export function PastSessionsTab() {
     };
   }, [getToken]);
 
-  const openSession = (id: string) =>
-    openUrl(`${FRONTEND_URL}/sessions/${id}`).catch(console.error);
+  // Live statuses where the user should land on the live ActiveSession page.
+  // Anything else (COMPLETED, ABANDONED, FORCE_ENDED, AUTO_ENDED, CREDIT_EXHAUSTED,
+  // COMPLETING, PRE_CHECK) is treated as terminal/summary-only — open the
+  // sessions list with the transcript dialog auto-opened for that session.
+  const LIVE_STATUSES = new Set(["ACTIVE", "PAUSED", "DISCONNECTED"]);
+  const openSession = (s: PastSession) => {
+    const isLive = s.status && LIVE_STATUSES.has(String(s.status).toUpperCase());
+    const url = isLive
+      ? `${FRONTEND_URL}/sessions/${s.id}`
+      : `${FRONTEND_URL}/sessions?view=${s.id}`;
+    openUrl(url).catch(console.error);
+  };
 
   return (
     <div className="flex flex-col gap-2 px-3 pt-3 pb-4">
@@ -90,7 +100,7 @@ export function PastSessionsTab() {
             return (
               <button
                 key={s.id}
-                onClick={() => openSession(s.id)}
+                onClick={() => openSession(s)}
                 className="w-full flex items-center gap-3 p-3 rounded-2xl bg-zinc-50 hover:bg-zinc-100 border border-zinc-100 hover:border-zinc-200 transition-all active:scale-[0.98] text-left"
               >
                 <div className="w-8 h-8 rounded-xl bg-zinc-200 flex items-center justify-center flex-shrink-0">

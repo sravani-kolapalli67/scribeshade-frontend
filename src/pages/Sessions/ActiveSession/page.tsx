@@ -32,6 +32,54 @@ import {
 import { BuyCreditsDialog } from "@/components/Billing/BuyCreditsDialog";
 import { useCreditsBalance } from "@/hooks/useCreditsBalance";
 
+/**
+ * Segments a single transcript chunk into individual interview questions.
+ *
+ * Handles three patterns commonly produced by interviewer speech:
+ *   1. '?'-terminated:        "What is X? How does Y work?"
+ *   2. Digit-numbered list:   "1. Explain X. 2. Explain Y."
+ *   3. Word-numbered list:    "One: X. Two, Y. Three: Z."
+ *
+ * Returns an empty array if no clear segmentation is detected — caller falls
+ * back to treating the whole chunk as one question.
+ */
+function segmentQuestions(text: string): string[] {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+
+  // Word-number prefixes (lowercase): used to split spoken numbered lists.
+  const wordNumbers =
+    "(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen)";
+
+  // Pattern: a number marker (digit or word) followed by `:`, `.`, `,`, `)` or whitespace
+  // Examples matched: "1.", "1)", "Two:", "Three,", "Four "
+  // We use lookahead to KEEP the marker on the next segment.
+  const numberedPattern = new RegExp(
+    `(?=(?:^|[\\s.])\\s*(?:\\d{1,2}|${wordNumbers})\\s*[.:),]\\s+)`,
+    "gi",
+  );
+
+  // First try numbered split.
+  const numberedParts = trimmed
+    .split(numberedPattern)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 6);
+
+  if (numberedParts.length >= 2) {
+    return numberedParts;
+  }
+
+  // Otherwise split on '?' boundaries (preserving the '?').
+  const questionParts = trimmed
+    .split(/(?<=\?)\s+/g)
+    .map((s) => s.trim())
+    .filter((s) => s.endsWith("?") && s.length > 6);
+
+  if (questionParts.length >= 1) return questionParts;
+
+  return [];
+}
+
 export default function ActiveSession() {
   useEffect(() => {
     if (!isTauri()) return;
@@ -54,6 +102,13 @@ export default function ActiveSession() {
     location.state?.connectData?.language || "English",
   );
   const selectedModelRef = useRef(selectedModel);
+  // Keep ref in sync so callbacks that close over it always read the latest model.
+  useEffect(() => { selectedModelRef.current = selectedModel; }, [selectedModel]);
+
+  // Stable ref to handleAiAnswer — set after useAIChat() is called below.
+  // Using a ref allows handleTranscript (defined before useAIChat) to call
+  // handleAiAnswer without creating a forward-reference ordering problem.
+  const handleAiAnswerRef = useRef<((sessionId: string, question: string, aiModel: string) => void) | null>(null);
 
   const getLanguageCode = (lang: string) => {
     const mapping: Record<string, string> = {
@@ -74,6 +129,9 @@ export default function ActiveSession() {
     !!location.state?.showConnect,
   );
   const connectData = location.state?.connectData || {};
+  // Ephemeral mode flag — false means nothing persists after the session ends.
+  // Defaults to true to match backend (saveTranscription defaults to true).
+  const saveTranscriptEnabled: boolean = connectData?.saveTranscript !== false;
 
   // Activate response data — populated once the ConnectDialog succeeds
   const [maxAllowedMinutes, setMaxAllowedMinutes] = useState<number | null>(
@@ -138,9 +196,11 @@ export default function ActiveSession() {
     const isFreeZone = durationMinutes !== null && durationMinutes <= FREE_ZONE_MINUTES;
 
     try {
-      const transcript = messages
-        .map((m) => `[${m.sender}]: ${m.text}`)
-        .join("\n");
+      // For ephemeral sessions, do NOT send transcript to the backend.
+      // Sending it would trigger background analytics generation on the server.
+      const transcript = saveTranscriptEnabled
+        ? messages.map((m) => `[${m.sender}]: ${m.text}`).join("\n")
+        : undefined;
       const aiUsage = parseInt(localStorage.getItem(`aiUsage_${id}`) || "0");
       const res = await fetch(
         `${import.meta.env.VITE_BACKEND_URL}/api/session/${id}/deactivate`,
@@ -216,7 +276,7 @@ export default function ActiveSession() {
       }
       navigate("/sessions");
     }
-  }, [id, messages, maxAllowedMinutes, navigate]);
+  }, [id, messages, maxAllowedMinutes, navigate, saveTranscriptEnabled]);
 
   const onTimeUp = useCallback(async () => {
     toast.info("Free session time is up!");
@@ -276,21 +336,71 @@ export default function ActiveSession() {
   // synchronous user gesture (button click). The ScreenCapture panel's
   // "Select Screen / Tab" button serves as the user gesture entry point.
 
+  const autoGenerateResponse = location.state?.connectData?.autoGenerateResponse ?? false;
+
+  // Monotonic sequence + per-source dedup memory.
+  // - `transcriptSeqRef` provides a strict ordering stamp on every accepted
+  //   transcript chunk. Useful for replay safety and downstream consumers.
+  // - `recentChunksRef` remembers the last ~20 normalized chunks per source
+  //   with their timestamp so duplicate websocket events / replays / Deepgram
+  //   re-emits cannot create double entries even outside the cross-source
+  //   echo window below.
+  const transcriptSeqRef = useRef(0);
+  const recentChunksRef = useRef<{ key: string; t: number }[]>([]);
+
+  // ── Interviewer-chunk debouncing (auto-answer pipeline) ───────────────────
+  // Speech-to-text emits each spoken sentence as its own `isFinal: true`
+  // chunk. A scenario-style prompt ("Your company is building... Suddenly...
+  // API time spiked... How would you fix it?") arrives as 6-10 separate
+  // chunks within ~5-10 seconds. If we fire the AI on every chunk we get:
+  //   (a) 8 redundant AI calls + 8 cards in the UI for ONE question
+  //   (b) early calls only see a fragment ("Suddenly,") and answer nonsense
+  //   (c) wasted credits
+  //
+  // Strategy: buffer interviewer chunks; reset a 1.8 s silence timer on each
+  // new chunk; when the timer fires (no speech for 1.8 s), treat the whole
+  // joined buffer as a single transcript and run segmentQuestions on it.
+  // This naturally merges scenario fragments into one AI call while still
+  // producing one AI call per question for genuinely separate spoken
+  // questions (since speakers pause >1.8 s between distinct topics).
+  const pendingTranscriptRef = useRef<string[]>([]);
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const DEBOUNCE_MS = 1800;
+
+  // Clear any pending debounce timer on unmount so a stale timer can't fire
+  // an AI call after the session view is gone.
+  useEffect(() => {
+    return () => {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+      pendingTranscriptRef.current = [];
+    };
+  }, []);
+
   const handleTranscript = useCallback(
     (sender: "User" | "Interviewer", text: string, isFinal: boolean) => {
       if (isFinal && text.trim()) {
         console.log(`[Transcript Final] ${sender}: ${text}`);
         setMessages((prev) => {
           const now = Date.now();
-          // ... deduplication logic ...
           const normalizedNew = text.toLowerCase().trim().replace(/[.!?]/g, "");
+          const ownKey = `${sender}::${normalizedNew}`;
 
-          // Deduplication: Check if this message was already captured by the OTHER source
-          // within a small time window (2 seconds).
+          // ── Pass 1: same-source replay/duplicate within 5s ────────────
+          // Catches Deepgram re-emitting the same final, websocket reconnect
+          // replays, and React StrictMode double-invocations.
+          const recent = recentChunksRef.current.filter((c) => now - c.t < 5000);
+          if (recent.some((c) => c.key === ownKey)) {
+            console.log(`[Dedup-self] Suppressed replay from ${sender}: "${text}"`);
+            return prev;
+          }
+          recentChunksRef.current = [...recent, { key: ownKey, t: now }].slice(-20);
+
+          // ── Pass 2: cross-source echo within 2s (mic ↔ tab audio) ─────
           const isEcho = prev.some((m) => {
-            // if (m.sender === sender) return false;
             if (!m.timestamp || now - m.timestamp > 2000) return false;
-
             const normalizedExisting = m.text
               .toLowerCase()
               .trim()
@@ -307,8 +417,14 @@ export default function ActiveSession() {
             return prev;
           }
 
+          // Stable, content-derived id — same chunk replayed across renders
+          // produces the same id, so React keys never accidentally split a
+          // single utterance into two list items.
+          const seq = ++transcriptSeqRef.current;
+          const stableId = `t-${seq}-${sender[0]}-${normalizedNew.slice(0, 24)}`;
+
           const newMsg: Message = {
-            id: Math.random().toString(36).substring(7),
+            id: stableId,
             sender,
             text,
             time: new Date().toLocaleTimeString([], {
@@ -318,22 +434,24 @@ export default function ActiveSession() {
             timestamp: now,
           };
 
-          // Save to backend
-          fetch(
-            `${import.meta.env.VITE_BACKEND_URL}/api/session/${id}/save-message`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                role: sender === "User" ? "USER" : "INTERVIEWER",
-                question: text,
-                answer: "",
-                time: newMsg.time,
-              }),
-            },
-          ).catch((err) =>
-            console.error("Failed to save transcript segment:", err),
-          );
+          // Save to backend — skip entirely for ephemeral sessions.
+          if (saveTranscriptEnabled) {
+            fetch(
+              `${import.meta.env.VITE_BACKEND_URL}/api/session/${id}/save-message`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  role: sender === "User" ? "USER" : "INTERVIEWER",
+                  question: text,
+                  answer: "",
+                  time: newMsg.time,
+                }),
+              },
+            ).catch((err) =>
+              console.error("Failed to save transcript segment:", err),
+            );
+          }
 
           // Forward structured transcript to the mini overlay so it can render
           // both sides even when native SCKit audio is unavailable (e.g. Windows).
@@ -343,11 +461,44 @@ export default function ActiveSession() {
             );
           }
 
+          // Auto-answer: when the user opted in during session setup, each
+          // finalised Interviewer chunk is buffered. The AI call fires only
+          // after DEBOUNCE_MS of silence so multi-sentence scenarios
+          // ("Your company is building... Suddenly... How would you fix it?")
+          // arrive as ONE coherent prompt instead of 8 fragmented calls.
+          //
+          // Multi-question handling: once the silence window elapses, the
+          // joined buffer is segmented using segmentQuestions(); each truly
+          // distinct question (numbered list, '?'-terminated sequence, or
+          // word-numbered list) gets its own AI call with a small stagger.
+          if (sender === "Interviewer" && autoGenerateResponse && id) {
+            pendingTranscriptRef.current.push(text);
+            if (debounceTimerRef.current) {
+              clearTimeout(debounceTimerRef.current);
+            }
+            debounceTimerRef.current = setTimeout(() => {
+              const joined = pendingTranscriptRef.current.join(" ").trim();
+              pendingTranscriptRef.current = [];
+              debounceTimerRef.current = null;
+              if (!joined) return;
+              const questions = segmentQuestions(joined);
+              const targets = questions.length > 0 ? questions : [joined];
+              targets.forEach((q, i) => {
+                setTimeout(
+                  () => {
+                    handleAiAnswerRef.current?.(id, q, selectedModelRef.current);
+                  },
+                  i * 500,
+                );
+              });
+            }, DEBOUNCE_MS);
+          }
+
           return [...prev, newMsg];
         });
       }
     },
-    [id],
+    [id, autoGenerateResponse, saveTranscriptEnabled],
   );
 
   const onUserTranscript = useCallback(
@@ -441,10 +592,45 @@ export default function ActiveSession() {
     handleRegenerate,
   } = useAIChat();
 
-  // Restore persisted transcript + AI answers on mount (survives refresh / back-nav)
+  // Wire handleAiAnswer into the stable ref so handleTranscript can call it.
+  handleAiAnswerRef.current = handleAiAnswer;
+
+  // Restore persisted transcript + AI answers on mount (survives refresh / back-nav).
+  // Skipped entirely for ephemeral sessions — nothing should be restored.
   const historyLoadedRef = useRef(false);
+
+  // Status-aware redirect: if a user lands on /sessions/:id for a session that
+  // has already ended (COMPLETED, ABANDONED, FORCE_ENDED, AUTO_ENDED,
+  // CREDIT_EXHAUSTED, COMPLETING), bounce them to the sessions list with the
+  // transcript dialog auto-opened. The fresh-creation flow sets
+  // location.state.showConnect=true, so we never redirect in that case.
+  const statusCheckRef = useRef(false);
+  useEffect(() => {
+    if (!id || statusCheckRef.current) return;
+    if (location.state?.showConnect) return;
+    statusCheckRef.current = true;
+
+    const LIVE_STATUSES = new Set(["ACTIVE", "PAUSED", "DISCONNECTED", "PRE_CHECK"]);
+    fetch(`${import.meta.env.VITE_BACKEND_URL}/api/session/${id}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!data) return;
+        const sessionData = data.data ?? data;
+        const status = sessionData?.status;
+        if (status && !LIVE_STATUSES.has(String(status).toUpperCase())) {
+          navigate(`/sessions?view=${id}`, { replace: true });
+        }
+      })
+      .catch(() => {
+        // Best-effort — if the status probe fails, fall through to normal flow.
+      });
+  }, [id, location.state?.showConnect, navigate]);
+
   useEffect(() => {
     if (!id || historyLoadedRef.current) return;
+    // Ephemeral mode: the backend returns empty messages/transcript and the user
+    // never expects data to survive a reload, so skip the restore fetch entirely.
+    if (!saveTranscriptEnabled) return;
     historyLoadedRef.current = true;
 
     fetch(`${import.meta.env.VITE_BACKEND_URL}/api/session/${id}`)
@@ -461,10 +647,17 @@ export default function ActiveSession() {
         storedMessages.forEach((m: any, i: number) => {
           const time = m.time || new Date(m.timestamp || Date.now()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
           if (m.role === "AI_ASSISTANT") {
-            // AI answer — show the answer text; prefix with detected question if present
+            // AI answer — show the answer text; store original question for regeneration
             const text = m.answer || m.question || "";
             if (text) {
-              aiMsgs.push({ id: `hist-ai-${i}`, sender: "AI", text, time });
+              aiMsgs.push({
+                id: `hist-ai-${i}`,
+                sender: "AI",
+                text,
+                time,
+                // Restore the original question so Regenerate works on history entries too.
+                question: m.question || "",
+              });
             }
           } else {
             // USER or INTERVIEWER transcript line
@@ -537,33 +730,34 @@ export default function ActiveSession() {
   const onAiAnswer = useCallback(() => {
     if (isExecutingRef.current || !id) return;
 
-    // Check if we have anything to answer (history or live interim text)
-    const hasHistory = messages.length > 0;
+    // Resolve the SPECIFIC question to answer.
+    // Priority: live interim Interviewer text → last final Interviewer message.
+    // Sending only the specific question (not the whole transcript blob) ensures
+    // the AI answers THIS question instead of fixating on whatever was last in a
+    // 50-message concatenated dump.  The backend fetches full session history from
+    // DB for context, so nothing is lost.
     const interimText =
       micTranscription.interimTranscript || mergedTabInterimTranscript;
 
-    if (!hasHistory && !interimText) return;
+    const interviewerInterim =
+      !micTranscription.interimTranscript && mergedTabInterimTranscript
+        ? mergedTabInterimTranscript
+        : null;
+
+    // Prefer the live (not-yet-final) interviewer speech; fall back to the last
+    // finalised Interviewer message in the transcript.
+    const question =
+      interviewerInterim ||
+      [...messages].reverse().find((m) => m.sender === "Interviewer")?.text ||
+      interimText || // last resort: any live text (even from mic)
+      "";
+
+    if (!question) return;
 
     isExecutingRef.current = true;
     try {
-      console.log("[Trigger] AI Answer initiated");
-      // Use the last 50 transcript entries for context
-      const recentMessages = messages.slice(-50);
-      let combinedTranscript = recentMessages
-        .map(
-          (m) => `[${m.sender === "User" ? "YOU" : "Interviewer"}]: ${m.text}`,
-        )
-        .join("\n");
-
-      if (interimText) {
-        const sender = micTranscription.interimTranscript
-          ? "YOU"
-          : "Interviewer";
-        combinedTranscript +=
-          (combinedTranscript ? "\n" : "") + `[${sender}]: ${interimText}`;
-      }
-
-      handleAiAnswer(id, combinedTranscript, selectedModel);
+      console.log("[Trigger] AI Answer initiated for question:", question.slice(0, 80));
+      handleAiAnswer(id, question, selectedModel);
     } finally {
       setTimeout(() => {
         isExecutingRef.current = false;
@@ -581,17 +775,12 @@ export default function ActiveSession() {
   const onRegenerate = useCallback(
     (messageId: string) => {
       if (!id) return;
-      // Rebuild context from recent 50 transcript messages
-      const recentMessages = messages.slice(-50);
-      const combinedTranscript = recentMessages
-        .map(
-          (m) => `[${m.sender === "User" ? "YOU" : "Interviewer"}]: ${m.text}`,
-        )
-        .join("\n");
-      if (!combinedTranscript) return;
-      handleRegenerate(id, messageId, combinedTranscript, selectedModel);
+      // The question is stored on the AI message object (set when handleAiAnswer
+      // created it).  handleRegenerate looks it up internally — no need to
+      // rebuild a transcript blob here.
+      handleRegenerate(id, messageId, selectedModel);
     },
-    [id, messages, handleRegenerate, selectedModel],
+    [id, handleRegenerate, selectedModel],
   );
 
   const toggleFullscreen = () => setIsFullscreen((prev) => !prev);
@@ -897,6 +1086,16 @@ export default function ActiveSession() {
 
   return (
     <div className="h-screen w-screen bg-[#f8f9fb] text-slate-900 flex flex-col overflow-hidden font-sans select-none fixed inset-0">
+      {/* Ephemeral session indicator — visible whenever transcript saving is OFF */}
+      {!saveTranscriptEnabled && (
+        <div className="fixed top-0 inset-x-0 z-40 flex items-center justify-center gap-2 bg-slate-900 text-white text-xs font-medium py-1 px-4 shadow">
+          <span>🔒</span>
+          <span>
+            Ephemeral session — transcript saving is OFF. Nothing will be persisted after this session ends.
+          </span>
+        </div>
+      )}
+
       {/* Credit warning banner — shown for paid sessions approaching exhaustion */}
       {creditWarning !== null && (
         <div className="fixed top-0 inset-x-0 z-50 flex items-center justify-center gap-2 bg-amber-500 text-white text-sm font-semibold py-1.5 px-4 shadow-lg">
