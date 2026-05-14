@@ -1,14 +1,15 @@
 import React, { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getVersion } from "@tauri-apps/api/app";
-import { useUser, useAuth } from "@clerk/clerk-react";
 import { Activity, Wifi, WifiOff, LayoutDashboard, History, CreditCard, ExternalLink, Loader2, Cpu, Tag, RefreshCw } from "lucide-react";
 import { checkForUpdates } from "@/lib/updater";
 import { cn } from "@/lib/utils";
-import { useCreditsBalance } from "@/hooks/useCreditsBalance";
+import { useInspectAuth } from "@/pages/Inspect/InspectApp";
 import { BACKEND_URL, FRONTEND_URL, APP_NAME } from "@/features/launcher/constants";
 
 type HealthStatus = "checking" | "ok" | "error";
+
+type CreditsBalance = { totalAvailable?: string; heldCredits?: string } | null;
 
 function useBackendHealth(): HealthStatus {
   const [status, setStatus] = useState<HealthStatus>("checking");
@@ -32,10 +33,30 @@ function useBackendHealth(): HealthStatus {
   return status;
 }
 
+function useInspectCredits(token: string | null): { balance: CreditsBalance; isLoading: boolean } {
+  const [balance, setBalance] = useState<CreditsBalance>(null);
+  const [isLoading, setIsLoading] = useState(false);
+
+  useEffect(() => {
+    if (!token) return;
+    let cancelled = false;
+    setIsLoading(true);
+    fetch(`${BACKEND_URL}/api/credits/balance`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((json) => { if (!cancelled) setBalance(json.data ?? json); })
+      .catch(() => { if (!cancelled) setBalance(null); })
+      .finally(() => { if (!cancelled) setIsLoading(false); });
+    return () => { cancelled = true; };
+  }, [token]);
+
+  return { balance, isLoading };
+}
+
 export function InspectTab() {
-  const { user } = useUser();
-  const { getToken } = useAuth();
-  const { balance, isLoading: isLoadingBalance } = useCreditsBalance();
+  const { token, email, userId } = useInspectAuth();
+  const { balance, isLoading: isLoadingBalance } = useInspectCredits(token);
   const health = useBackendHealth();
   const [appVersion, setAppVersion] = useState<string>("…");
 
@@ -43,16 +64,13 @@ export function InspectTab() {
     getVersion().then(setAppVersion).catch(() => setAppVersion("—"));
   }, []);
 
-  const email =
-    user?.primaryEmailAddress?.emailAddress ??
-    user?.emailAddresses?.[0]?.emailAddress ??
-    "—";
-  const userId = typeof window !== "undefined" ? localStorage.getItem("userId") ?? "—" : "—";
   const credits = balance
     ? `${parseFloat(balance.totalAvailable ?? "0").toFixed(1)} available`
     : isLoadingBalance
       ? "loading…"
-      : "—";
+      : token
+        ? "—"
+        : "sign in required";
   const held = balance?.heldCredits ? `${parseFloat(balance.heldCredits).toFixed(1)} held` : null;
 
   const row = "flex items-center justify-between py-2 border-b border-zinc-100 last:border-0";

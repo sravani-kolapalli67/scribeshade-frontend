@@ -110,6 +110,7 @@ const PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 
 function WidgetContent() {
   const { isLoaded, isSignedIn, user } = useUser();
+  const { getToken } = useAuth();
   const dispatch = useAppDispatch();
 
   // ── Redux state ────────────────────────────────────────────────────────────
@@ -278,6 +279,31 @@ function WidgetContent() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ── Respond to inspect window auth requests ───────────────────────────────
+  // The inspect webview has isolated localStorage — no Clerk session there.
+  // When the inspect window opens it emits "inspect:request-auth"; we reply
+  // with a fresh token + user info via emitTo so it can fetch data directly.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    tauriEvents
+      .onInspectRequestAuth(async () => {
+        try {
+          const token = await getToken();
+          const email =
+            user?.primaryEmailAddress?.emailAddress ??
+            user?.emailAddresses?.[0]?.emailAddress ??
+            "—";
+          const userId = localStorage.getItem("userId") ?? "—";
+          await tauriEvents.emitInspectAuth({ token, email, userId });
+        } catch {
+          // Non-fatal — inspect window shows "—" for auth-dependent fields
+        }
+      })
+      .then((fn) => { unlisten = fn; })
+      .catch(console.error);
+    return () => unlisten?.();
+  }, [getToken, user]);
 
   // ── Auto-update check ──────────────────────────────────────────────────────
   useEffect(() => {

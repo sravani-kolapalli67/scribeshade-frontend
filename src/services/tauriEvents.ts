@@ -1,4 +1,4 @@
-import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { emit, emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export interface SessionInitPayload {
   sessionId: string | undefined;
@@ -8,6 +8,12 @@ export interface SessionInitPayload {
   companyName: string;
   startedAt: string | null;
   maxAllowedMinutes: number | null;
+}
+
+export interface InspectAuthPayload {
+  token: string | null;
+  email: string;
+  userId: string;
 }
 
 /**
@@ -27,4 +33,15 @@ export const tauriEvents = {
 
   onOAuthCallback: (cb: (url: string) => void): Promise<UnlistenFn> =>
     listen<string>("oauth://url", (e) => cb(e.payload)),
+
+  // ── Inspect window auth handshake ─────────────────────────────────────────
+  // The inspect window emits "inspect:request-auth" on mount.
+  // The launcher listens, fetches a fresh Clerk token, and responds via
+  // emitTo("inspect", "inspect:auth", payload) so the inspect webview
+  // never needs its own ClerkProvider.
+  onInspectRequestAuth: (cb: () => void): Promise<UnlistenFn> =>
+    listen<void>("inspect:request-auth", cb),
+
+  emitInspectAuth: (payload: InspectAuthPayload): Promise<void> =>
+    emitTo("inspect", "inspect:auth", payload),
 } as const;
