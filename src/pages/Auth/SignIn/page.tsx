@@ -2,6 +2,10 @@ import { useEffect, useState } from "react";
 import { useSignIn, useClerk, useAuth } from "@clerk/clerk-react";
 import { Link, useNavigate } from "react-router-dom";
 import { GoogleOAuthButton } from "@/components/GoogleOAuthButton";
+import {
+  saveDesktopClerkSessionId,
+  clearDesktopClerkSessionId,
+} from "@/lib/desktopClerkSession";
 
 type Step = "email" | "password";
 
@@ -85,6 +89,7 @@ const SignInPage = () => {
     try {
       const result = await signIn!.create({ identifier: email });
       if (result.status === "complete") {
+        saveDesktopClerkSessionId(result.createdSessionId);
         await setActive!({ session: result.createdSessionId });
         await afterSignIn();
       } else {
@@ -106,6 +111,7 @@ const SignInPage = () => {
     try {
       const result = await signIn!.attemptFirstFactor({ strategy: "password", password });
       if (result.status === "complete") {
+        saveDesktopClerkSessionId(result.createdSessionId);
         await setActive!({ session: result.createdSessionId });
         await afterSignIn();
       } else {
@@ -123,6 +129,7 @@ const SignInPage = () => {
     setStep("email");
     setPassword("");
     setError("");
+    clearDesktopClerkSessionId();
     signOut();
   };
 
@@ -172,7 +179,12 @@ const SignInPage = () => {
           </button>
           <button
             type="button"
-            onClick={() => { signOut(); sessionStorage.removeItem("from_tauri"); sessionStorage.removeItem("tauri_auth_port"); }}
+            onClick={() => {
+              clearDesktopClerkSessionId();
+              signOut();
+              sessionStorage.removeItem("from_tauri");
+              sessionStorage.removeItem("tauri_auth_port");
+            }}
             className="w-full text-xs text-slate-400 hover:text-slate-600 transition"
           >
             Sign in as a different user

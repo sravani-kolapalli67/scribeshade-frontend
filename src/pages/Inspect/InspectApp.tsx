@@ -28,6 +28,10 @@ function InspectApp() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
 
+    const requestAuth = () => {
+      emit("inspect:request-auth").catch(console.error);
+    };
+
     // 1. Register listener before emitting request so we never miss the reply.
     listen<InspectAuthPayload>("inspect:auth", (event) => {
       setAuth(event.payload);
@@ -35,11 +39,22 @@ function InspectApp() {
       .then((fn) => {
         unlisten = fn;
         // 2. Tell the launcher this window is ready and wants auth data.
-        emit("inspect:request-auth").catch(console.error);
+        requestAuth();
       })
       .catch(console.error);
 
-    return () => unlisten?.();
+    const handleFocus = () => requestAuth();
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") requestAuth();
+    };
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibility);
+
+    return () => {
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      unlisten?.();
+    };
   }, []);
 
   return (

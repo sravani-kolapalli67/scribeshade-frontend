@@ -10,6 +10,7 @@ import {
   TAURI_AUTH_PORT,
   AUTH_CALLBACK_HTML,
 } from "@/features/launcher/constants";
+import { saveDesktopClerkSessionId } from "@/lib/desktopClerkSession";
 
 export function AuthScreen() {
   const [loading, setLoading] = useState(false);
@@ -77,6 +78,7 @@ export function AuthScreen() {
       if (!clerkSignIn || !clerkSetActive) throw new Error("Clerk not ready");
       const result = await clerkSignIn.create({ strategy: "ticket", ticket });
       if (result.status === "complete") {
+        saveDesktopClerkSessionId(result.createdSessionId);
         await clerkSetActive({ session: result.createdSessionId });
       } else {
         throw new Error("Unexpected sign-in status: " + result.status);
