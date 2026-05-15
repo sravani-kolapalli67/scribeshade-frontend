@@ -33,6 +33,7 @@ import {
   Loader2,
   AlignJustify,
   HelpCircle,
+  RotateCcw,
 } from "lucide-react";
 import { ChatActionButtons } from "./components/ChatActionButtons";
 import { ModelSelector } from "./components/ModelSelector";
@@ -1058,6 +1059,30 @@ const FloatingApp: React.FC = () => {
                 </span>
               )}
             </div>
+            <div className="flex items-center gap-2">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    onClick={() =>
+                      void session.handleRegenerateResponse(
+                        session.aiResponses[session.currentResponseIndex]?.id ?? "",
+                      )
+                    }
+                    disabled={
+                      !session.aiResponses[session.currentResponseIndex]?.id ||
+                      session.isAnswering ||
+                      session.isAnalyzing ||
+                      isCapturePhase
+                    }
+                    className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-25 disabled:cursor-not-allowed text-white transition-all active:scale-95"
+                  >
+                    <RotateCcw size={13} />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="left" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
+                  Regenerate answer
+                </TooltipContent>
+              </Tooltip>
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
@@ -1071,6 +1096,7 @@ const FloatingApp: React.FC = () => {
                 {session.isResponsesExpanded ? "Collapse" : "Expand"}
               </TooltipContent>
             </Tooltip>
+            </div>
           </div>
 
           {session.isResponsesExpanded && session.aiResponses.length > 0 && (

@@ -117,6 +117,7 @@ export function useFloatingSession() {
     handleAiAnswer,
     handleAnalyzeScreen,
     handleCustomQuery,
+    handleRegenerate,
   } = useAIChat();
 
   const aiResponses = aiChat.filter((m) => m.sender === "AI");
@@ -427,9 +428,7 @@ export function useFloatingSession() {
 
   // Track the previous count so we can distinguish "first response arrived"
   // (jump to it) vs "another response was appended while user is reading an
-  // earlier one" (stay put). Also track whether the user was at the tail
-  // immediately before — if so we follow the new tail; otherwise we never
-  // disturb their position mid-read.
+  // earlier one" (stay put).
   const prevResponsesLenRef = useRef(0);
 
   useEffect(() => {
@@ -437,30 +436,24 @@ export function useFloatingSession() {
     const curr = aiResponses.length;
 
     if (curr > 0 && prev === 0) {
-      // First response — open the panel and focus it.
+      // First response ever — open the panel and point at it.
       dispatch(setCurrentResponseIndex(0));
       dispatch(setIsResponsesExpanded(true));
-    } else if (curr > prev && currentResponseIndex === prev - 1) {
-      // User was viewing the previous tail; follow the new tail.
+    } else if (curr > prev) {
+      // New card(s) arrived. Always follow the latest card so the user sees
+      // the streaming answer as it comes in. The previous logic only advanced
+      // when currentResponseIndex === prev - 1, which was never true when
+      // prev was 0 (0 === -1 is false), so multi-card Analyze Screen results
+      // left the index stuck at 0 pointing at an empty/removed card.
       dispatch(setCurrentResponseIndex(curr - 1));
     }
-    // Otherwise: user has navigated away (e.g. clicked Prev to read an earlier
-    // answer while the model is still streaming new ones). Do NOT jump.
 
     prevResponsesLenRef.current = curr;
-  }, [aiResponses.length, currentResponseIndex, dispatch]);
+  }, [aiResponses.length, dispatch]);
 
   // Auto-expand the responses panel the moment the user triggers a generation
   // (AI Answer or Analyze Screen) so the "Generating response…" loader is
-  // visible immediately. Without this, users see no in-panel feedback until
-  // the first streamed chunk arrives — confusing, since AI/screenshot calls
-  // can take several seconds.
-  useEffect(() => {
-    if (isAnswering || isAnalyzing) {
-      dispatch(setIsResponsesExpanded(true));
-    }
-  }, [isAnswering, isAnalyzing, dispatch]);
-
+  // visible immediately.
   useEffect(() => {
     if (isAnswering || isAnalyzing) {
       dispatch(setIsResponsesExpanded(true));
@@ -495,7 +488,9 @@ export function useFloatingSession() {
 
   const handleAnalyzeScreenClick = useCallback(
     async (screenshotBlob: Blob) => {
-      if (isAnalyzeEmittingRef.current || isAnalyzing || isAnswering) return;
+      // isAnalyzeEmittingRef is the source of truth — avoids stale isAnalyzing
+      // closure values that could block legitimate calls after the first one.
+      if (isAnalyzeEmittingRef.current) return;
       const info = sessionInfoRef.current;
       if (!info) return;
 
@@ -505,10 +500,10 @@ export function useFloatingSession() {
         await handleAnalyzeScreen(info.sessionId, screenshotBlob, selectedModelRef.current);
       } finally {
         setIsCapturing(false);
-        setTimeout(() => { isAnalyzeEmittingRef.current = false; }, 800);
+        setTimeout(() => { isAnalyzeEmittingRef.current = false; }, 500);
       }
     },
-    [isAnalyzing, isAnswering, handleAnalyzeScreen],
+    [handleAnalyzeScreen],
   );
 
   const handleSend = useCallback(async () => {
@@ -517,6 +512,15 @@ export function useFloatingSession() {
     setInputValue("");
     handleCustomQuery(sessionInfoRef.current.sessionId, query, selectedModelRef.current);
   }, [inputValue, handleCustomQuery]);
+
+  const handleRegenerateResponse = useCallback(
+    async (messageId: string) => {
+      const info = sessionInfoRef.current;
+      if (!info || !messageId) return;
+      await handleRegenerate(info.sessionId, messageId, selectedModelRef.current);
+    },
+    [handleRegenerate],
+  );
 
   // ── Mic toggle ──────────────────────────────────────────────────────────────
 
@@ -632,6 +636,7 @@ export function useFloatingSession() {
     endSession,
     handleAiAnswerClick,
     handleAnalyzeScreenClick,
+    handleRegenerateResponse,
     handleSend,
     handleToggleMic,
     handleClearTranscript,

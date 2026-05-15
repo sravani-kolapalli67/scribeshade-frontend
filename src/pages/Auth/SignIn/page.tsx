@@ -3,9 +3,9 @@ import { useSignIn, useClerk, useAuth } from "@clerk/clerk-react";
 import { Link, useNavigate } from "react-router-dom";
 import { GoogleOAuthButton } from "@/components/GoogleOAuthButton";
 import {
-  saveDesktopClerkSessionId,
   clearDesktopClerkSessionId,
 } from "@/lib/desktopClerkSession";
+import { emitDesktopAuthStateChanged, persistDesktopSession } from "@/lib/desktopAuthSession";
 
 type Step = "email" | "password";
 
@@ -89,8 +89,15 @@ const SignInPage = () => {
     try {
       const result = await signIn!.create({ identifier: email });
       if (result.status === "complete") {
-        saveDesktopClerkSessionId(result.createdSessionId);
-        await setActive!({ session: result.createdSessionId });
+        const createdSessionId = result.createdSessionId;
+        if (!createdSessionId) throw new Error("Clerk did not return a session id");
+        await setActive!({ session: createdSessionId });
+        await persistDesktopSession(createdSessionId);
+        await emitDesktopAuthStateChanged({
+          source: "main",
+          sessionId: createdSessionId,
+          signedIn: true,
+        });
         await afterSignIn();
       } else {
         setStep("password");
@@ -111,8 +118,15 @@ const SignInPage = () => {
     try {
       const result = await signIn!.attemptFirstFactor({ strategy: "password", password });
       if (result.status === "complete") {
-        saveDesktopClerkSessionId(result.createdSessionId);
-        await setActive!({ session: result.createdSessionId });
+        const createdSessionId = result.createdSessionId;
+        if (!createdSessionId) throw new Error("Clerk did not return a session id");
+        await setActive!({ session: createdSessionId });
+        await persistDesktopSession(createdSessionId);
+        await emitDesktopAuthStateChanged({
+          source: "main",
+          sessionId: createdSessionId,
+          signedIn: true,
+        });
         await afterSignIn();
       } else {
         setError("Sign-in incomplete. Please try again.");

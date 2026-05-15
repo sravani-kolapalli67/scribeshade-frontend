@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { Message } from "@/pages/Sessions/ActiveSession/Transcript";
 
 const SEGMENT_MARKER = /\n?={3,}NEXT_QUESTION={3,}\n?/;
@@ -6,6 +6,58 @@ const QUESTION_MARKER = /(?:\*\*\s*)?QUESTION\s*:/i;
 // Backend sentinel: the model returns this single line when the input block
 // contains no genuine new interview question. We must not render a card for it.
 const NO_QUESTION_MARKER = /={3,}\s*NO_NEW_QUESTION\s*={3,}/i;
+
+const EXTRACT_QUESTION_FROM_ANSWER_RE =
+  /^\s*(?:\*+\s*)?(?:summarized\s+question|question)\s*:?\s*(?:\*+)?\s*([\s\S]*?)\s*(?:\*+\s*)?(?:answer)\s*:?\s*(?:\*+)?\s*[\s\S]*$/i;
+const EXTRACT_INLINE_QUESTION_RE =
+  /^\s*(?:\*+\s*)?(?:summarized\s+question|question)\s*:?\s*(?:\*+)?\s*(.+)$/im;
+const FOLLOWUP_QUESTION_RE =
+  /^(?:and|also|then|what about|how about|follow[- ]?up|can you expand|can you explain more|elaborate|why|when|where|which|who)\b/i;
+
+function extractQuestionFromAiText(text: string): string {
+  const cleaned = text.trim();
+  if (!cleaned) return "";
+  const match = cleaned.match(EXTRACT_QUESTION_FROM_ANSWER_RE);
+  return match?.[1]?.trim() ?? "";
+}
+
+function extractQuestionCandidate(text: string): string {
+  const cleaned = text.trim();
+  if (!cleaned) return "";
+
+  const structured = extractQuestionFromAiText(cleaned);
+  if (structured) return structured;
+
+  const inline = cleaned.match(EXTRACT_INLINE_QUESTION_RE)?.[1]?.trim();
+  if (inline) return inline;
+
+  return (
+    cleaned
+      .split("\n")
+      .map((line) => line.trim())
+      .find((line) => line.endsWith("?")) ?? ""
+  );
+}
+
+function normalizeQuestionKey(question: string): string {
+  return question
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isLikelyFollowUpQuestion(question: string): boolean {
+  const cleaned = question.trim();
+  if (!cleaned) return false;
+  if (FOLLOWUP_QUESTION_RE.test(cleaned)) return true;
+
+  const words = normalizeQuestionKey(cleaned).split(" ").filter(Boolean);
+  return (
+    words.length <= 7 &&
+    /\b(it|that|this|they|those|these|same|above|previous)\b/i.test(cleaned)
+  );
+}
 
 /**
  * Helper used by both handleAnalyzeScreen and handleAiAnswer to consume a
@@ -145,30 +197,100 @@ export const useAIChat = () => {
   // `isAnswering` reflects "at least one request in-flight" for UI spinners,
   // but new requests are NOT blocked while another is streaming.
   const inFlightRef = useRef(0);
+  const aiChatRef = useRef<Message[]>([]);
+  const questionHistoryRef = useRef<{ key: string; t: number }[]>([]);
+
+  useEffect(() => {
+    aiChatRef.current = aiChat;
+  }, [aiChat]);
 
   // Recent-question dedup: prevents the same exact question from being
   // re-issued within 4 s (e.g. transcript echo, double-click, debounced
   // multi-question splitter firing twice).
   const recentQuestionsRef = useRef<{ q: string; t: number }[]>([]);
 
+  const applyQuestionGuardrail = useCallback(
+    (
+      newMessageIds: string[],
+      options: { fallbackQuestion?: string; dedupeWindowMs?: number } = {},
+    ) => {
+      if (!newMessageIds.length) return;
+
+      const now = Date.now();
+      const dedupeWindowMs = options.dedupeWindowMs ?? 45_000;
+
+      setAiChat((prev) => {
+        const existingNewIds = new Set(newMessageIds);
+        const recentHistory = questionHistoryRef.current.filter(
+          (item) => now - item.t < dedupeWindowMs,
+        );
+        const seenKeys = new Set(recentHistory.map((item) => item.key));
+        const batchKeys = new Set<string>();
+        const next: Message[] = [];
+        const keptHistory: { key: string; t: number }[] = [];
+
+        for (const msg of prev) {
+          if (!existingNewIds.has(msg.id)) {
+            next.push(msg);
+            continue;
+          }
+
+          const candidate =
+            extractQuestionCandidate(msg.text) ||
+            msg.question?.trim() ||
+            options.fallbackQuestion?.trim() ||
+            "";
+          const key = normalizeQuestionKey(candidate);
+
+          if (!key) {
+            next.push(msg);
+            continue;
+          }
+
+          const duplicate = seenKeys.has(key) || batchKeys.has(key);
+          if (duplicate && !isLikelyFollowUpQuestion(candidate)) {
+            console.log("[useAIChat] Dropped duplicate AI question card:", candidate);
+            continue;
+          }
+
+          batchKeys.add(key);
+          seenKeys.add(key);
+          keptHistory.push({ key, t: now });
+          next.push({ ...msg, question: msg.question || candidate });
+        }
+
+        questionHistoryRef.current = [...recentHistory, ...keptHistory].slice(
+          -100,
+        );
+        return next;
+      });
+    },
+    [],
+  );
+
+  const isAnalyzingRef = useRef(false);
+
   const handleAnalyzeScreen = useCallback(
     async (sessionId: string, screenshotBlob: Blob | null, aiModel: string) => {
-      if (isAnalyzing || !screenshotBlob) return;
+      // Ref-based guard — never stale regardless of when this callback was created.
+      if (isAnalyzingRef.current || !screenshotBlob) return;
 
+      isAnalyzingRef.current = true;
       setIsAnalyzing(true);
 
       const currentUsage = parseInt(localStorage.getItem(`aiUsage_${sessionId}`) || "0", 10);
       localStorage.setItem(`aiUsage_${sessionId}`, (currentUsage + 1).toString());
 
-      const messageId = Date.now().toString();
+      const messageId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const baseTime = new Date().toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
       const newAiMessage: Message = {
         id: messageId,
         sender: "AI",
         text: "",
-        time: new Date().toLocaleTimeString([], {
-          hour: "2-digit",
-          minute: "2-digit",
-        }),
+        time: baseTime,
       };
 
       setAiChat((prev) => [...prev, newAiMessage]);
@@ -188,31 +310,93 @@ export const useAIChat = () => {
           },
         );
 
-        if (!response.ok) throw new Error("Analysis failed");
+        if (!response.ok) throw new Error(`Analysis failed: ${response.status}`);
 
         const reader = response.body?.getReader();
         if (!reader) throw new Error("No reader available");
 
-        await consumeSegmentedStream(
+        const renderedIds = await consumeSegmentedStream(
           reader,
           messageId,
           setAiChat,
-          newAiMessage.time,
+          baseTime,
         );
+
+        // Analyze Screen skips the question dedup guardrail entirely.
+        // The guardrail's 45-second window was silently dropping cards when
+        // the user analyzed the same screen twice in quick succession — the
+        // stream would complete successfully but all cards would be removed,
+        // leaving the panel blank. Screenshots are always intentional user
+        // actions and should never be deduped.
+
+        // Fallback: if the stream produced no renderable cards (e.g. the model
+        // returned only the NO_NEW_QUESTION sentinel or an empty response),
+        // show a helpful message on whichever card is still in state.
+        setAiChat((prev) => {
+          // All rendered cards have text — nothing to do.
+          if (renderedIds.length > 0) {
+            const allHaveText = renderedIds.every((rid) =>
+              prev.find((m) => m.id === rid)?.text?.trim(),
+            );
+            if (allHaveText) return prev;
+          }
+
+          // Find the first empty rendered card, or fall back to the original
+          // placeholder if preamble filtering didn't replace it.
+          const emptyCardId =
+            renderedIds.find((rid) => !prev.find((m) => m.id === rid)?.text?.trim()) ??
+            (prev.find((m) => m.id === messageId) ? messageId : null);
+
+          if (!emptyCardId) {
+            // No card at all in state — add a fresh one with the fallback text.
+            return [
+              ...prev,
+              {
+                id: messageId,
+                sender: "AI" as const,
+                text: "I couldn't detect a clear question from the screen. Try capturing again or ask a direct query.",
+                time: baseTime,
+              },
+            ];
+          }
+
+          return prev.map((msg) =>
+            msg.id === emptyCardId
+              ? { ...msg, text: "I couldn't detect a clear question from the screen. Try capturing again or ask a direct query." }
+              : msg,
+          );
+        });
       } catch (error) {
         console.error("AI Streaming error:", error);
-        setAiChat((prev) =>
-          prev.map((msg) =>
-            msg.id === messageId
-              ? { ...msg, text: "Sorry, I encountered an error during analysis." }
-              : msg,
-          ),
-        );
+        // Ensure there is always a visible card with an error message so the
+        // user knows something went wrong rather than seeing a blank panel.
+        setAiChat((prev) => {
+          const exists = prev.find((m) => m.id === messageId);
+          if (exists) {
+            return prev.map((msg) =>
+              msg.id === messageId
+                ? { ...msg, text: "Sorry, I encountered an error during analysis. Please try again." }
+                : msg,
+            );
+          }
+          // Card was removed (e.g. by preamble filtering before the error) — re-add it.
+          return [
+            ...prev,
+            {
+              id: messageId,
+              sender: "AI" as const,
+              text: "Sorry, I encountered an error during analysis. Please try again.",
+              time: baseTime,
+            },
+          ];
+        });
       } finally {
+        isAnalyzingRef.current = false;
         setIsAnalyzing(false);
       }
     },
-    [isAnalyzing],
+    // Stable — no dependency on isAnalyzing state; ref handles the guard.
+    [],
   );
 
   // handleAiAnswer — answers a SINGLE specific question.
@@ -277,12 +461,26 @@ export const useAIChat = () => {
         const reader = response.body?.getReader();
         if (!reader) throw new Error("No reader available");
 
-        await consumeSegmentedStream(
+        const renderedIds = await consumeSegmentedStream(
           reader,
           messageId,
           setAiChat,
           newAiMessage.time,
         );
+        applyQuestionGuardrail(renderedIds, { fallbackQuestion: question });
+
+        setAiChat((prev) => {
+          const target = prev.find((msg) => msg.id === messageId);
+          if (target?.text?.trim()) return prev;
+          return prev.map((msg) =>
+            msg.id === messageId
+              ? {
+                  ...msg,
+                  text: "I couldn't generate an answer from the current transcript. Please try regenerate.",
+                }
+              : msg,
+          );
+        });
       } catch (error) {
         console.error("AI Answering error:", error);
         setAiChat((prev) =>
@@ -300,7 +498,7 @@ export const useAIChat = () => {
         if (inFlightRef.current === 0) setIsAnswering(false);
       }
     },
-    [],
+    [applyQuestionGuardrail],
   );
 
   const handleCustomQuery = useCallback(
@@ -409,24 +607,34 @@ export const useAIChat = () => {
     [isAnswering],
   );
 
-  // handleRegenerate — re-runs the AI for a specific message.
-  // Uses the question stored on the message object (set by handleAiAnswer) so
-  // the exact same question is re-answered with fresh generation.
+  // handleRegenerate — re-runs the AI for a specific message in-place.
+  // The card at messageId is cleared and re-streamed; no new record is created.
+  // Works for both AI Answer cards (have .question) and Analyze Screen cards
+  // (question is extracted from the rendered text as fallback).
   const handleRegenerate = useCallback(
     async (sessionId: string, messageId: string, aiModel: string) => {
-      if (isAnswering) return;
+      // Use ref-based guard so the callback never captures a stale isAnswering.
+      if (inFlightRef.current > 0 || isAnalyzingRef.current) return;
 
-      // Look up the stored question from the existing AI message.
-      let question = "";
-      setAiChat((prev) => {
-        const target = prev.find((m) => m.id === messageId);
-        if (target?.question) question = target.question;
-        // Clear the text so the UI shows streaming from scratch.
-        return prev.map((msg) => (msg.id === messageId ? { ...msg, text: "" } : msg));
-      });
+      const targetMessage = aiChatRef.current.find((m) => m.id === messageId);
+      if (!targetMessage) return;
+
+      // Resolve the question to re-answer.
+      // Priority: extract the clean question from the rendered QUESTION:/ANSWER:
+      // markers FIRST, since .question may contain the full transcript blob
+      // (which the AI interprets as "no new question"). Fall back to .question
+      // only when extraction fails (e.g. custom query cards with no markers).
+      const extractedQ = extractQuestionFromAiText(targetMessage.text ?? "");
+      const question = extractedQ || targetMessage.question?.trim() || "";
 
       if (!question) return;
 
+      // Clear the existing text so the card streams from scratch in-place.
+      setAiChat((prev) =>
+        prev.map((msg) => (msg.id === messageId ? { ...msg, text: "" } : msg)),
+      );
+
+      inFlightRef.current += 1;
       setIsAnswering(true);
 
       try {
@@ -435,7 +643,7 @@ export const useAIChat = () => {
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ transcript: question, aiModel }),
+            body: JSON.stringify({ transcript: question, isRegenerate: true, aiModel }),
           },
         );
 
@@ -454,9 +662,28 @@ export const useAIChat = () => {
           const chunk = decoder.decode(value, { stream: true });
           streamedText += chunk;
 
+          // Stream directly into the existing card — same position, same id.
+          const renderText = streamedText.replace(NO_QUESTION_MARKER, "");
           setAiChat((prev) =>
             prev.map((msg) =>
-              msg.id === messageId ? { ...msg, text: streamedText } : msg,
+              msg.id === messageId ? { ...msg, text: renderText } : msg,
+            ),
+          );
+        }
+
+        const finalCleanText = streamedText.replace(NO_QUESTION_MARKER, "").trim();
+        if (!finalCleanText) {
+          setAiChat((prev) =>
+            prev.map((msg) =>
+              msg.id === messageId
+                ? { ...msg, text: "I couldn't regenerate the answer. Please try again." }
+                : msg,
+            ),
+          );
+        } else if (finalCleanText !== streamedText) {
+          setAiChat((prev) =>
+            prev.map((msg) =>
+              msg.id === messageId ? { ...msg, text: finalCleanText } : msg,
             ),
           );
         }
@@ -470,10 +697,12 @@ export const useAIChat = () => {
           ),
         );
       } finally {
-        setIsAnswering(false);
+        inFlightRef.current = Math.max(0, inFlightRef.current - 1);
+        if (inFlightRef.current === 0) setIsAnswering(false);
       }
     },
-    [isAnswering],
+    // No state deps — uses refs for guards (inFlightRef, isAnalyzingRef, aiChatRef).
+    [],
   );
 
   return {

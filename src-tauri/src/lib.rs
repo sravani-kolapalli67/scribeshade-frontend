@@ -3,6 +3,8 @@ use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
 use screenshots::Screen;
 use base64::{Engine as _, engine::general_purpose};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::{Arc, atomic::{AtomicU64, AtomicBool, AtomicU8, Ordering}};
 use url::Url as NavUrl;
 
@@ -13,6 +15,106 @@ mod deepgram;
 use deepgram::{DeepgramConfig, SttChannel};
 
 static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Tracks the user's current Private Mode preference (content protection).
+/// false = normal mode (window visible in screenshots)
+/// true  = private mode (window hidden from screenshots)
+/// Updated by toggle_content_protection; read by capture_screen to decide
+/// whether a temporary protection flip is needed before capturing.
+static CONTENT_PROTECTED: AtomicBool = AtomicBool::new(false);
+
+/// Mutex used as a capture lock so that concurrent capture_screen calls
+/// cannot race on the temporary content-protection flip.  Only one capture
+/// runs at a time; subsequent calls wait rather than producing a corrupted
+/// screenshot with protection in the wrong state.
+static CAPTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedAuthSession {
+    session_id: Option<String>,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthStateChangedPayload {
+    source: Option<String>,
+    session_id: Option<String>,
+    signed_in: bool,
+    emitted_at: String,
+}
+
+fn auth_session_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let mut dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("resolve app_data_dir failed: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create auth dir failed: {e}"))?;
+    dir.push("auth_session.json");
+    Ok(dir)
+}
+
+fn now_epoch_millis_string() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(dur) => dur.as_millis().to_string(),
+        Err(_) => "0".to_string(),
+    }
+}
+
+#[tauri::command]
+fn auth_get_persisted_session(app: AppHandle) -> Result<Option<String>, String> {
+    let path = auth_session_path(&app)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let raw = std::fs::read_to_string(&path).map_err(|e| format!("read auth session failed: {e}"))?;
+    let parsed: PersistedAuthSession =
+        serde_json::from_str(&raw).map_err(|e| format!("parse auth session failed: {e}"))?;
+    Ok(parsed.session_id)
+}
+
+#[tauri::command]
+fn auth_set_persisted_session(app: AppHandle, session_id: String) -> Result<(), String> {
+    let path = auth_session_path(&app)?;
+    let payload = PersistedAuthSession {
+        session_id: Some(session_id),
+        updated_at: now_epoch_millis_string(),
+    };
+    let data =
+        serde_json::to_string(&payload).map_err(|e| format!("serialize auth session failed: {e}"))?;
+    std::fs::write(path, data).map_err(|e| format!("write auth session failed: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn auth_clear_persisted_session(app: AppHandle) -> Result<(), String> {
+    let path = auth_session_path(&app)?;
+    if path.exists() {
+        std::fs::remove_file(path).map_err(|e| format!("remove auth session failed: {e}"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn auth_emit_state_changed(
+    app: AppHandle,
+    source: Option<String>,
+    session_id: Option<String>,
+    signed_in: bool,
+) -> Result<(), String> {
+    let payload = AuthStateChangedPayload {
+        source,
+        session_id,
+        signed_in,
+        emitted_at: now_epoch_millis_string(),
+    };
+    app.emit("auth:state-changed", payload)
+        .map_err(|e| format!("emit auth state failed: {e}"))?;
+    Ok(())
+}
 
 // ── Native audio WebSocket state ─────────────────────────────────────────────
 // On macOS, WKWebView never returns audio tracks from getDisplayMedia.
@@ -220,18 +322,60 @@ fn toggle_floating(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn capture_screen(window: Window) -> Result<String, String> {
+async fn capture_screen(app: AppHandle, window: Window) -> Result<String, String> {
+    // ── Serialise concurrent captures ────────────────────────────────────────
+    // Acquire the capture lock asynchronously to prevent two rapid
+    // Analyze Screen clicks from racing on the protection state.
+    let _lock = CAPTURE_LOCK.lock().await;
+
     let position = window.outer_position().map_err(|e| e.to_string())?;
-    
-    // Find the screen that contains the window, or fallback to the first screen
     let screen = Screen::from_point(position.x, position.y)
         .map_err(|e| e.to_string())?;
-        
-    let image = screen.capture().map_err(|e| e.to_string())?;
+
+    // ── Temporary content-protection flip ────────────────────────────────────
+    // When Private Mode is OFF (CONTENT_PROTECTED = false) the mini window is
+    // visible in screenshots, which causes the AI to "see" its own UI and
+    // generate answers for it.  We temporarily enable content protection on
+    // all windows for the duration of the capture, then restore the original
+    // state.  The window remains fully visible to the user throughout — only
+    // the screenshot API is affected.
+    let was_protected = CONTENT_PROTECTED.load(Ordering::SeqCst);
+
+    if !was_protected {
+        // Enable protection on every window before capturing.
+        for label in ["launcher", "mini", "main"] {
+            if let Some(win) = app.get_webview_window(label) {
+                let _ = win.set_content_protected(true);
+            }
+        }
+        // Give the compositor one frame to apply the protection before the
+        // screenshot API reads the framebuffer.  50 ms is sufficient on both
+        // macOS (CGWindowListCreateImage) and Windows (BitBlt).
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    // ── Capture ───────────────────────────────────────────────────────────────
+    let capture_result = screen.capture();
+
+    // ── Restore original protection state ────────────────────────────────────
+    // Always restore, even if capture failed, so the UI is never left in an
+    // unexpected protected state.
+    if !was_protected {
+        for label in ["launcher", "mini", "main"] {
+            if let Some(win) = app.get_webview_window(label) {
+                let _ = win.set_content_protected(false);
+            }
+        }
+    }
+
+    // ── Encode result ─────────────────────────────────────────────────────────
+    let image = capture_result.map_err(|e| e.to_string())?;
     let mut buffer = std::io::Cursor::new(Vec::new());
-    image.write_to(&mut buffer, screenshots::image::ImageFormat::Png).map_err(|e| e.to_string())?;
+    image
+        .write_to(&mut buffer, screenshots::image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
     let b64 = general_purpose::STANDARD.encode(buffer.into_inner());
-    
+
     Ok(format!("data:image/png;base64,{}", b64))
 }
 
@@ -1978,8 +2122,13 @@ fn set_session_active(active: bool) {
 /// Private Mode OFF (protected = false): normal shareable window.
 ///
 /// Called from the frontend when the user toggles the Private switch.
+/// Also updates CONTENT_PROTECTED so capture_screen knows whether a
+/// temporary flip is needed before taking a screenshot.
 #[command]
 async fn toggle_content_protection(app: AppHandle, protected: bool) -> Result<(), String> {
+    // Persist the user's intent so capture_screen can read it atomically.
+    CONTENT_PROTECTED.store(protected, Ordering::SeqCst);
+
     for label in ["launcher", "mini", "main"] {
         if let Some(win) = app.get_webview_window(label) {
             win.set_content_protected(protected)
@@ -2733,6 +2882,8 @@ pub fn run() {
             set_session_active, toggle_content_protection, handle_launcher_click,
             open_main_dashboard, show_launcher_widget,
             get_cursor_position, set_cursor_passthrough,
+            auth_get_persisted_session, auth_set_persisted_session,
+            auth_clear_persisted_session, auth_emit_state_changed,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

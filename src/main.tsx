@@ -7,6 +7,7 @@ import { ClerkProvider } from "@clerk/clerk-react";
 import { Toaster } from "sonner";
 import App from "./App";
 import { store } from "./store/store";
+import { DesktopAuthHydrator } from "@/components/auth/DesktopAuthHydrator";
 
 const PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 
@@ -40,7 +41,9 @@ createRoot(document.getElementById("root")!).render(
       <BrowserRouter>
         <ClerkProviderWithNavigate>
           <TooltipProvider>
-            <App />
+            <DesktopAuthHydrator source="main">
+              <App />
+            </DesktopAuthHydrator>
             <Toaster richColors position="bottom-right" />
           </TooltipProvider>
         </ClerkProviderWithNavigate>

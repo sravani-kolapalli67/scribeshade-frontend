@@ -1,5 +1,36 @@
 import { Button } from "@/components/ui/button";
 
+const BACKEND_UPDATES_MANIFEST_URL = `${
+  import.meta.env.VITE_BACKEND_URL
+}/api/updates/latest.json`;
+
+type UpdateManifest = {
+  platforms?: Record<string, { url: string; signature?: string }>;
+};
+
+async function openLatestDesktopDownload(platform: "mac" | "windows") {
+  try {
+    const res = await fetch(BACKEND_UPDATES_MANIFEST_URL, { cache: "no-store" });
+    if (!res.ok) throw new Error(`Failed to fetch latest manifest (${res.status})`);
+    const manifest = (await res.json()) as UpdateManifest;
+    const platforms = manifest.platforms ?? {};
+    const entries = Object.entries(platforms);
+
+    const match = entries.find(([key]) =>
+      platform === "mac"
+        ? key.toLowerCase().includes("darwin")
+        : key.toLowerCase().includes("windows"),
+    );
+
+    const url = match?.[1]?.url;
+    if (!url) throw new Error(`No ${platform} download found in latest manifest`);
+    window.open(url, "_blank", "noopener,noreferrer");
+  } catch (error) {
+    console.error("[download] Unable to open latest desktop download:", error);
+    window.open(BACKEND_UPDATES_MANIFEST_URL, "_blank", "noopener,noreferrer");
+  }
+}
+
 export function DownloadApp() {
   return (
     <div className="w-full max-w-6xl mx-auto py-8 sm:py-12 px-5 sm:px-8 bg-linear-to-br from-brand to-blue-700 rounded-2xl sm:rounded-3xl overflow-hidden relative shadow-2xl shadow-brand/20 my-4 sm:my-8 border border-white/10">
@@ -22,6 +53,8 @@ export function DownloadApp() {
         <div className="flex flex-col sm:flex-row items-center gap-4 w-full lg:w-auto shrink-0 justify-center">
           <Button
             size="lg"
+            type="button"
+            onClick={() => void openLatestDesktopDownload("mac")}
             className="w-full sm:w-auto h-14 px-8 bg-white hover:bg-blue-50 text-brand group rounded-xl transition-all font-bold"
           >
             <AppleIcon className="w-5 h-5 mr-3 transition-transform group-hover:-translate-y-0.5" />
@@ -29,6 +62,8 @@ export function DownloadApp() {
           </Button>
           <Button
             size="lg"
+            type="button"
+            onClick={() => void openLatestDesktopDownload("windows")}
             className="w-full sm:w-auto h-14 px-8 bg-zinc-900 hover:bg-zinc-800 text-white border border-zinc-800 group rounded-xl transition-all font-semibold shadow-lg"
           >
             <WindowsIcon className="w-5 h-5 mr-3 transition-transform group-hover:-translate-y-0.5 text-[#00a4ef]" />

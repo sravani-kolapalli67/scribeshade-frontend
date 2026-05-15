@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { createRoot } from "react-dom/client";
 import { createPortal } from "react-dom";
 import { Provider } from "react-redux";
-import { ClerkProvider, useUser, useAuth, useClerk } from "@clerk/clerk-react";
+import { ClerkProvider, useUser, useAuth } from "@clerk/clerk-react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCreditsBalance } from "@/hooks/useCreditsBalance";
@@ -82,11 +82,7 @@ import { CreditsBadge } from "@/shared/components/CreditsBadge";
 import { WidgetSelect } from "@/shared/components/WidgetSelect";
 import { tauriEvents } from "@/services/tauriEvents";
 import { tauriOverlay } from "@/services/tauriOverlay";
-import {
-  getDesktopClerkSessionId,
-  saveDesktopClerkSessionId,
-  clearDesktopClerkSessionId,
-} from "@/lib/desktopClerkSession";
+import { DesktopAuthHydrator } from "@/components/auth/DesktopAuthHydrator";
 
 // ─── Redux store ──────────────────────────────────────────────────────────────
 import { store } from "@/store/store";
@@ -115,8 +111,7 @@ const PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 
 function WidgetContent() {
   const { isLoaded, isSignedIn, user } = useUser();
-  const { getToken, sessionId } = useAuth();
-  const { setActive } = useClerk();
+  const { getToken } = useAuth();
   const dispatch = useAppDispatch();
 
   // ── Redux state ────────────────────────────────────────────────────────────
@@ -285,38 +280,6 @@ function WidgetContent() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // ── Desktop auth persistence fallback (build-safe) ────────────────────────
-  // In packaged desktop builds, cookie persistence can be inconsistent across
-  // webview restarts. Keep the latest Clerk session id in localStorage and
-  // attempt to re-activate it once on startup when signed out.
-  const restoreAttemptedRef = useRef(false);
-
-  useEffect(() => {
-    if (!isLoaded || isSignedIn || restoreAttemptedRef.current) return;
-    const savedSessionId = getDesktopClerkSessionId();
-    if (!savedSessionId) return;
-
-    restoreAttemptedRef.current = true;
-    setActive({ session: savedSessionId }).catch(() => {
-      clearDesktopClerkSessionId();
-    });
-  }, [isLoaded, isSignedIn, setActive]);
-
-  useEffect(() => {
-    if (sessionId) {
-      saveDesktopClerkSessionId(sessionId);
-    }
-  }, [sessionId]);
-
-  useEffect(() => {
-    // If we were previously signed in during this process and now Clerk says
-    // signed out after load has completed, clear stale persisted session id.
-    if (!isLoaded) return;
-    if (!isSignedIn && restoreAttemptedRef.current) {
-      clearDesktopClerkSessionId();
-    }
-  }, [isLoaded, isSignedIn]);
 
   // ── Respond to inspect window auth requests ───────────────────────────────
   // The inspect webview has isolated localStorage — no Clerk session there.
@@ -1170,22 +1133,31 @@ function WidgetApp() {
         publishableKey={PUBLISHABLE_KEY}
         allowedRedirectProtocols={["tauri:", "http:", "https:"]}
       >
-        {OverlayFlags.USE_UNIFIED_OVERLAY ? (
-          /*
-           * Phase 4+: Unified fullscreen overlay runtime.
-           * OverlayRoot coordinates LauncherLayer / SessionLayer transitions
-           * and provides the OverlayPortalProvider for all menus/popovers.
-           * WidgetContent is passed as launcherContent — its JSX is unchanged;
-           * only the outer coordination layer changes.
-           */
-          <OverlayRoot launcherContent={<WidgetContent />} />
-        ) : (
-          /*
-           * Phase 1–3 (current): existing WidgetContent renders directly.
-           * Zero behavioral change until USE_UNIFIED_OVERLAY is enabled.
-           */
-          <WidgetContent />
-        )}
+        <DesktopAuthHydrator
+          source="launcher"
+          loadingFallback={
+            <div className="flex items-center justify-center py-10">
+              <Loader2 className="w-5 h-5 animate-spin text-zinc-300" />
+            </div>
+          }
+        >
+          {OverlayFlags.USE_UNIFIED_OVERLAY ? (
+            /*
+             * Phase 4+: Unified fullscreen overlay runtime.
+             * OverlayRoot coordinates LauncherLayer / SessionLayer transitions
+             * and provides the OverlayPortalProvider for all menus/popovers.
+             * WidgetContent is passed as launcherContent — its JSX is unchanged;
+             * only the outer coordination layer changes.
+             */
+            <OverlayRoot launcherContent={<WidgetContent />} />
+          ) : (
+            /*
+             * Phase 1–3 (current): existing WidgetContent renders directly.
+             * Zero behavioral change until USE_UNIFIED_OVERLAY is enabled.
+             */
+            <WidgetContent />
+          )}
+        </DesktopAuthHydrator>
       </ClerkProvider>
     </Provider>
   );
