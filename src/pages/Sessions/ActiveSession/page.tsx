@@ -95,15 +95,27 @@ export default function ActiveSession() {
   const [isEndSessionDialogOpen, setIsEndSessionDialogOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [selectedModel, setSelectedModel] = useState(
-    location.state?.connectData?.aiModel || "anthropic/claude-haiku-4-5",
-  );
+  const PREFERRED_MODEL_KEY = "scribeshade_preferred_model";
+  const [selectedModel, setSelectedModel] = useState(() => {
+    // Priority: 1. Navigation state, 2. Stored preference, 3. Default
+    return (
+      location.state?.connectData?.aiModel ||
+      localStorage.getItem(PREFERRED_MODEL_KEY) ||
+      "anthropic/claude-haiku-4-5"
+    );
+  });
+
   const [selectedLanguage, setSelectedLanguage] = useState(
     location.state?.connectData?.language || "English",
   );
   const selectedModelRef = useRef(selectedModel);
   // Keep ref in sync so callbacks that close over it always read the latest model.
-  useEffect(() => { selectedModelRef.current = selectedModel; }, [selectedModel]);
+  useEffect(() => {
+    selectedModelRef.current = selectedModel;
+    // Persist to localStorage whenever it changes
+    localStorage.setItem(PREFERRED_MODEL_KEY, selectedModel);
+  }, [selectedModel]);
+
 
   // Stable ref to handleAiAnswer — set after useAIChat() is called below.
   // Using a ref allows handleTranscript (defined before useAIChat) to call

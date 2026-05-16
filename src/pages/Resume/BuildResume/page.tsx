@@ -1147,7 +1147,12 @@ export default function BuildResume() {
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = `${entry?.title ?? r.title ?? "resume"}.pdf`;
+        
+        const userName = r.fields?.name || "Resume";
+        const targetRole = r.jobTitle || r.fields?.role || "";
+        const baseName = targetRole ? `${userName} - ${targetRole}` : (entry?.title ?? r.title ?? userName);
+        
+        a.download = `${baseName.replace(/[^a-z0-9_\-\s]+/gi, "").trim().replace(/\s+/g, "_")}.pdf`;
         a.click();
         URL.revokeObjectURL(url);
       } catch (err) {

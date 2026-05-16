@@ -78,6 +78,7 @@ export const ENDPOINTS = {
   resumeBuilderRewrite:        () => `${api()}/api/resume/builder/rewrite`,
   resumeBuilderInjectSkills:   () => `${api()}/api/resume/builder/inject-skills`,
   resumeBuilderInjectKeywords: () => `${api()}/api/resume/builder/inject-keywords`,
+  resumeBuilderAnalyzeKeywords: () => `${api()}/api/resume/builder/analyze-keywords`,
   resumeBuilderKeywordMatch:   () => `${api()}/api/resume/builder/keyword-match`,
 
   // ── Documents ────────────────────────────────────────────────────────────

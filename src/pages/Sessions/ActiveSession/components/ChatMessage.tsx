@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Message } from "../Transcript";
 import { cn } from "@/lib/utils";
-import { Copy, Check, MessageSquare, Sparkles, Terminal, RefreshCw } from "lucide-react";
+import { Copy, Check, MessageSquare, Star, Terminal, RefreshCw } from "lucide-react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import {
   vscDarkPlus,
@@ -118,27 +118,13 @@ export const ChatMessage = ({
 }: ChatMessageProps) => {
   const isAI = message.sender !== "User";
 
-  // ── Sanitization: strip stray markdown artifacts ─────────────────────────
-  // The model emits `**QUESTION:** ... **ANSWER:** ...` blocks. During and
-  // after streaming we may see leftover `**` artifacts:
-  //   - lone trailing `*` / `**` while the closing marker hasn't arrived
-  //   - orphan `**` lines (e.g. `**\nQUESTION:` → renders as literal `**`)
-  //   - duplicated `**` inside the question text (`**QUESTION:** ** Foo? **`)
-  //   - leading `**` line at the start of a segment
-  //   - bullet runs collapsed to inline `• a • b • c` paragraphs
   const sanitize = (raw: string): string => {
     if (!raw) return raw;
     let out = raw;
-    // Drop a lone trailing `**` or `*` left over from in-flight streaming
     out = out.replace(/\*{1,2}\s*$/g, "");
-    // Strip lines that are JUST `**` or `*` (orphaned bold markers on their own line)
     out = out.replace(/^\s*\*{1,3}\s*$/gm, "");
-    // Strip `**` immediately after `**QUESTION:**` / `**ANSWER:**` markers
-    // (catches `**QUESTION:** ** Foo?` patterns)
     out = out.replace(/(\*\*(?:QUESTION|ANSWER):\*\*)\s*\*{1,3}\s*/gi, "$1 ");
-    // Strip trailing `**` immediately before EOL on a question/answer line
     out = out.replace(/\s*\*{1,3}\s*$/gm, "");
-    // Remove orphaned `**` (odd count on a single line) — drop the LAST one
     out = out
       .split("\n")
       .map((line) => {
@@ -150,8 +136,6 @@ export const ChatMessage = ({
         return line;
       })
       .join("\n");
-    // Convert inline `• a • b • c` paragraphs into proper markdown lists so
-    // the existing <ul>/<li> renderer (with per-bullet copy buttons) fires.
     if (out.includes("•")) {
       out = out
         .split(/\n{2,}/)
@@ -166,31 +150,18 @@ export const ChatMessage = ({
         })
         .join("\n\n");
     }
-    // Collapse leading whitespace/blank lines so the QUESTION block is the
-    // visual anchor of the card.
     out = out.replace(/^\s+/, "");
     return out;
   };
 
   const cleanText = sanitize(message.text);
-
-  // ── Multi-question handling ──────────────────────────────────────────────
-  // Server-stream splitting now happens upstream in useAIChat: when the model
-  // emits `===NEXT_QUESTION===`, the consumer spawns a NEW Message record per
-  // segment instead of producing one giant pager. So at this layer we just
-  // strip any leftover separator (defensive — should never appear) and treat
-  // each Message as exactly one Q/A.
   const currentText = cleanText.replace(/\n?={3,}NEXT_QUESTION={3,}\n?/g, "\n");
 
-  // Parse Question and Answer if markers exist. Question matcher tolerates a
-  // missing closing `**` while streaming; answer matcher consumes the rest.
   const questionMatch = currentText.match(
     /\*\*\s*QUESTION\s*:?\s*\*?\*?\s*([\s\S]*?)\s*(?=\*\*\s*ANSWER\s*:|$)/i,
   );
   const answerMatch = currentText.match(/\*\*\s*ANSWER\s*:?\s*\*?\*?\s*([\s\S]*)/i);
 
-  // Strip residual `**`/`*` and surrounding punctuation noise from extracted
-  // question text (e.g. `** Difference between... ?**` → `Difference between...?`).
   const cleanInline = (s: string) =>
     s
       .replace(/^\s*\*{1,3}\s*/, "")
@@ -216,61 +187,41 @@ export const ChatMessage = ({
 
   return (
     <div className="mb-8 animate-in fade-in slide-in-from-bottom-2">
-      {/* Question Section — large, bold, with horizontal divider beneath */}
       {displayQuestion && (
-        <div className="group/ques relative mb-5">
-          <div className="flex items-start gap-3">
-            <div className="mt-1 shrink-0 text-brand">
-              <MessageSquare className="h-5 w-5" />
+        <div className="group/ques relative mb-4">
+          <div className="flex items-start gap-2 text-slate-800">
+            <div className="mt-1 shrink-0 text-slate-400">
+              <MessageSquare className="h-4.5 w-4.5" />
             </div>
-            <div className="flex-1 pr-10 min-w-0">
-              <div
-                className={cn(
-                  "text-[11px] font-semibold uppercase tracking-[0.12em] mb-1",
-                  isFullscreen ? "text-brand/80" : "text-brand",
-                )}
-              >
-                Question
-              </div>
-              <div
-                className={cn(
-                  "text-[17px] leading-snug font-bold break-words",
-                  isFullscreen ? "text-white" : "text-slate-900",
-                )}
-              >
+            <div className="flex-1 pr-10">
+              <span className="font-bold text-[15px] mr-1.5">Question:</span>
+              <span className="text-[15px] leading-relaxed font-medium">
                 {displayQuestion}
-              </div>
+              </span>
             </div>
-            <CopyButton
-              text={displayQuestion}
-              label="Question"
-              className="absolute top-1 right-0 opacity-0 group-hover/ques:opacity-100"
-            />
+            <button
+              onClick={() => {
+                navigator.clipboard.writeText(displayQuestion);
+              }}
+              className="absolute top-0.5 right-0 opacity-0 group-hover/ques:opacity-100 transition-opacity p-1 hover:bg-slate-100 rounded text-slate-400"
+              title="Copy question"
+            >
+              <Copy className="h-4 w-4" />
+            </button>
           </div>
-          {/* Horizontal divider visually separating Question from Answer */}
-          <div
-            className={cn(
-              "mt-4 h-px w-full",
-              isFullscreen ? "bg-white/15" : "bg-slate-200",
-            )}
-          />
         </div>
       )}
 
-      {/* Answer Section */}
-      <div className="flex items-start gap-2">
-        <div className="mt-0.5 shrink-0 text-brand">
-          <Sparkles className="h-4.5 w-4.5" />
+      <div className="flex items-start gap-2 mb-2">
+        <div className="mt-1 shrink-0">
+          <Star className="h-4.5 w-4.5 fill-amber-400 text-amber-400" />
         </div>
         <div className="flex-1">
-          <div className="group/ansheader relative flex items-center justify-between mb-3">
-            <div className={cn(
-              "text-[14.5px] font-bold",
-              isFullscreen ? "text-white" : "text-slate-900"
-            )}>
+          <div className="group/ansheader relative flex items-center justify-between mb-2">
+            <div className="font-bold text-[15px] text-slate-900">
               Answer:
             </div>
-            <div className="flex items-center gap-1 opacity-0 group-hover/ansheader:opacity-100">
+            <div className="flex items-center gap-1 opacity-0 group-hover/ansheader:opacity-100 transition-opacity">
               {onRegenerate && !isStreaming && (
                 <button
                   onClick={onRegenerate}
@@ -294,47 +245,27 @@ export const ChatMessage = ({
 
           <div
             className={cn(
-              "text-[14.5px] leading-relaxed font-normal tracking-tight",
-              isFullscreen ? "text-slate-100" : "text-slate-700",
-              "selection:bg-brand/10",
+              "text-[15px] leading-relaxed text-slate-800",
+              isFullscreen ? "text-slate-100" : "text-slate-800",
             )}
           >
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
               components={{
-                p: ({ children }) => {
-                  const textContent = String(children);
-                  return (
-                    <div className={cn(
-                      "group/p relative flex items-start gap-3 mb-4 last:mb-0 -ml-8 px-2 rounded-md transition-colors",
-                      isFullscreen ? "hover:bg-white/5" : "hover:bg-slate-50/50"
-                    )}>
-                      <div className="w-8 shrink-0 flex items-center justify-center h-6 relative">
-                        <CopyButton
-                          text={textContent}
-                          className="absolute inset-0 m-auto h-6 w-6 opacity-0 group-hover/p:opacity-100"
-                        />
-                      </div>
-                      <p className="flex-1">{children}</p>
-                    </div>
-                  );
-                },
-                ul: ({ children }) => (
-                  <ul className="mb-4 space-y-4 list-none">{children}</ul>
+                p: ({ children }) => (
+                  <p className="mb-4 last:mb-0 leading-relaxed text-slate-700">{children}</p>
                 ),
-                li: ({ children }) => {
+                ol: ({ children }) => (
+                  <ol className="mb-6 space-y-6 list-none">{children}</ol>
+                ),
+                ul: ({ children }) => (
+                  <ul className="mb-4 mt-2 space-y-2 list-none">{children}</ul>
+                ),
+                li: ({ children, ordered }: any) => {
                   const [copied, setCopied] = useState(false);
                   const textContent = Array.isArray(children)
-                    ? children
-                        .map((c) =>
-                          typeof c === "string"
-                            ? c
-                            : (c as any)?.props?.children || "",
-                        )
-                        .join("")
-                    : typeof children === "string"
-                      ? children
-                      : "";
+                    ? children.map(c => typeof c === 'string' ? c : (c as any)?.props?.children || '').join('')
+                    : String(children);
 
                   const handleCopy = (e: React.MouseEvent) => {
                     e.stopPropagation();
@@ -343,35 +274,38 @@ export const ChatMessage = ({
                     setTimeout(() => setCopied(false), 2000);
                   };
 
+                  if (ordered) {
+                    return (
+                      <li className="group/li relative -ml-8 pl-8 mb-4 last:mb-0">
+                        <div className="absolute left-0 top-0.5 opacity-0 group-hover/li:opacity-100 transition-opacity">
+                          <button
+                            onClick={handleCopy}
+                            className="p-1 hover:bg-slate-100 rounded border border-slate-200 bg-white shadow-sm transition-all active:scale-95"
+                          >
+                            {copied ? (
+                              <Check className="h-3 w-3 text-emerald-500" />
+                            ) : (
+                              <Copy className="h-3 w-3 text-slate-400" />
+                            )}
+                          </button>
+                        </div>
+                        <div className="font-bold text-slate-900 leading-snug text-[15.5px]">
+                          {children}
+                        </div>
+                      </li>
+                    );
+                  }
+
                   return (
-                    <li className={cn(
-                      "group/li flex items-start gap-2 py-1 relative -ml-8 px-2 rounded-md transition-colors",
-                      isFullscreen ? "hover:bg-white/5" : "hover:bg-slate-50/50"
-                    )}>
-                      <div className="w-8 shrink-0 flex items-center justify-center h-6 relative">
-                        <div className="h-1.5 w-1.5 rounded-full bg-slate-300 group-hover/li:opacity-0 transition-opacity" />
-                        <button
-                          onClick={handleCopy}
-                          className={cn(
-                            "absolute inset-0 m-auto flex items-center justify-center h-6 w-6 border rounded-md shadow-sm opacity-0 group-hover/li:opacity-100 transition-all",
-                            isFullscreen
-                              ? "bg-white/10 border-white/20 hover:bg-white/20"
-                              : "bg-white border-slate-200 hover:bg-slate-50"
-                          )}
-                        >
-                          {copied ? (
-                            <Check className="h-3 w-3 text-emerald-500" />
-                          ) : (
-                            <Copy className={cn("h-3 w-3", isFullscreen ? "text-white/60" : "text-slate-400")} />
-                          )}
-                        </button>
-                      </div>
-                      <div className={cn(
-                        "flex-1 leading-relaxed pt-0.5",
-                        isFullscreen ? "text-slate-100" : "text-slate-700"
-                      )}>
-                        {children}
-                      </div>
+                    <li className="flex items-start gap-3 group/bul mb-2 last:mb-0">
+                      <div className="mt-[9px] h-1.5 w-1.5 shrink-0 rounded-full bg-slate-300" />
+                      <div className="flex-1 text-[14px] leading-relaxed text-slate-700">{children}</div>
+                      <button
+                        onClick={handleCopy}
+                        className="opacity-0 group-hover/bul:opacity-100 transition-opacity p-0.5 hover:bg-slate-100 rounded text-slate-400"
+                      >
+                        {copied ? <Check size={12} className="text-emerald-500" /> : <Copy size={12} />}
+                      </button>
                     </li>
                   );
                 },

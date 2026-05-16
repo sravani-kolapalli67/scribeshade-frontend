@@ -1437,12 +1437,12 @@ export function DataTable<TData extends ExportableData, TValue>({
               // Loading state
               Array.from({ length: pageSize }).map((_, i) => (
                 <TableRow
-                  key={`loading-row-${crypto.randomUUID()}`}
+                  key={`loading-row-${i}`}
                   tabIndex={-1}
                 >
                   {Array.from({ length: columns.length }).map((_, j, array) => (
                     <TableCell
-                      key={`skeleton-cell-${crypto.randomUUID()}`}
+                      key={`skeleton-cell-${i}-${j}`}
                       className="px-4 py-2 truncate max-w-0 text-left"
                       tabIndex={-1}
                     >

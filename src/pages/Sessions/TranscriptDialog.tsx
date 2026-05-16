@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
@@ -13,13 +13,29 @@ import {
   FileText,
   Sparkles,
   Lightbulb,
+  X,
+  Clock,
+  MoreHorizontal,
+  ChevronRight,
+  Code2,
+  Brain,
+  MessageSquare,
+  AlertCircle,
+  RotateCcw,
+  Bookmark,
+  Share2,
+  Zap,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { cn } from "@/lib/utils";
+import { AskAIWorkspace } from "./components/AskAI/AskAIWorkspace";
 
-// Standard Message Interface for ScribeShade
+
+// --- Types ---
+
 export interface Message {
   id?: string;
   role: string; // AI_ASSISTANT | USER | INTERVIEWER
@@ -34,6 +50,7 @@ interface Interaction {
   question: string;
   answer: string;
   timestamp: string;
+  index: number;
 }
 
 interface SessionNotes {
@@ -53,6 +70,250 @@ interface TranscriptDialogProps {
   onDelete: (id: string) => void;
 }
 
+// --- Sub-Components ---
+
+/**
+ * Premium AI Answer Card
+ */
+function InteractionCard({
+  interaction,
+  onCopy,
+  copiedId,
+}: {
+  interaction: Interaction;
+  onCopy: (id: string, text: string) => void;
+  copiedId: string | null;
+}) {
+  return (
+    <div className="relative group rounded-2xl border border-border/50 bg-background/80 backdrop-blur-sm p-6 space-y-5 shadow-sm hover:shadow-md hover:border-border transition-all">
+      {/* Header section: Label and Question */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="px-2 py-0.5 rounded-md bg-indigo-50 border border-indigo-100 flex items-center gap-1.5">
+              <span className="text-[10px] font-black text-indigo-600 uppercase tracking-widest">
+                Question {String(interaction.index + 1).padStart(2, '0')}
+              </span>
+            </div>
+            <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">
+              {interaction.timestamp}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => onCopy(interaction.id, `Q: ${interaction.question}\n\nA: ${interaction.answer}`)}
+              className="h-8 px-2.5 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground transition-all gap-2"
+            >
+              {copiedId === interaction.id ? (
+                <>
+                  <Check className="size-3.5 text-emerald-500" />
+                  <span className="text-[11px] font-bold">Copied</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="size-3.5" />
+                  <span className="text-[11px] font-bold">Copy</span>
+                </>
+              )}
+            </Button>
+          </div>
+        </div>
+
+        <h4 className="text-base font-semibold text-foreground leading-snug tracking-tight">
+          {interaction.question}
+        </h4>
+      </div>
+
+      <div className="h-px bg-border/40 w-full" />
+
+      {/* Body section: AI Answer with optimized formatting */}
+      <div className="space-y-4">
+        <div className="flex items-center gap-2">
+          <div className="size-5 rounded-full bg-indigo-600 flex items-center justify-center shadow-sm shadow-indigo-200">
+            <Zap className="size-3 text-white fill-white" />
+          </div>
+          <span className="text-[11px] font-black text-indigo-600 uppercase tracking-[0.2em]">AI Response</span>
+          <div className="flex items-center gap-1.5 ml-auto">
+            <div className="size-1.5 rounded-full bg-emerald-500" />
+            <span className="text-[10px] font-bold text-muted-foreground uppercase">High Confidence</span>
+          </div>
+        </div>
+
+        <div className="text-[14px] leading-7 text-muted-foreground font-medium prose prose-slate max-w-none 
+          prose-p:mb-4 last:prose-p:mb-0 
+          prose-strong:text-indigo-900 prose-strong:font-bold prose-strong:bg-indigo-50/80 prose-strong:px-1.5 prose-strong:py-0.5 prose-strong:rounded-md
+          prose-ul:my-4 prose-ul:list-disc prose-ul:pl-6
+          prose-ol:my-4 prose-ol:list-decimal prose-ol:pl-6
+          prose-li:mb-2 prose-li:pl-1
+          prose-code:text-indigo-600 prose-code:bg-indigo-50/50 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-md
+          marker:text-indigo-400/80">
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            components={{
+              code({ node, inline, className, children, ...props }: any) {
+                const match = /language-(\w+)/.exec(className || "");
+                const codeContent = String(children).replace(/\n$/, "");
+
+                if (!inline && match) {
+                  return (
+                    <div className="my-5 rounded-xl border border-border/40 bg-muted/20 overflow-hidden group/code relative">
+                      <div className="absolute right-3 top-3 opacity-0 group-hover/code:opacity-100 transition-opacity">
+                        <Button
+                          variant="secondary"
+                          size="icon"
+                          className="size-7 rounded-lg bg-white/80 backdrop-blur-sm shadow-sm"
+                          onClick={() => onCopy(interaction.id + '-code', codeContent)}
+                        >
+                          {copiedId === interaction.id + '-code' ? <Check className="size-3.5 text-emerald-500" /> : <Copy className="size-3.5" />}
+                        </Button>
+                      </div>
+                      <SyntaxHighlighter
+                        style={oneLight}
+                        language={match[1]}
+                        PreTag="div"
+                        customStyle={{
+                          margin: 0,
+                          padding: "1.25rem",
+                          fontSize: "12px",
+                          lineHeight: "1.6",
+                          backgroundColor: "transparent",
+                        }}
+                        {...props}
+                      >
+                        {codeContent}
+                      </SyntaxHighlighter>
+                    </div>
+                  );
+                }
+                return (
+                  <code className="bg-muted/50 px-1.5 py-0.5 rounded text-[12px] font-mono" {...props}>
+                    {children}
+                  </code>
+                );
+              },
+            }}
+          >
+            {interaction.answer}
+          </ReactMarkdown>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Compact SaaS Header
+ */
+function TranscriptHeader({
+  title,
+  subtitle,
+  onClose,
+  onDelete,
+  onDownload,
+  isEphemeral,
+}: {
+  title: string;
+  subtitle: string;
+  onClose: () => void;
+  onDelete: () => void;
+  onDownload: () => void;
+  isEphemeral: boolean;
+}) {
+  return (
+    <div className="flex items-center justify-between px-6 py-5 border-b border-border/50 bg-background/50 backdrop-blur-sm sticky top-0 z-50">
+      <div className="flex flex-col gap-0.5">
+        <DialogTitle className="text-base font-bold text-foreground tracking-tight flex items-center gap-2">
+          {title}
+          <div className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
+        </DialogTitle>
+        <span className="text-[12px] text-muted-foreground font-medium flex items-center gap-2">
+          {subtitle}
+          {isEphemeral && (
+            <span className="text-[10px] bg-amber-50 border border-amber-100 px-1.5 py-0.5 rounded text-amber-600 font-bold uppercase tracking-wider">
+              Ephemeral
+            </span>
+          )}
+        </span>
+      </div>
+
+      <div className="flex items-center gap-1.5">
+        {!isEphemeral && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onDownload}
+            className="h-9 text-[12px] font-bold text-muted-foreground hover:text-foreground gap-2 px-3 hover:bg-muted"
+          >
+            <Download className="size-3.5" />
+            Export
+          </Button>
+        )}
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onDelete}
+          className="size-9 text-muted-foreground hover:text-destructive hover:bg-destructive/5 rounded-lg transition-all"
+        >
+          <Trash2 className="size-4" />
+        </Button>
+        <div className="w-px h-5 bg-border/50 mx-1.5" />
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onClose}
+          className="size-9 text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-all"
+        >
+          <X className="size-4.5" />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Minimal Empty State
+ */
+function EmptyState({
+  title,
+  description,
+  actionLabel,
+  onAction,
+  icon: Icon,
+}: {
+  title: string;
+  description: string;
+  actionLabel?: string;
+  onAction?: () => void;
+  icon: any;
+}) {
+  return (
+    <div className="flex flex-col items-center justify-center py-24 px-6 text-center">
+      <div className="size-12 rounded-2xl bg-muted/30 flex items-center justify-center mb-5">
+        <Icon className="size-6 text-muted-foreground/40" />
+      </div>
+      <h3 className="text-base font-bold text-foreground mb-1.5">{title}</h3>
+      <p className="text-[13px] text-muted-foreground max-w-[280px] leading-relaxed mb-8">
+        {description}
+      </p>
+      {actionLabel && onAction && (
+        <Button
+          onClick={onAction}
+          size="sm"
+          className="h-10 px-6 rounded-xl bg-foreground text-background hover:bg-foreground/90 font-bold text-xs gap-2 shadow-sm"
+        >
+          <Sparkles className="size-3.5" />
+          {actionLabel}
+        </Button>
+      )}
+    </div>
+  );
+}
+
+// --- Main Dialog ---
+
 export function TranscriptDialog({
   isOpen,
   onClose,
@@ -61,36 +322,33 @@ export function TranscriptDialog({
 }: TranscriptDialogProps) {
   const [activeTab, setActiveTab] = useState("transcript");
   const [messages, setMessages] = useState<Message[]>([]);
+  const [userId, setUserId] = useState<string>("");
   const [notes, setNotes] = useState<SessionNotes | null>(null);
+
   const [isLoading, setIsLoading] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  // True when this session was created with transcript saving disabled —
-  // disables download, notes generation, and other persistence-dependent actions.
   const [isEphemeral, setIsEphemeral] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const interactionRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
-  // Fetch session details and notes from backend
+
   useEffect(() => {
     if (isOpen && sessionId) {
       const fetchDetails = async () => {
         setIsLoading(true);
         try {
-          // Fetch Transcript
-          const res = await fetch(
-            `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionId}`,
-          );
+          const res = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionId}`);
           if (res.ok) {
             const data = await res.json();
             const sessionData = data.data ?? data;
             setMessages(sessionData.messages || []);
+            setUserId(sessionData.userId || "");
             setIsEphemeral(sessionData.saveTranscription === false);
+
           }
 
-          // Fetch Existing Notes
-          const notesRes = await fetch(
-            `${import.meta.env.VITE_BACKEND_URL}/api/session-notes/${sessionId}`,
-          );
+          const notesRes = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/session-notes/${sessionId}`);
           if (notesRes.ok) {
             const notesData = await notesRes.json();
             setNotes(notesData.data);
@@ -111,12 +369,7 @@ export function TranscriptDialog({
     if (!sessionId) return;
     setIsGenerating(true);
     try {
-      const res = await fetch(
-        `${import.meta.env.VITE_BACKEND_URL}/api/session-notes/${sessionId}/generate`,
-        {
-          method: "POST",
-        },
-      );
+      const res = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/session-notes/${sessionId}/generate`, { method: "POST" });
       if (res.ok) {
         const data = await res.json();
         setNotes(data.data);
@@ -129,518 +382,300 @@ export function TranscriptDialog({
     }
   };
 
-  // Removed unused interactions memo
-
   const handleCopy = (id: string, text: string) => {
     navigator.clipboard.writeText(text);
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 2000);
   };
 
-  const handleCopyInteraction = (interaction: Interaction) => {
-    const text = `Question: ${interaction.question}\n\nAnswer: ${interaction.answer}`;
-    handleCopy(interaction.id + "-card", text);
+  const handleNavigateToTimeline = (interactionId: string) => {
+    setActiveTab("transcript");
+    // Wait for tab switch and then scroll
+    setTimeout(() => {
+      const element = interactionRefs.current[interactionId];
+      if (element) {
+        element.scrollIntoView({ behavior: "smooth", block: "center" });
+        // Add a temporary highlight effect
+        element.classList.add("ring-2", "ring-indigo-500", "ring-offset-4");
+        setTimeout(() => {
+          element.classList.remove("ring-2", "ring-indigo-500", "ring-offset-4");
+        }, 2000);
+      }
+    }, 100);
   };
 
-  const downloadTranscript = () => {
-    const content = messages
-      .map((m) => {
-        const time = m.timestamp
-          ? new Date(m.timestamp).toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-            })
-          : "00:00";
 
-        const isAI = m.role === "AI" || m.role === "AI_ASSISTANT";
+  /**
+   * Enhanced Parsing Architecture
+   * Splits merged AI responses into individual structured interactions.
+   */
+  const parseInteractions = useMemo(() => {
+    const allInteractions: Interaction[] = [];
+    let questionCounter = 0;
 
-        if (isAI) {
-          const { question, answer } = extractQA(m);
-          return `### 💡 Question: ${question}\n\n**⭐ AI Answer:**\n${answer}\n\n*Time: ${time}*`;
-        } else {
-          const roleName = m.role === "USER" ? "You" : "Interviewer";
-          return `> **${roleName}** [${time}]: ${m.content || m.question || ""}`;
+    messages.forEach((msg, msgIdx) => {
+      const isAI = msg.role === "AI" || msg.role === "AI_ASSISTANT";
+      if (!isAI) return;
+
+      if (msg.question || msg.answer) {
+        allInteractions.push({
+          id: msg.id || `direct-${msgIdx}`,
+          question: msg.question || "Contextual Analysis",
+          answer: msg.answer || "",
+          timestamp: msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'AI Analyzed',
+          index: questionCounter++
+        });
+        return;
+      }
+
+      const text = msg.content || "";
+      // Match various patterns of Q&A blocks and split markers
+      const splitRegex = /(?:\n|^)(?:===NEXT_QUESTION===|\*\*?Extracted Question:|\*\*?QUESTION:|\*\*?Question \d+:)/i;
+
+      const segments = text.split(splitRegex);
+
+      segments.forEach((seg, segIdx) => {
+        const cleanSeg = seg.replace(/===NEXT_QUESTION===/g, "").trim();
+        if (!cleanSeg) return;
+
+        let question = "";
+        let answer = cleanSeg;
+
+        // Strip QUESTION: and ANSWER: labels if they exist in the segment
+        const qLabelRegex = /^(?:\*\*|###)?\s*(?:Extracted Question|QUESTION|Question \d+)\s*:\s*/i;
+        const aLabelRegex = /(?:\n|^)(?:\*\*|###)?\s*(?:Suggested Answer|ANSWER|Answer \d+)\s*:\s*/i;
+
+        const qMatch = qLabelRegex.exec(cleanSeg);
+        if (qMatch) {
+          const qStart = qMatch.index + qMatch[0].length;
+          const aMatch = aLabelRegex.exec(cleanSeg);
+
+          if (aMatch) {
+            question = cleanSeg.slice(qStart, aMatch.index).trim();
+            answer = cleanSeg.slice(aMatch.index + aMatch[0].length).trim();
+          } else {
+            // No answer marker, try to find a newline or just take the rest
+            const firstNewline = cleanSeg.indexOf("\n", qStart);
+            if (firstNewline !== -1) {
+              question = cleanSeg.slice(qStart, firstNewline).trim();
+              answer = cleanSeg.slice(firstNewline).trim();
+            } else {
+              question = cleanSeg.slice(qStart).trim();
+              answer = "";
+            }
+          }
         }
-      })
-      .join("\n\n---\n\n");
 
-    const header = `# Session Transcript\nSession ID: ${sessionId}\nDate: ${new Date().toLocaleDateString()}\n\n`;
-    const fullContent = header + content;
+        // Final clean up of markdown artifacts at the start/end of question
+        question = question.replace(/[*#_]+$|^[*#_]+/g, "").trim();
 
-    const blob = new Blob([fullContent], { type: "text/markdown" });
+        if (question || answer) {
+          allInteractions.push({
+            id: `${msgIdx}-${segIdx}`,
+            question: question || "Contextual Analysis",
+            answer: answer,
+            timestamp: msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '00:00',
+            index: questionCounter++
+          });
+        }
+      });
+    });
+
+    return allInteractions;
+  }, [messages]);
+
+  const downloadTranscript = () => {
+    const content = parseInteractions.map(inter => {
+      return `### Question ${inter.index + 1}: ${inter.question}\n\n**AI Answer:**\n${inter.answer}\n\n*Time: ${inter.timestamp}*`;
+    }).join("\n\n---\n\n");
+
+    const blob = new Blob([`# Session Transcript\nSession ID: ${sessionId}\n\n` + content], { type: "text/markdown" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `session-transcript-${sessionId}.md`;
+    a.download = `transcript-${sessionId}.md`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-
-  // Helper to format timestamp
-  const formatTime = (ts?: string) => {
-    if (!ts) return "";
-    return new Date(ts).toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  };
-
-  // Extract Q&A from a single AI message
-  const extractQA = (msg: Message) => {
-    // Priority 1: Structured fields
-    if (msg.question || msg.answer) {
-      return {
-        question: msg.question || "Screen Analysis / Manual Trigger",
-        answer: msg.answer || "",
-      };
-    }
-
-    // Priority 2: Regex parsing of content
-    const text = msg.content || "";
-    const qRegex = /(?:\*\*|###)?\s*Extracted Question\s*:\s*/i;
-    const aRegex = /(?:\*\*|###)?\s*Suggested Answer\s*:\s*/i;
-
-    const qMatch = qRegex.exec(text);
-    const aMatch = aRegex.exec(text);
-
-    let extractedQ = null;
-    let suggestedA = text;
-
-    if (qMatch) {
-      const qStart = qMatch.index + qMatch[0].length;
-      const qEnd = aMatch ? aMatch.index : text.indexOf("\n", qStart);
-      extractedQ = text
-        .slice(qStart, qEnd === -1 ? text.length : qEnd)
-        .replace(/[*#_]+$|^[*#_]+/g, "")
-        .trim();
-    }
-
-    if (aMatch) {
-      suggestedA = text.slice(aMatch.index + aMatch[0].length).trim();
-    }
-
-    return {
-      question: extractedQ || "Screen Analysis / Manual Trigger",
-      answer: suggestedA,
-    };
   };
 
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-5xl w-[calc(100%-2rem)] max-h-[90vh] flex flex-col p-10 gap-0 overflow-y-auto border-none shadow-2xl bg-white rounded-3xl focus-visible:outline-none custom-scrollbar">
-        {/* HEADER: Reference-Matched Layout */}
-        <div className="flex items-center justify-between mb-8">
-          <div className="flex items-center gap-4">
-            <DialogTitle className="text-3xl font-bold text-slate-800 tracking-tight">
-              Transcript
-            </DialogTitle>
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => onDelete(sessionId)}
-              className="h-10 w-10 bg-red-500 hover:bg-red-600 text-white rounded-xl shadow-sm transition-all p-0 flex items-center justify-center shrink-0"
-            >
-              <Trash2 className="size-5" />
-            </Button>
-          </div>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={onClose}
-            className="size-10 text-slate-400 hover:text-slate-600 hover:bg-slate-50 rounded-full transition-all"
-          >
-            {/* <X className="size-6" /> */}
-          </Button>
-        </div>
+      <DialogContent className="sm:max-w-5xl w-[calc(100%-2rem)] h-[85vh] flex flex-col p-0 gap-0 overflow-hidden border border-border/50 bg-background/95 backdrop-blur-xl shadow-2xl rounded-2xl focus-visible:outline-none">
 
-        {/* TABS: Pill-Shaped Dashboard Navigation */}
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-          <TabsList className="bg-gray-100 p-1 rounded-xl h-12 w-full grid grid-cols-3 border border-gray-200 mb-6">
-            <TabsTrigger
-              value="ai-notes"
-              className="rounded-lg text-sm font-medium gap-2 flex items-center justify-center
-      text-gray-500
-      data-[state=active]:bg-white
-      data-[state=active]:text-gray-900
-      data-[state=active]:shadow-sm
-      transition-all"
-            >
-              <FileText className="w-4 h-4" />
-              AI Notes
-            </TabsTrigger>
+        <TranscriptHeader
+          title="Interview Intelligence"
+          subtitle={notes?.jobDescription || "AI-powered Session Workspace"}
+          onClose={onClose}
+          onDelete={() => onDelete(sessionId)}
+          onDownload={downloadTranscript}
+          isEphemeral={isEphemeral}
+        />
 
-            <TabsTrigger
-              value="transcript"
-              className="rounded-lg text-sm font-medium gap-2 flex items-center justify-center
-      text-gray-500
-      data-[state=active]:bg-white
-      data-[state=active]:text-gray-900
-      data-[state=active]:shadow-sm
-      transition-all"
-            >
-              <FileText className="w-4 h-4" />
-              Transcript
-            </TabsTrigger>
+        <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 min-h-0 flex flex-col">
+            <div className="shrink-0 px-6 py-3 border-b border-border/40 bg-background/50">
+              <TabsList className="h-10 p-1 rounded-xl bg-muted/40 grid grid-cols-3 w-full max-w-[440px]">
+                <TabsTrigger
+                  value="transcript"
+                  className="rounded-lg text-[12px] font-bold gap-2.5 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm transition-all"
+                >
+                  <FileText className="size-4" />
+                  Timeline
+                </TabsTrigger>
+                <TabsTrigger
+                  value="ai-notes"
+                  className="rounded-lg text-[12px] font-bold gap-2.5 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm transition-all"
+                >
+                  <Sparkles className="size-4" />
+                  Insights
+                </TabsTrigger>
+                <TabsTrigger
+                  value="ask-ai"
+                  className="rounded-lg text-[12px] font-bold gap-2.5 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm transition-all"
+                >
+                  <MessageSquare className="size-4" />
+                  Ask AI
+                </TabsTrigger>
+              </TabsList>
+            </div>
 
-            <TabsTrigger
-              value="ask-ai"
-              className="rounded-lg text-sm font-medium gap-2 flex items-center justify-center
-      text-gray-500
-      data-[state=active]:bg-white
-      data-[state=active]:text-gray-900
-      data-[state=active]:shadow-sm
-      transition-all"
-            >
-              <Sparkles className="w-4 h-4" />
-              Ask AI
-            </TabsTrigger>
-          </TabsList>
-
-          {/* ACTION BAR: Integrated utility */}
-          <div className="flex items-center justify-between mb-8 shrink-0">
-            {isEphemeral ? (
-              <div className="flex items-center gap-2 text-xs font-medium text-slate-500 bg-slate-100 rounded-full px-4 py-2">
-                <span>🔒</span>
-                <span>Ephemeral session — transcript saving was disabled. Nothing was persisted.</span>
-              </div>
-            ) : (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={downloadTranscript}
-                className="h-11 px-8 rounded-full border-slate-200 hover:bg-slate-50 font-bold gap-3 text-[13px] shadow-sm transition-all"
-              >
-                <Download className="size-4 text-brand" />
-                Download Transcript
-              </Button>
-            )}
-          </div>
-
-          {/* SCROLLABLE BODY */}
-          <div className="relative">
-            <div ref={scrollRef} className="pb-10 scroll-smooth">
-              {isLoading ? (
-                <div className="h-full flex flex-col items-center justify-center gap-6 py-32">
-                  <div className="size-12 border-[3px] border-slate-100 border-t-brand rounded-full animate-spin" />
-                  <p className="text-sm font-black text-slate-400 uppercase tracking-[0.2em]">
-                    Loading context...
-                  </p>
-                </div>
-              ) : (
+            <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-6 bg-slate-50/30">
+              <div className="max-w-4xl mx-auto">
                 <TabsContent value="transcript" className="mt-0 outline-none">
-                  <div className="space-y-8 max-w-4xl mx-auto px-4">
-                    {messages.map((msg, idx) => {
-                      const isAI =
-                        msg.role === "AI" || msg.role === "AI_ASSISTANT";
-                      const isUser = msg.role === "USER";
-                      const isInterviewer = msg.role === "INTERVIEWER";
-
-                      if (isAI) {
-                        const { question, answer } = extractQA(msg);
-                        const hasAnswer = (answer || "").trim().length > 0;
-                        const interactionId = msg.id || `ai-${idx}`;
-
-                        return (
-                          <div
-                            key={interactionId}
-                            className="bg-white border border-slate-100 rounded-[2rem] p-8 md:p-10 shadow-xl shadow-slate-200/40 transition-all relative overflow-hidden group"
-                          >
-                            {/* Card Copy Button */}
-                            <div className="absolute top-6 right-6 z-10 opacity-0 group-hover:opacity-100 transition-all">
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() =>
-                                  handleCopyInteraction({
-                                    id: interactionId,
-                                    question,
-                                    answer,
-                                    timestamp: msg.timestamp || "",
-                                  })
-                                }
-                                className="h-9 px-3 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-500 hover:text-slate-900 border border-slate-200/50 shadow-sm transition-all gap-2"
-                              >
-                                {copiedId === interactionId + "-card" ? (
-                                  <>
-                                    <Check className="size-4 text-emerald-500" />
-                                    <span className="text-xs font-bold text-emerald-600">
-                                      Copied Card
-                                    </span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <Copy className="size-4" />
-                                    <span className="text-xs font-bold">
-                                      Copy Q&A
-                                    </span>
-                                  </>
-                                )}
-                              </Button>
-                            </div>
-
-                            {/* Segment: Question */}
-                            <div className="flex items-start gap-5 mb-8 relative">
-                              <div className="size-6 flex items-center justify-center shrink-0 mt-1">
-                                <Lightbulb className="size-5 text-indigo-500" />
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-2 mb-3">
-                                  <span className="text-sm font-bold text-slate-800">
-                                    Question:
-                                  </span>
-                                  <span className="text-[15px] text-slate-600 font-medium">
-                                    {question}
-                                  </span>
-                                </div>
-                              </div>
-                            </div>
-
-                            {/* Segment: Answer */}
-                            {hasAnswer && (
-                              <div className="flex items-start gap-5">
-                                <div className="size-6 flex items-center justify-center shrink-0 mt-1">
-                                  <Star className="size-5 text-amber-500 fill-amber-500" />
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                  <div className="flex items-center gap-2 mb-4">
-                                    <span className="text-sm font-bold text-slate-800">
-                                      Answer:
-                                    </span>
-                                  </div>
-                                  <div
-                                    className="text-[15px] leading-relaxed text-slate-700 font-medium prose prose-slate max-w-none 
-                                        prose-p:mb-5 last:prose-p:mb-0 prose-strong:text-brand prose-strong:font-bold 
-                                        prose-ul:list-disc prose-ul:pl-6 prose-li:mb-2 
-                                        prose-code:text-brand prose-code:font-bold
-                                        prose-pre:bg-transparent prose-pre:p-0 prose-pre:rounded-none prose-pre:border-none overflow-x-hidden"
-                                  >
-                                    <ReactMarkdown
-                                      remarkPlugins={[remarkGfm]}
-                                      components={{
-                                        code({
-                                          node,
-                                          inline,
-                                          className,
-                                          children,
-                                          ...props
-                                        }: any) {
-                                          const match = /language-(\w+)/.exec(
-                                            className || "",
-                                          );
-                                          const codeContent = String(
-                                            children,
-                                          ).replace(/\n$/, "");
-
-                                          if (!inline && match) {
-                                            return (
-                                              <div className="relative group/code my-6">
-                                                <div className="absolute right-4 top-4 z-20 opacity-0 group-hover/code:opacity-100 transition-all">
-                                                  <Button
-                                                    variant="secondary"
-                                                    size="icon"
-                                                    onClick={() =>
-                                                      handleCopy(
-                                                        codeContent,
-                                                        codeContent,
-                                                      )
-                                                    }
-                                                    className="size-8 rounded-lg bg-white/80 hover:bg-white text-slate-600 hover:text-slate-900 border border-slate-200 shadow-sm backdrop-blur-sm transition-all"
-                                                  >
-                                                    {copiedId ===
-                                                    codeContent ? (
-                                                      <Check className="size-4 text-emerald-400" />
-                                                    ) : (
-                                                      <Copy className="size-4" />
-                                                    )}
-                                                  </Button>
-                                                </div>
-                                                <SyntaxHighlighter
-                                                  style={oneLight}
-                                                  language={match[1]}
-                                                  PreTag="div"
-                                                  customStyle={{
-                                                    margin: 0,
-                                                    padding: "2rem",
-                                                    borderRadius: "1.5rem",
-                                                    fontSize: "14px",
-                                                    lineHeight: "1.6",
-                                                    backgroundColor: "#F8FAFC",
-                                                    border: "1px solid #E2E8F0",
-                                                  }}
-                                                  {...props}
-                                                >
-                                                  {codeContent}
-                                                </SyntaxHighlighter>
-                                              </div>
-                                            );
-                                          }
-
-                                          return (
-                                            <code
-                                              className="bg-slate-100 text-slate-900 px-1.5 py-0.5 rounded-md font-mono text-[13px]"
-                                              {...props}
-                                            >
-                                              {children}
-                                            </code>
-                                          );
-                                        },
-                                      }}
-                                    >
-                                      {answer}
-                                    </ReactMarkdown>
-                                  </div>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        );
-                      }
-
-                      // Render Transcript Message (User or Interviewer)
-                      return (
-                        <div
-                          key={msg.id || `msg-${idx}`}
-                          className={`flex flex-col ${isUser ? "items-end" : "items-start"} gap-2`}
-                        >
-                          <div
-                            className={`max-w-[85%] px-6 py-4 rounded-3xl text-[15px] font-medium leading-relaxed shadow-sm
-                              ${
-                                isUser
-                                  ? "bg-brand text-white rounded-tr-none"
-                                  : "bg-slate-50 text-slate-700 border border-slate-100 rounded-tl-none"
-                              }`}
-                          >
-                            {msg.content || msg.question}
-                          </div>
-                          <div
-                            className={`flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider text-slate-400
-                              ${isUser ? "flex-row-reverse" : "flex-row"}`}
-                          >
-                            <span>{isUser ? "You" : "Interviewer"}</span>
-                            <span className="opacity-40">•</span>
-                            <span>{formatTime(msg.timestamp)}</span>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </TabsContent>
-              )}
-
-              {/* Place-holder for inactive tabs to match dashboard look */}
-              <TabsContent value="ai-notes" className="mt-0 outline-none">
-                {isGenerating ? (
-                  <div className="py-32 flex flex-col items-center justify-center gap-6">
-                    <div className="relative">
-                      <div className="size-16 border-[3px] border-slate-100 border-t-brand rounded-full animate-spin" />
-                      <Sparkles className="size-6 text-brand absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" />
+                  {isLoading ? (
+                    <div className="py-24 flex flex-col items-center justify-center gap-5 text-center">
+                      <div className="relative">
+                        <div className="size-10 border-2 border-muted border-t-indigo-500 rounded-full animate-spin" />
+                        <Brain className="size-4 text-indigo-500 absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" />
+                      </div>
+                      <p className="text-[12px] text-muted-foreground font-black uppercase tracking-[0.2em]">
+                        Parsing Timeline...
+                      </p>
                     </div>
-                    <div className="text-center">
-                      <p className="text-sm font-black text-slate-400 uppercase tracking-[0.2em] mb-2">
+                  ) : parseInteractions.length === 0 ? (
+                    <EmptyState
+                      title="No interactions recorded"
+                      description="AI-generated answers and extracted questions will appear here once the session starts."
+                      icon={AlertCircle}
+                    />
+                  ) : (
+                    <div 
+                      ref={scrollContainerRef}
+                      className="space-y-10 py-4"
+                    >
+                      {parseInteractions.map((inter, idx) => (
+                        <div 
+                          key={inter.id} 
+                          ref={el => { interactionRefs.current[inter.id] = el; }}
+                          className="scroll-mt-20 transition-all duration-500 rounded-2xl"
+                        >
+                          <InteractionCard
+                            interaction={inter}
+                            onCopy={handleCopy}
+                            copiedId={copiedId}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                </TabsContent>
+
+                <TabsContent value="ai-notes" className="mt-0 outline-none">
+                  {isGenerating ? (
+                    <div className="py-24 flex flex-col items-center justify-center gap-5 text-center">
+                      <div className="size-10 border-2 border-muted border-t-indigo-500 rounded-full animate-spin" />
+                      <p className="text-[12px] text-muted-foreground font-black uppercase tracking-[0.2em]">
                         Analyzing Session...
                       </p>
-                      <p className="text-xs text-slate-400">
-                        Crafting your summary and extracting questions
-                      </p>
                     </div>
-                  </div>
-                ) : !notes ? (
-                  <div className="py-20 flex flex-col items-center justify-center border-2 border-dashed border-slate-100 rounded-[2.5rem] bg-slate-50/50">
-                    <div className="size-20 bg-white rounded-3xl shadow-xl shadow-slate-200/50 flex items-center justify-center mb-6">
-                      <Sparkles className="size-10 text-brand" />
-                    </div>
-                    <h3 className="text-xl font-bold text-slate-800 mb-2">
-                      {isEphemeral ? "AI Notes Unavailable" : "Generate AI Notes"}
-                    </h3>
-                    <p className="text-slate-500 text-center max-w-xs mb-8">
-                      {isEphemeral
-                        ? "This was an ephemeral session. Transcript saving was disabled, so AI notes cannot be generated or stored."
-                        : "Get a professional summary and a list of all questions asked during this session."}
-                    </p>
-                    {!isEphemeral && (
-                      <Button
-                        onClick={generateNotes}
-                        className="h-14 px-10 rounded-2xl bg-brand hover:bg-brand/90 text-white font-bold gap-3 shadow-lg shadow-brand/20 transition-all hover:scale-[1.02] active:scale-95"
-                      >
-                        <Sparkles className="size-5" />
-                        Generate Now
-                      </Button>
-                    )}
-                  </div>
-                ) : (
-                  <div className="max-w-4xl mx-auto px-4 pb-10">
-                    <div className="space-y-10">
-                      {/* Details Section */}
-                      <section>
-                        <h2 className="text-xl font-bold text-slate-800 mb-4">
-                          Details
-                        </h2>
-                        <ul className="space-y-2">
-                          <li className="flex items-start gap-2 text-slate-700">
-                            <span className="font-bold text-slate-900">
-                              • Company:
-                            </span>
-                            <span>{notes.companyName}</span>
-                          </li>
-                          {notes.jobDescription &&
-                            notes.jobDescription.trim() !== "" && (
-                              <li className="flex items-start gap-2 text-slate-700">
-                                <span className="font-bold text-slate-900">
-                                  • Position:
-                                </span>
-                                <span>{notes.jobDescription}</span>
-                              </li>
-                            )}
-                        </ul>
-                        <div className="h-px bg-slate-100 w-full mt-8" />
-                      </section>
+                  ) : !notes ? (
+                    <EmptyState
+                      title="No insights generated"
+                      description="Synthesize your session performance with deep AI evaluation, technical scores, and summaries."
+                      actionLabel={!isEphemeral ? "Generate Analytics" : undefined}
+                      onAction={generateNotes}
+                      icon={Sparkles}
+                    />
+                  ) : (
+                    <div className="space-y-8 pb-10 animate-in fade-in slide-in-from-bottom-2 duration-500">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <section className="bg-white border border-border/50 rounded-2xl p-6 space-y-3 shadow-sm">
+                          <div className="flex items-center gap-2 mb-2">
+                            <FileText className="size-4 text-indigo-500" />
+                            <h3 className="text-sm font-bold text-foreground uppercase tracking-wider">Executive Summary</h3>
+                          </div>
+                          <p className="text-[14px] leading-relaxed text-muted-foreground font-medium whitespace-pre-wrap">
+                            {notes.summary}
+                          </p>
+                        </section>
 
-                      {/* Summary Section */}
-                      <section>
-                        <h2 className="text-xl font-bold text-slate-800 mb-4">
-                          Summary
-                        </h2>
-                        <p className="text-[15px] leading-relaxed text-slate-700 font-medium">
-                          {notes.summary}
-                        </p>
-                        <div className="h-px bg-slate-100 w-full mt-8" />
-                      </section>
+                        <section className="bg-white border border-border/50 rounded-2xl p-6 space-y-4 shadow-sm">
+                          <div className="flex items-center gap-2 mb-2">
+                            <Lightbulb className="size-4 text-amber-500" />
+                            <h3 className="text-sm font-bold text-foreground uppercase tracking-wider">Questions Identified</h3>
+                          </div>
+                          <div className="space-y-3">
+                            {notes.questions.map((q, idx) => (
+                              <div key={idx} className="flex gap-3 items-start group">
+                                <div className="size-5 rounded-md bg-muted/40 flex items-center justify-center text-[10px] font-black text-muted-foreground shrink-0 mt-0.5">
+                                  {String(idx + 1).padStart(2, '0')}
+                                </div>
+                                <p className="text-[13px] text-muted-foreground font-medium leading-relaxed group-hover:text-foreground transition-colors">
+                                  {q}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        </section>
+                      </div>
 
-                      {/* Questions Section */}
-                      <section>
-                        <h2 className="text-xl font-bold text-slate-800 mb-4">
-                          Questions
-                        </h2>
-                        <ul className="space-y-4">
-                          {notes.questions.map((q, idx) => (
-                            <li key={idx} className="flex gap-4 group">
-                              <span className="shrink-0 size-2 rounded-full bg-indigo-400 mt-2.5 transition-all group-hover:scale-125 shadow-[0_0_8px_rgba(129,140,248,0.5)]" />
-                              <span className="text-[15px] text-slate-700 font-medium leading-relaxed">
-                                {q}
-                              </span>
-                            </li>
-                          ))}
-                        </ul>
+                      <section className="p-6 rounded-2xl border border-border/40 bg-muted/10">
+                        <div className="flex items-center gap-2 mb-4">
+                          <Clock className="size-4 text-muted-foreground" />
+                          <h3 className="text-[11px] font-black text-muted-foreground uppercase tracking-[0.2em]">Metadata Workspace</h3>
+                        </div>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+                          <div className="space-y-1">
+                            <p className="text-[10px] text-muted-foreground uppercase font-black tracking-widest opacity-60">Company</p>
+                            <p className="text-[14px] font-bold text-foreground">{notes.companyName}</p>
+                          </div>
+                          <div className="space-y-1">
+                            <p className="text-[10px] text-muted-foreground uppercase font-black tracking-widest opacity-60">Session Date</p>
+                            <p className="text-[14px] font-bold text-foreground">{new Date(notes.updatedAt).toLocaleDateString()}</p>
+                          </div>
+                          <div className="space-y-1">
+                            <p className="text-[10px] text-muted-foreground uppercase font-black tracking-widest opacity-60">Status</p>
+                            <p className="text-[14px] font-bold text-emerald-600 flex items-center gap-1.5">
+                              <div className="size-1.5 rounded-full bg-emerald-500" />
+                              Completed
+                            </p>
+                          </div>
+                          <div className="space-y-1">
+                            <p className="text-[10px] text-muted-foreground uppercase font-black tracking-widest opacity-60">AI Model</p>
+                            <p className="text-[14px] font-bold text-indigo-600">Premium-v3</p>
+                          </div>
+                        </div>
                       </section>
                     </div>
-                  </div>
-                )}
-              </TabsContent>
+                  )}
+                </TabsContent>
 
-              <TabsContent
-                value="ask-ai"
-                className="py-20 flex flex-col items-center justify-center opacity-30"
-              >
-                <Sparkles className="size-16 mb-4 text-slate-300" />
-                <p className="font-black uppercase tracking-widest text-slate-500 text-sm">
-                  Historical Chat
-                </p>
-              </TabsContent>
+                <TabsContent value="ask-ai" className="mt-0 outline-none h-full flex flex-col">
+                  <AskAIWorkspace 
+                    sessionId={sessionId} 
+                    internalUserId={userId}
+
+                    onNavigateToTimeline={handleNavigateToTimeline}
+                  />
+                </TabsContent>
+
+
+              </div>
             </div>
-          </div>
-        </Tabs>
+          </Tabs>
+        </div>
       </DialogContent>
     </Dialog>
   );

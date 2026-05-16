@@ -47,10 +47,11 @@ const INITIAL_SESSION_DATA = {
   simpleLanguage: false,
   extraContext: "",
   instructions: "",
-  aiModel: "google/gemma-4-26b-a4b-it",
+  aiModel: "anthropic/claude-haiku-4-5",
   autoGenerateAI: true,
   saveTranscript: true,
 };
+
 
 export default function CreateSessionDialog({
   isFree = false,

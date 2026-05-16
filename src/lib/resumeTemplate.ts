@@ -24,6 +24,10 @@ export interface ResumeData {
   projects: Array<{ title: string; points: string[] }>;
   education: Array<{ degree: string; institute: string; year: string }>;
   publication: string;
+  // Raw versions for text-based [data-field] injection
+  experienceRaw: string;
+  projectsRaw: string;
+  educationRaw: string;
 }
 
 // ─── Text parsers ─────────────────────────────────────────────────────────────
@@ -75,6 +79,9 @@ export function fieldsToResumeData(fields: ResumeFields): ResumeData {
     projects: parseProjectsText(fields.projects),
     education: parseEducationText(fields.education),
     publication: fields.publications || "",
+    experienceRaw: fields.experience || "",
+    projectsRaw: fields.projects || "",
+    educationRaw: fields.education || "",
   };
 }
 
@@ -143,9 +150,19 @@ export function populateTemplate(
     publication: "certifications",
   };
 
+  const MULTI_BLOCK_MAPPING: Record<string, keyof ResumeData> = {
+    experience: "experienceRaw",
+    projects: "projectsRaw",
+    education: "educationRaw",
+    certifications: "publication",
+    publications: "publication",
+  };
+
   doc.querySelectorAll("[data-field]").forEach((el) => {
     const f = el.getAttribute("data-field");
     if (!f) return;
+    // Multi-block fields are handled by the smart block-pass below
+    if (f in MULTI_BLOCK_MAPPING) return;
     const v = data[f as keyof ResumeData];
     if (typeof v === "string") {
       if (f === "links") {
@@ -199,6 +216,33 @@ export function populateTemplate(
         }
       });
       container.appendChild(clone);
+    });
+  });
+
+  // ── Render multi-block text fields (Smart System)
+  // Maps data-field names to ResumeData raw strings and wraps them neutrally
+  // for page-break protection while preserving original template CSS 100%.
+
+  Object.entries(MULTI_BLOCK_MAPPING).forEach(([field, dataKey]) => {
+    doc.querySelectorAll(`[data-field="${field}"]`).forEach((el) => {
+      const v = data[dataKey];
+      if (typeof v !== "string" || !v.trim()) return;
+
+      // Split on blank lines to get individual entry blocks
+      const blocks = v.split(/\n\n+/).map((b) => b.trim()).filter(Boolean);
+      if (blocks.length <= 1) {
+        // Single block — render as plain text with pre-wrap for 100% accuracy
+        (el as HTMLElement).style.whiteSpace = "pre-wrap";
+        el.textContent = blocks[0] || "";
+        return;
+      }
+
+      // Multiple blocks — wrap each in a neutral block for break-inside targeting.
+      el.innerHTML = blocks
+        .map((block) => {
+          return `<div class="resume-entry-block" style="break-inside:avoid;page-break-inside:avoid;white-space:pre-wrap;margin-bottom:0.75em;">${block}</div>`;
+        })
+        .join("");
     });
   });
 

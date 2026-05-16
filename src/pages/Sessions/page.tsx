@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ColumnDef } from "@tanstack/react-table";
 import { DataTable } from "@/components/data-table/data-table";
@@ -24,68 +24,48 @@ import {
 } from "@/components/ui/dialog";
 
 import { toast } from "sonner";
+import { useAppDispatch, useAppSelector } from "@/store/hooks";
+import {
+  fetchSessions,
+  deleteSession,
+  forceDeleteSession,
+  bulkDeleteSessions,
+  selectSessionItems,
+  selectSessionsStatus,
+  selectSessionsHasFetched,
+  invalidateSessions,
+  type Session,
+} from "@/store/sessionsSlice";
 
-type SessionStatus =
-  | "PRE_CHECK"
-  | "ACTIVE"
-  | "COMPLETING"
-  | "COMPLETED"
-  | "CREDIT_EXHAUSTED"
-  | "FORCE_ENDED"
-  | "ABANDONED";
-
-// Define Session interface
-interface Session extends ExportableData {
-  id: string;
-  companyName: string;
-  jobDescription: string;
-  mode: "url" | "manual";
-  free: boolean;
-  aiUsage?: number;
-  status?: SessionStatus | "Ended" | "Active";
-  isActive?: boolean;
-  endedAt?: string | null;
-  createdAt: string;
-  updatedAt: string;
-  autoGenerateResponse: boolean;
-  saveTranscription: boolean;
-  creditsDeducted?: string | null;
-  deductionReason?: string | null;
-}
+// Re-export the type so column defs work with the data-table's ExportableData constraint.
+type SessionRow = Session & ExportableData;
 
 export default function Sessions() {
   const navigate = useNavigate();
+  const dispatch = useAppDispatch();
   const [searchParams, setSearchParams] = useSearchParams();
   const userId = localStorage.getItem("userId");
-  const [refreshKey, setRefreshKey] = useState(0);
+
+  // ── Redux state ───────────────────────────────────────────────────────────
+  const sessions = useAppSelector(selectSessionItems);
+  const status = useAppSelector(selectSessionsStatus);
+  const hasFetched = useAppSelector(selectSessionsHasFetched);
+
+  // ── Local UI state (dialogs, selections) ──────────────────────────────────
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [sessionToDelete, setSessionToDelete] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
 
-  // Bulk delete state
   const [isBulkDeleteDialogOpen, setIsBulkDeleteDialogOpen] = useState(false);
   const [bulkIdsToDelete, setBulkIdsToDelete] = useState<string[]>([]);
   const [isBulkDeleting, setIsBulkDeleting] = useState(false);
-  // Force-end + delete state (for sessions still ACTIVE/in-progress)
+
   const [isForceDeleteDialogOpen, setIsForceDeleteDialogOpen] = useState(false);
   const [sessionToForceDelete, setSessionToForceDelete] = useState<string | null>(null);
   const [isForceDeleting, setIsForceDeleting] = useState(false);
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
-    null,
-  );
-  const [isTranscriptDialogOpen, setIsTranscriptDialogOpen] = useState(false);
 
-  // Auto-open the transcript dialog when arriving with ?view=<sessionId>.
-  // Used by the Tauri launcher (PastSessionsTab) to land on a completed
-  // session's summary instead of the live ActiveSession page.
-  useEffect(() => {
-    const viewId = searchParams.get("view");
-    if (viewId) {
-      setSelectedSessionId(viewId);
-      setIsTranscriptDialogOpen(true);
-    }
-    // Run only on initial mount / explicit URL change.
-  }, [searchParams]);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [isTranscriptDialogOpen, setIsTranscriptDialogOpen] = useState(false);
   const [isAnalyticsDialogOpen, setIsAnalyticsDialogOpen] = useState(false);
   const [selectedSessionForAnalytics, setSelectedSessionForAnalytics] =
     useState<Session | null>(null);
@@ -95,53 +75,91 @@ export default function Sessions() {
   const [isOutOfCreditsOpen, setIsOutOfCreditsOpen] = useState(false);
   const [isBuyCreditsOpen, setIsBuyCreditsOpen] = useState(false);
 
-  // ✅ FETCH DATA FUNCTION
-  const fetchSessions = async (params: any) => {
-    try {
+  // ── Fetch params tracked for DataTable filter changes ─────────────────────
+  const [currentSearch, setCurrentSearch] = useState("");
+  const [currentDateRange, setCurrentDateRange] = useState({ from_date: "", to_date: "" });
+
+  // Auto-open the transcript dialog when arriving with ?view=<sessionId>.
+  useEffect(() => {
+    const viewId = searchParams.get("view");
+    if (viewId) {
+      setSelectedSessionId(viewId);
+      setIsTranscriptDialogOpen(true);
+    }
+  }, [searchParams]);
+
+  // ── Initial + filter-driven fetch ─────────────────────────────────────────
+  // Fetch sessions when the component mounts or when filters change.
+  // The thunk itself deduplicates — if the params haven't changed, it's a no-op.
+  useEffect(() => {
+    if (!userId) return;
+    dispatch(
+      fetchSessions({
+        userId,
+        search: currentSearch,
+        from_date: currentDateRange.from_date,
+        to_date: currentDateRange.to_date,
+      }),
+    );
+  }, [dispatch, userId, currentSearch, currentDateRange]);
+
+  // ── DataTable fetchDataFn adapter ─────────────────────────────────────────
+  // The DataTable component expects an async function that returns paginated data.
+  // We feed it from Redux state (already fetched) and do client-side pagination.
+  // This function reference is STABLE (useCallback with [] deps + refs).
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
+
+  const fetchDataForTable = useCallback(
+    async (params: any) => {
       const page = params.page || 1;
       const limit = params.limit || 10;
-      const search = params.search || "";
-      const fromDate = params.from_date || "";
-      const toDate = params.to_date || "";
-
-      const res = await fetch(
-        `${import.meta.env.VITE_BACKEND_URL}/api/session/list?userId=${userId}&search=${search}&from_date=${fromDate}&to_date=${toDate}`,
-        {
-          method: "GET",
-          headers: { "Content-Type": "application/json" },
-        },
-      );
-
-      if (!res.ok) throw new Error("Failed to fetch sessions");
-
-      const data = await res.json();
-      const sessions = Array.isArray(data) ? data : data.data || [];
-
-      // Manual client-side pagination
-      const total_items = sessions.length;
+      const items = sessionsRef.current;
+      const total_items = items.length;
       const total_pages = Math.ceil(total_items / limit);
       const startIndex = (page - 1) * limit;
-      const paginatedData = sessions.slice(startIndex, startIndex + limit);
+      const paginatedData = items.slice(startIndex, startIndex + limit);
 
       return {
         success: true,
         data: paginatedData,
         pagination: {
-          page: page,
-          limit: limit,
-          total_pages: total_pages,
-          total_items: total_items,
+          page,
+          limit,
+          total_pages,
+          total_items,
         },
       };
-    } catch (error) {
-      console.error("Error fetching sessions:", error);
-      return {
-        success: false,
-        data: [],
-        pagination: { page: 1, limit: 10, total_pages: 0, total_items: 0 },
-      };
-    }
-  };
+    },
+    // Intentionally empty — uses ref for sessions. This keeps the function identity
+    // stable so DataTable's useEffect doesn't re-trigger on every Redux update.
+    [],
+  );
+
+  // ── We need to tell DataTable to re-call fetchDataForTable when Redux data changes.
+  // The DataTable watches `fetchDataFn` identity in its useEffect deps. Since our
+  // fetchDataForTable is stable, we use a version counter that we embed in a wrapper.
+  const dataVersionRef = useRef(0);
+  const prevSessionsLenRef = useRef(sessions.length);
+  const prevSessionsRef = useRef(sessions);
+
+  // Increment version when sessions array reference changes (add/delete/fetch).
+  if (prevSessionsRef.current !== sessions) {
+    dataVersionRef.current += 1;
+    prevSessionsRef.current = sessions;
+  }
+
+  // Stable wrapper that changes identity only when data version changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const stableFetchFn = useMemo(() => {
+    // Capture the version to create a new function identity when data changes.
+    const _version = dataVersionRef.current;
+    const fn = async (params: any) => fetchDataForTable(params);
+    return fn;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dataVersionRef.current, fetchDataForTable]);
+
+  // ── Delete handlers ───────────────────────────────────────────────────────
 
   const handleDeleteClick = (id: string) => {
     setSessionToDelete(id);
@@ -153,59 +171,30 @@ export default function Sessions() {
     setIsDeleting(true);
 
     try {
-      const res = await fetch(
-        `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionToDelete}`,
-        { method: "DELETE" },
-      );
-      if (res.ok) {
-        setRefreshKey((prev) => prev + 1);
-        setIsDeleteDialogOpen(false);
-        toast.success("Session deleted.");
-      } else if (res.status === 409) {
-        // Session is still active — offer a force-end + delete path
+      const result = await dispatch(deleteSession(sessionToDelete)).unwrap();
+      setIsDeleteDialogOpen(false);
+      toast.success("Session deleted.");
+    } catch (err: any) {
+      if (err?.status === 409) {
         setIsDeleteDialogOpen(false);
         setSessionToForceDelete(sessionToDelete);
         setIsForceDeleteDialogOpen(true);
       } else {
         toast.error("Failed to delete session. Please try again.");
       }
-    } catch (error) {
-      console.error("Delete error:", error);
-      toast.error("Failed to delete session. Please try again.");
     } finally {
       setIsDeleting(false);
       setSessionToDelete(null);
     }
   };
 
-  /** Force-ends an active session then deletes it. */
   const confirmForceDelete = async () => {
     if (!sessionToForceDelete) return;
     setIsForceDeleting(true);
     try {
-      // 1. End the session gracefully so the backend transitions it to COMPLETED
-      await fetch(
-        `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionToForceDelete}/deactivate`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ transcript: "", aiUsage: 0 }),
-        },
-      ).catch(() => {}); // best-effort — session may already be ending
-
-      // 2. Now delete
-      const res = await fetch(
-        `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionToForceDelete}`,
-        { method: "DELETE" },
-      );
-      if (res.ok) {
-        setRefreshKey((prev) => prev + 1);
-        toast.success("Session ended and deleted.");
-      } else {
-        toast.error("Could not delete session. Please try again.");
-      }
-    } catch (err) {
-      console.error("Force delete error:", err);
+      await dispatch(forceDeleteSession(sessionToForceDelete)).unwrap();
+      toast.success("Session ended and deleted.");
+    } catch {
       toast.error("Could not delete session. Please try again.");
     } finally {
       setIsForceDeleting(false);
@@ -218,39 +207,27 @@ export default function Sessions() {
     if (bulkIdsToDelete.length === 0) return;
     setIsBulkDeleting(true);
     try {
-      const results = await Promise.allSettled(
-        bulkIdsToDelete.map((id) =>
-          fetch(`${import.meta.env.VITE_BACKEND_URL}/api/session/${id}`, {
-            method: "DELETE",
-          }),
-        ),
-      );
-      const blocked = results.filter(
-        (r) => r.status === "fulfilled" && (r as PromiseFulfilledResult<Response>).value.status === 409,
-      ).length;
-      const failed = results.filter((r) => r.status === "rejected").length;
-      setRefreshKey((prev) => prev + 1);
+      const result = await dispatch(bulkDeleteSessions(bulkIdsToDelete)).unwrap();
       setIsBulkDeleteDialogOpen(false);
       setBulkIdsToDelete([]);
-      if (blocked > 0) {
+      if (result.blocked > 0) {
         toast.warning(
-          `${blocked} session${blocked > 1 ? "s" : ""} could not be deleted because they are still active. End them first.`,
+          `${result.blocked} session${result.blocked > 1 ? "s" : ""} could not be deleted because they are still active. End them first.`,
         );
-      } else if (failed > 0) {
-        toast.error(`${failed} deletion${failed > 1 ? "s" : ""} failed. Please try again.`);
+      } else if (result.failed > 0) {
+        toast.error(`${result.failed} deletion${result.failed > 1 ? "s" : ""} failed. Please try again.`);
       } else {
         toast.success("Sessions deleted.");
       }
-    } catch (error) {
-      console.error("Bulk delete error:", error);
+    } catch {
       toast.error("Failed to delete sessions. Please try again.");
     } finally {
       setIsBulkDeleting(false);
     }
   };
 
-  // ✅ COLUMN DEFINITIONS
-  const columns: ColumnDef<Session>[] = useMemo(
+  // ── Column definitions ────────────────────────────────────────────────────
+  const columns: ColumnDef<SessionRow>[] = useMemo(
     () => [
       {
         id: "select",
@@ -311,10 +288,10 @@ export default function Sessions() {
         accessorKey: "status",
         header: "Status",
         cell: ({ row }) => {
-          const status = row.original.status;
+          const rowStatus = row.original.status;
           const isEnded =
-            status === "COMPLETED" ||
-            status === "Ended" ||
+            rowStatus === "COMPLETED" ||
+            rowStatus === "Ended" ||
             !!row.original.endedAt;
           const statusConfig: Record<
             string,
@@ -357,8 +334,8 @@ export default function Sessions() {
               className: "bg-emerald-50 text-emerald-700 border-emerald-300",
             },
           };
-          const cfg = status
-            ? statusConfig[status]
+          const cfg = rowStatus
+            ? statusConfig[rowStatus]
             : isEnded
               ? statusConfig["COMPLETED"]
               : statusConfig["ACTIVE"];
@@ -373,29 +350,6 @@ export default function Sessions() {
           );
         },
       },
-      //   {
-      //     accessorKey: "creditsDeducted",
-      //     header: "Credits",
-      //     cell: ({ row }) => {
-      //       const amount = row.original.creditsDeducted;
-      //       const reason = row.original.deductionReason;
-      //       if (!amount || amount === "0" || amount === "0.00") {
-      //         return <span className="text-muted-foreground text-xs">—</span>;
-      //       }
-      //       return (
-      //         <div className="flex flex-col">
-      //           <span className="text-sm font-bold text-foreground tabular-nums">
-      //             {amount}
-      //           </span>
-      //           {reason && (
-      //             <span className="text-[10px] text-muted-foreground leading-tight">
-      //               {reasonLabel(reason)}
-      //             </span>
-      //           )}
-      //         </div>
-      //       );
-      //     },
-      //   },
       {
         accessorKey: "createdAt",
         header: "Created At",
@@ -407,8 +361,7 @@ export default function Sessions() {
                 day: "numeric",
                 month: "short",
                 year: "numeric",
-              })}
-              {" "}
+              })}{" "}
               <span className="text-muted-foreground/60 text-xs">
                 {date.toLocaleTimeString("en-US", {
                   hour: "numeric",
@@ -502,10 +455,12 @@ export default function Sessions() {
     [],
   );
 
+  // Show skeleton only on the very first load. Subsequent updates keep the table visible.
+  const isFirstLoad = status === "loading" && !hasFetched;
+
   return (
     <div className="space-y-6 animate-in fade-in duration-700">
-      <DataTable<Session, unknown>
-        key={refreshKey}
+      <DataTable<SessionRow, unknown>
         config={{
           enableSearch: true,
           enableDateFilter: true,
@@ -516,7 +471,7 @@ export default function Sessions() {
           size: "default",
         }}
         getColumns={() => columns}
-        fetchDataFn={fetchSessions}
+        fetchDataFn={stableFetchFn}
         idField="id"
         exportConfig={{
           entityName: "Sessions",
@@ -653,7 +608,6 @@ export default function Sessions() {
         onClose={() => {
           setIsTranscriptDialogOpen(false);
           setSelectedSessionId(null);
-          // Strip ?view=… from the URL so a refresh won't re-open the dialog.
           if (searchParams.get("view")) {
             const next = new URLSearchParams(searchParams);
             next.delete("view");

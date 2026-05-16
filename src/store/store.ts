@@ -1,6 +1,7 @@
 import { configureStore } from "@reduxjs/toolkit";
 import resumeBuilderReducer from "./resumeBuilderSlice";
 import aiProjectsReducer from "./aiProjectsSlice";
+import sessionsReducer from "./sessionsSlice";
 import settingsReducer from "@/features/settings/slices/settingsSlice";
 import overlayReducer from "@/features/launcher/slices/overlaySlice";
 import sessionFlowReducer from "@/features/session/slices/sessionFlowSlice";
@@ -10,6 +11,7 @@ export const store = configureStore({
   reducer: {
     resumeBuilder:   resumeBuilderReducer,
     aiProjects:      aiProjectsReducer,
+    sessions:        sessionsReducer,
     settings:        settingsReducer,
     overlay:         overlayReducer,
     sessionFlow:     sessionFlowReducer,
@@ -19,3 +21,4 @@ export const store = configureStore({
 
 export type RootState = ReturnType<typeof store.getState>;
 export type AppDispatch = typeof store.dispatch;
+
