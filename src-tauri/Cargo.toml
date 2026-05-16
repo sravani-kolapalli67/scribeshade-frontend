@@ -1,6 +1,6 @@
 [package]
 name = "scribeshade-frontend"
-version = "0.4.2"
+version = "1.1.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
