@@ -1,5 +1,10 @@
-import React, { useState } from "react";
-import { cn } from "@/lib/utils";
+import React from "react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+  TooltipProvider,
+} from "@/components/ui/tooltip";
 
 interface HoverTooltipProps {
   text: string;
@@ -12,27 +17,19 @@ export function HoverTooltip({
   text,
   children,
   side = "bottom",
-  className,
 }: HoverTooltipProps) {
-  const [open, setOpen] = useState(false);
   return (
-    <span
-      className={cn("relative inline-flex", className)}
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
-    >
-      {children}
-      {open && (
-        <span
-          className={cn(
-            "absolute z-50 px-3 py-2 rounded-xl bg-zinc-900 text-white text-xs font-medium leading-snug whitespace-pre-line shadow-xl pointer-events-none",
-            "left-1/2 -translate-x-1/2 max-w-[260px] w-max text-center",
-            side === "bottom" ? "top-full mt-1.5" : "bottom-full mb-1.5",
-          )}
+    <TooltipProvider delayDuration={0}>
+      <Tooltip>
+        <TooltipTrigger asChild>{children}</TooltipTrigger>
+        <TooltipContent
+          side={side}
+          className="z-[10000] bg-zinc-900 text-white border-zinc-800 text-[11px] px-3 py-1.5 rounded-xl max-w-[260px] text-center"
         >
           {text}
-        </span>
-      )}
-    </span>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }
+

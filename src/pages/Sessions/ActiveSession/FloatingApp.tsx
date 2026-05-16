@@ -7,6 +7,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { clampToScreen } from "@/lib/clampToScreen";
 import { useOverlayShortcuts } from "@/hooks/useOverlayShortcuts";
 import { useSafeZoom } from "@/hooks/useSafeZoom";
 import { useCursorPassthrough } from "@/features/launcher/hooks/useCursorPassthrough";
@@ -559,7 +560,24 @@ const FloatingApp: React.FC = () => {
   const dragRef = useRef<{
     startMouseX: number; startMouseY: number;
     startLeft: number;  startTop: number;
+    widgetW: number;    widgetH: number;
   } | null>(null);
+
+  // Re-clamp position if the monitor layout changes while the app is open.
+  useEffect(() => {
+    const onResize = () => {
+      setWidgetPos((prev) => {
+        if (!prev) return prev;
+        const rect = layer2Ref.current?.getBoundingClientRect();
+        const w = rect?.width ?? 0;
+        const h = rect?.height ?? 0;
+        const { x, y } = clampToScreen(prev.left, prev.top, w, h, false);
+        return x === prev.left && y === prev.top ? prev : { left: x, top: y };
+      });
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   const handleGripMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -569,14 +587,16 @@ const FloatingApp: React.FC = () => {
     dragRef.current = {
       startMouseX: e.clientX, startMouseY: e.clientY,
       startLeft: rect.left,   startTop: rect.top,
+      widgetW: rect.width,    widgetH: rect.height,
     };
     const onMouseMove = (ev: MouseEvent) => {
       const d = dragRef.current;
       if (!d) return;
-      setWidgetPos({
-        left: d.startLeft + (ev.clientX - d.startMouseX),
-        top:  Math.max(0, d.startTop + (ev.clientY - d.startMouseY)),
-      });
+      const rawLeft = d.startLeft + (ev.clientX - d.startMouseX);
+      const rawTop  = d.startTop  + (ev.clientY - d.startMouseY);
+      // Clamp on every frame — widget stays reachable even near screen edges.
+      const { x, y } = clampToScreen(rawLeft, rawTop, d.widgetW, d.widgetH);
+      setWidgetPos({ left: x, top: y });
     };
     const onMouseUp = () => {
       isDraggingRef.current = false;
@@ -587,6 +607,7 @@ const FloatingApp: React.FC = () => {
     document.addEventListener("mousemove", onMouseMove);
     document.addEventListener("mouseup",   onMouseUp);
   }, []);
+
 
   // ── Keyboard shortcuts (must live here so they fire with no element focused)
   // Cmd/Ctrl+G → AI Answer  |  Cmd/Ctrl+K → Analyze Screen
@@ -646,88 +667,78 @@ const FloatingApp: React.FC = () => {
   //          Spans the entire native window (which show_mini_top_center now
   //          sizes to the full monitor). Empty areas are click-through.
   //
-  // Layer 2: the actual widget shell, positioned absolutely at top-center.
-  //          pointer-events: auto + data-interactive so useCursorPassthrough
-  //          enables interaction exactly over the visible widget bounds.
-  //          Width switches between badge (180px) and full widget (700px).
-  //
-  // All portals (SessionMenu, ModelSelector dropdowns, tooltips) target
-  // #floating-portal-root which is already `position: fixed; inset: 0` in
-  // floating.html — they render inside the fullscreen window and can never
-  // be clipped by any native boundary.
-
   return (
-    // ── Layer 1: fullscreen transparent canvas ────────────────────────────
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        pointerEvents: "none",
-        background: "transparent",
-        overflow: "visible",
-        userSelect: "none",
-      }}
-    >
-      {/* ── Layer 2: widget shell — sized to content, draggable ─────────── */}
+    <TooltipProvider delayDuration={0}>
       <div
-        ref={layer2Ref}
-        data-interactive
         style={{
-          position: "absolute",
-          // Use stored position after drag; fall back to centered at top.
-          top:       widgetPos?.top ?? 10,
-          left:      widgetPos ? widgetPos.left : "50%",
-          transform: widgetPos ? "none" : "translateX(-50%)",
-          pointerEvents: "auto",
-          // Width tracks badge vs full widget so useCursorPassthrough
-          // hit-tests the correct region and transparent gaps stay click-through.
-          width: session.isWindowCollapsed ? 180 : 700,
+          position: "fixed",
+          inset: 0,
+          pointerEvents: "none",
+          background: "transparent",
+          overflow: "visible",
+          userSelect: "none",
         }}
       >
-        {/* ── Collapsed badge view ─────────────────────────────────────── */}
-        {session.isWindowCollapsed ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                onClick={session.expandWindow}
-                style={{ height: 36 }}
-                className="w-full flex items-center justify-center gap-2.5 px-3 bg-zinc-950/90 backdrop-blur-2xl rounded-xl border border-white/8 hover:border-blue-500/30 hover:bg-zinc-900/95 transition-all active:scale-95 group"
-              >
-                <div className="shrink-0 w-5 h-5 rounded-lg bg-gradient-to-br from-blue-500 to-violet-600 flex items-center justify-center shadow-[0_0_10px_rgba(99,102,241,0.4)]">
-                  <span className="text-[10px] font-black text-white leading-none">S</span>
-                </div>
-                <div className="flex items-center gap-1 shrink-0">
-                  <div className={cn(
-                    "w-1.5 h-1.5 rounded-full transition-colors",
-                    session.isMicActive || session.isTabActive
-                      ? "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)] animate-pulse"
-                      : "bg-blue-400/60 animate-pulse",
-                  )} />
-                </div>
-                <span className="text-[11px] font-semibold text-white/60 group-hover:text-white/90 transition-colors tracking-tight">
-                  ScribeShade
-                </span>
-                {session.aiResponses.length > 0 && (
-                  <span className="shrink-0 flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-blue-500/25 border border-blue-500/40 text-[9px] font-bold text-blue-300">
-                    {session.aiResponses.length}
+        {/* ── Layer 2: widget shell — sized to content, draggable ─────────── */}
+        <div
+          ref={layer2Ref}
+          data-interactive
+          style={{
+            position: "absolute",
+            // Use stored position after drag; fall back to centered at top.
+            top:       widgetPos?.top ?? 10,
+            left:      widgetPos ? widgetPos.left : "50%",
+            transform: widgetPos ? "none" : "translateX(-50%)",
+            pointerEvents: "auto",
+            // Width tracks badge vs full widget so useCursorPassthrough
+            // hit-tests the correct region and transparent gaps stay click-through.
+            width: session.isWindowCollapsed ? 180 : 700,
+          }}
+        >
+          {/* ── Collapsed badge view ─────────────────────────────────────── */}
+          {session.isWindowCollapsed ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={session.expandWindow}
+                  style={{ height: 36 }}
+                  className="w-full flex items-center justify-center gap-2.5 px-3 bg-zinc-950/90 backdrop-blur-2xl rounded-xl border border-white/8 hover:border-blue-500/30 hover:bg-zinc-900/95 transition-all active:scale-95 group"
+                >
+                  <div className="shrink-0 w-5 h-5 rounded-lg bg-gradient-to-br from-blue-500 to-violet-600 flex items-center justify-center shadow-[0_0_10px_rgba(99,102,241,0.4)]">
+                    <span className="text-[10px] font-black text-white leading-none">S</span>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <div className={cn(
+                      "w-1.5 h-1.5 rounded-full transition-colors",
+                      session.isMicActive || session.isTabActive
+                        ? "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)] animate-pulse"
+                        : "bg-blue-400/60 animate-pulse",
+                    )} />
+                  </div>
+                  <span className="text-[11px] font-semibold text-white/60 group-hover:text-white/90 transition-colors tracking-tight">
+                    ScribeShade
                   </span>
-                )}
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">Expand ScribeShade</TooltipContent>
-          </Tooltip>
-        ) : (
-          /* ── Expanded widget view ──────────────────────────────────────── */
-          <FloatingSurface
-            opacity={overlayOpacity}
-            zoom={overlayZoom}
-            divRef={floatRootRef}
-          >
-            <Toaster
-              position="top-center"
-              theme="dark"
-              toastOptions={{ style: { fontSize: "12px" } }}
-            />
+                  {session.aiResponses.length > 0 && (
+                    <span className="shrink-0 flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-blue-500/25 border border-blue-500/40 text-[9px] font-bold text-blue-300">
+                      {session.aiResponses.length}
+                    </span>
+                  )}
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">Expand ScribeShade</TooltipContent>
+            </Tooltip>
+          ) : (
+            /* ── Expanded widget view ──────────────────────────────────────── */
+            <FloatingSurface
+              opacity={overlayOpacity}
+              zoom={overlayZoom}
+              divRef={floatRootRef}
+            >
+              <Toaster
+                position="top-center"
+                theme="dark"
+                toastOptions={{ style: { fontSize: "12px" } }}
+              />
 
       {/* Top Card: Controls */}
       <div className="shrink-0">
@@ -1136,6 +1147,7 @@ const FloatingApp: React.FC = () => {
         )}
       </div>
     </div>
+  </TooltipProvider>
   );
 };
 

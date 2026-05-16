@@ -28,10 +28,23 @@ import {
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rehypeRaw from "rehype-raw";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { cn } from "@/lib/utils";
 import { AskAIWorkspace } from "./components/AskAI/AskAIWorkspace";
+
+const highlightKeywords = (text: string) => {
+  return text
+    .replace(
+      /\b(API|React|MongoDB|Redis|WebSocket|Node\.js|JWT|OAuth|Kafka|Docker|Kubernetes)\b/g,
+      '<span class="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 font-semibold">$1</span>'
+    )
+    .replace(
+      /\b(IMPORTANT|CRITICAL|WARNING)\b/g,
+      '<span class="px-1.5 py-0.5 rounded bg-red-50 text-red-700 font-bold">$1</span>'
+    );
+};
 
 
 // --- Types ---
@@ -85,99 +98,170 @@ function InteractionCard({
   copiedId: string | null;
 }) {
   return (
-    <div className="relative group rounded-2xl border border-border/50 bg-background/80 backdrop-blur-sm p-6 space-y-5 shadow-sm hover:shadow-md hover:border-border transition-all">
+    <div className="relative group rounded-xl border border-border/60 bg-card p-7 space-y-6 shadow-[0_1px_2px_rgba(0,0,0,0.04)] hover:shadow-[0_8px_24px_rgba(0,0,0,0.06)] transition-all">
       {/* Header section: Label and Question */}
-      <div className="space-y-3">
+      <div className="space-y-4">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="px-2 py-0.5 rounded-md bg-indigo-50 border border-indigo-100 flex items-center gap-1.5">
-              <span className="text-[10px] font-black text-indigo-600 uppercase tracking-widest">
-                Question {String(interaction.index + 1).padStart(2, '0')}
-              </span>
-            </div>
-            <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">
               {interaction.timestamp}
             </span>
+            <div className="flex items-center gap-2">
+              <span className="text-[12px] font-black text-indigo-600 uppercase tracking-widest">
+                QUESTION {String(interaction.index + 1).padStart(2, '0')}
+              </span>
+            </div>
           </div>
 
-          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          <div className="opacity-0 group-hover:opacity-100 transition-opacity">
             <Button
-              variant="ghost"
+              variant="outline"
               size="sm"
               onClick={() => onCopy(interaction.id, `Q: ${interaction.question}\n\nA: ${interaction.answer}`)}
-              className="h-8 px-2.5 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground transition-all gap-2"
+              className="h-8 px-3 rounded-lg text-muted-foreground hover:text-foreground transition-all gap-2"
             >
               {copiedId === interaction.id ? (
                 <>
                   <Check className="size-3.5 text-emerald-500" />
-                  <span className="text-[11px] font-bold">Copied</span>
+                  <span className="text-[12px] font-semibold">Copied</span>
                 </>
               ) : (
                 <>
                   <Copy className="size-3.5" />
-                  <span className="text-[11px] font-bold">Copy</span>
+                  <span className="text-[12px] font-semibold">Copy</span>
                 </>
               )}
             </Button>
           </div>
         </div>
 
-        <h4 className="text-base font-semibold text-foreground leading-snug tracking-tight">
+        <h3 className="text-xl font-bold text-foreground leading-snug tracking-tight">
           {interaction.question}
-        </h4>
+        </h3>
       </div>
 
-      <div className="h-px bg-border/40 w-full" />
+      <div className="h-px bg-border/60 w-full" />
 
       {/* Body section: AI Answer with optimized formatting */}
-      <div className="space-y-4">
-        <div className="flex items-center gap-2">
-          <div className="size-5 rounded-full bg-indigo-600 flex items-center justify-center shadow-sm shadow-indigo-200">
-            <Zap className="size-3 text-white fill-white" />
-          </div>
-          <span className="text-[11px] font-black text-indigo-600 uppercase tracking-[0.2em]">AI Response</span>
-          <div className="flex items-center gap-1.5 ml-auto">
-            <div className="size-1.5 rounded-full bg-emerald-500" />
-            <span className="text-[10px] font-bold text-muted-foreground uppercase">High Confidence</span>
-          </div>
+      <div className="space-y-5 relative">
+        <div className="absolute top-0 right-0 opacity-0 group-hover:opacity-100 transition-all duration-200">
+          <Button
+            variant="outline"
+            size="icon"
+            className="h-8 w-8 rounded-lg bg-background/80 backdrop-blur-sm"
+            onClick={() => onCopy(interaction.id, interaction.answer)}
+          >
+            {copiedId === interaction.id ? (
+              <Check className="h-3.5 w-3.5 text-emerald-500" />
+            ) : (
+              <Copy className="h-3.5 w-3.5" />
+            )}
+          </Button>
         </div>
 
-        <div className="text-[14px] leading-7 text-muted-foreground font-medium prose prose-slate max-w-none 
-          prose-p:mb-4 last:prose-p:mb-0 
-          prose-strong:text-indigo-900 prose-strong:font-bold prose-strong:bg-indigo-50/80 prose-strong:px-1.5 prose-strong:py-0.5 prose-strong:rounded-md
-          prose-ul:my-4 prose-ul:list-disc prose-ul:pl-6
-          prose-ol:my-4 prose-ol:list-decimal prose-ol:pl-6
-          prose-li:mb-2 prose-li:pl-1
-          prose-code:text-indigo-600 prose-code:bg-indigo-50/50 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-md
-          marker:text-indigo-400/80">
+        <div className="flex items-center gap-2">
+          <div className="size-5 rounded-md bg-indigo-600 flex items-center justify-center shadow-sm">
+            <Zap className="size-3 text-white fill-white" />
+          </div>
+          <span className="text-[11px] font-bold text-indigo-600 uppercase tracking-[0.15em]">AI Response</span>
+        </div>
+
+        <div className="
+          text-[15px]
+          leading-7
+          text-muted-foreground
+          font-normal
+          prose
+          prose-slate
+          max-w-none
+
+          prose-p:leading-8
+          prose-p:mb-5
+          prose-p:text-[15px]
+
+          prose-strong:font-semibold
+          prose-strong:text-foreground
+
+          prose-ul:my-6
+          prose-ul:space-y-4
+          prose-ul:pl-7
+
+          prose-ol:my-6
+          prose-ol:space-y-4
+          prose-ol:pl-7
+
+          prose-li:pl-2
+          prose-li:leading-8
+
+          prose-li:marker:text-indigo-500
+          prose-li:marker:font-bold
+
+          prose-code:text-indigo-600
+          prose-code:bg-indigo-50
+          prose-code:px-1.5
+          prose-code:py-0.5
+          prose-code:rounded
+
+          prose-pre:rounded-xl
+          prose-pre:border
+          prose-pre:border-zinc-800
+
+          prose-headings:text-foreground
+          prose-headings:font-bold
+          ">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
+            rehypePlugins={[rehypeRaw]}
             components={{
+              ul({ children }) {
+                return (
+                  <ul className="space-y-4 my-6">
+                    {children}
+                  </ul>
+                );
+              },
+              li({ children }) {
+                return (
+                  <li className="
+                    rounded-lg
+                    border
+                    border-border/40
+                    bg-muted/20
+                    px-4
+                    py-3
+                    leading-7
+                    transition-all
+                    hover:bg-muted/30
+                  ">
+                    {children}
+                  </li>
+                );
+              },
               code({ node, inline, className, children, ...props }: any) {
                 const match = /language-(\w+)/.exec(className || "");
                 const codeContent = String(children).replace(/\n$/, "");
 
                 if (!inline && match) {
                   return (
-                    <div className="my-5 rounded-xl border border-border/40 bg-muted/20 overflow-hidden group/code relative">
-                      <div className="absolute right-3 top-3 opacity-0 group-hover/code:opacity-100 transition-opacity">
+                    <div className="my-6 rounded-xl border border-border/50 bg-zinc-950 overflow-hidden group/code relative shadow-sm">
+                      <div className="absolute right-3 top-3 opacity-0 group-hover/code:opacity-100 transition-opacity z-10">
                         <Button
                           variant="secondary"
                           size="icon"
-                          className="size-7 rounded-lg bg-white/80 backdrop-blur-sm shadow-sm"
+                          className="size-7 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 shadow-sm"
                           onClick={() => onCopy(interaction.id + '-code', codeContent)}
                         >
-                          {copiedId === interaction.id + '-code' ? <Check className="size-3.5 text-emerald-500" /> : <Copy className="size-3.5" />}
+                          {copiedId === interaction.id + '-code' ? <Check className="size-3.5 text-emerald-400" /> : <Copy className="size-3.5" />}
                         </Button>
                       </div>
                       <SyntaxHighlighter
-                        style={oneLight}
+                        style={oneDark}
                         language={match[1]}
                         PreTag="div"
                         customStyle={{
                           margin: 0,
-                          padding: "1.25rem",
-                          fontSize: "12px",
+                          padding: "1.5rem",
+                          fontSize: "13px",
                           lineHeight: "1.6",
                           backgroundColor: "transparent",
                         }}
@@ -189,14 +273,14 @@ function InteractionCard({
                   );
                 }
                 return (
-                  <code className="bg-muted/50 px-1.5 py-0.5 rounded text-[12px] font-mono" {...props}>
+                  <code className={className} {...props}>
                     {children}
                   </code>
                 );
               },
             }}
           >
-            {interaction.answer}
+            {highlightKeywords(interaction.answer)}
           </ReactMarkdown>
         </div>
       </div>
@@ -407,81 +491,110 @@ export function TranscriptDialog({
 
   /**
    * Enhanced Parsing Architecture
-   * Splits merged AI responses into individual structured interactions.
+   * Splits transcript into individual structured interactions strictly by ===NEXT_QUESTION===
    */
   const parseInteractions = useMemo(() => {
-    const allInteractions: Interaction[] = [];
+    const interactions: Interaction[] = [];
+
     let questionCounter = 0;
 
     messages.forEach((msg, msgIdx) => {
-      const isAI = msg.role === "AI" || msg.role === "AI_ASSISTANT";
+      const isAI =
+        msg.role === "AI" ||
+        msg.role === "AI_ASSISTANT";
+
       if (!isAI) return;
 
-      if (msg.question || msg.answer) {
-        allInteractions.push({
-          id: msg.id || `direct-${msgIdx}`,
-          question: msg.question || "Contextual Analysis",
-          answer: msg.answer || "",
-          timestamp: msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'AI Analyzed',
-          index: questionCounter++
-        });
-        return;
-      }
+      /**
+       * CRITICAL FIX:
+       * Database stores transcript in answer field,
+       * not content field.
+       */
+      const rawText =
+        msg.answer ||
+        msg.content ||
+        "";
 
-      const text = msg.content || "";
-      // Match various patterns of Q&A blocks and split markers
-      const splitRegex = /(?:\n|^)(?:===NEXT_QUESTION===|\*\*?Extracted Question:|\*\*?QUESTION:|\*\*?Question \d+:)/i;
+      if (!rawText.trim()) return;
 
-      const segments = text.split(splitRegex);
+      /**
+       * Split ONLY by NEXT_QUESTION marker
+       */
+      const segments = rawText
+        .split(/===NEXT_QUESTION===/gi)
+        .map((s) => s.trim())
+        .filter(Boolean);
 
-      segments.forEach((seg, segIdx) => {
-        const cleanSeg = seg.replace(/===NEXT_QUESTION===/g, "").trim();
-        if (!cleanSeg) return;
-
+      segments.forEach((segment, segIdx) => {
         let question = "";
-        let answer = cleanSeg;
+        let answer = "";
 
-        // Strip QUESTION: and ANSWER: labels if they exist in the segment
-        const qLabelRegex = /^(?:\*\*|###)?\s*(?:Extracted Question|QUESTION|Question \d+)\s*:\s*/i;
-        const aLabelRegex = /(?:\n|^)(?:\*\*|###)?\s*(?:Suggested Answer|ANSWER|Answer \d+)\s*:\s*/i;
+        /**
+         * FIRST BLOCK SPECIAL CASE
+         *
+         * First AI message often contains:
+         * - msg.question
+         * - raw answer directly
+         *
+         * without QUESTION/ANSWER labels.
+         */
+        const hasQuestionMarker =
+          /\*\*QUESTION:\*\*|QUESTION:/i.test(segment);
 
-        const qMatch = qLabelRegex.exec(cleanSeg);
-        if (qMatch) {
-          const qStart = qMatch.index + qMatch[0].length;
-          const aMatch = aLabelRegex.exec(cleanSeg);
+        if (!hasQuestionMarker && segIdx === 0 && msg.question) {
+          question = msg.question.trim();
+          answer = segment.trim();
+        } else {
+          /**
+           * NORMAL STRUCTURED BLOCK
+           */
 
-          if (aMatch) {
-            question = cleanSeg.slice(qStart, aMatch.index).trim();
-            answer = cleanSeg.slice(aMatch.index + aMatch[0].length).trim();
-          } else {
-            // No answer marker, try to find a newline or just take the rest
-            const firstNewline = cleanSeg.indexOf("\n", qStart);
-            if (firstNewline !== -1) {
-              question = cleanSeg.slice(qStart, firstNewline).trim();
-              answer = cleanSeg.slice(firstNewline).trim();
-            } else {
-              question = cleanSeg.slice(qStart).trim();
-              answer = "";
-            }
-          }
+          const questionMatch = segment.match(
+            /\*\*QUESTION:\*\*\s*([\s\S]*?)(?=\*\*ANSWER:\*\*|ANSWER:)/i
+          );
+
+          const answerMatch = segment.match(
+            /\*\*ANSWER:\*\*\s*([\s\S]*)/i
+          );
+
+          question =
+            questionMatch?.[1]?.trim() ||
+            "Question";
+
+          answer =
+            answerMatch?.[1]?.trim() ||
+            segment.trim();
         }
 
-        // Final clean up of markdown artifacts at the start/end of question
-        question = question.replace(/[*#_]+$|^[*#_]+/g, "").trim();
+        /**
+         * Cleanup leaked markdown
+         */
+        question = question
+          .replace(/\*\*/g, "")
+          .replace(/^QUESTION:/i, "")
+          .trim();
 
-        if (question || answer) {
-          allInteractions.push({
-            id: `${msgIdx}-${segIdx}`,
-            question: question || "Contextual Analysis",
-            answer: answer,
-            timestamp: msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '00:00',
-            index: questionCounter++
-          });
-        }
+        answer = answer
+          .replace(/^\*\*ANSWER:\*\*/i, "")
+          .replace(/===NEXT_QUESTION===/gi, "")
+          .trim();
+
+        interactions.push({
+          id: `${msgIdx}-${segIdx}`,
+          question,
+          answer,
+          timestamp: msg.timestamp
+            ? new Date(msg.timestamp).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              })
+            : "00:00",
+          index: questionCounter++,
+        });
       });
     });
 
-    return allInteractions;
+    return interactions;
   }, [messages]);
 
   const downloadTranscript = () => {

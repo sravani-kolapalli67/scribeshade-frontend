@@ -98,7 +98,7 @@ export const FloatingSurface: React.FC<FloatingSurfaceProps> = ({
         createPortal(…, document.getElementById('floating-portal-root')).
       */}
       <div
-        className="relative flex flex-col w-full rounded-xl overflow-hidden"
+        className="relative flex flex-col w-full rounded-xl"
         style={{
           zIndex: 1,
           zoom,

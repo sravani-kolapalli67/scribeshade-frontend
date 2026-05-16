@@ -102,6 +102,7 @@ import {
 import "@/App.css";
 
 import { OverlayRoot, OverlayFlags } from "@/overlay";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -380,6 +381,28 @@ function WidgetContent() {
     };
   }, [dispatch, setCollapsed]);
 
+  // ── Windows WebView2 Fallback Recovery for Collapsed Icon ─────────────────
+  // When switching from a large card to a tiny icon, the WebView2 compositor
+  // can lose the dirty rect if the transparent window temporarily empties
+  // during AnimatePresence mode="wait". We force a native re-show and a
+  // CSS repaint to ensure the circular floating icon remains visible.
+  useEffect(() => {
+    if (collapsed && "__TAURI__" in window) {
+      win.show().catch(() => {});
+      win.setAlwaysOnTop(true).catch(() => {});
+      // Force a tiny layout shift to break the compositor cache
+      const timer = setTimeout(() => {
+        document.body.style.transform = "translateZ(0)";
+        setTimeout(() => {
+          document.body.style.transform = "";
+        }, 16);
+      }, 50);
+      return () => clearTimeout(timer);
+    }
+  }, [collapsed, win]);
+
+
+
   const creditsOk = !!(balance && parseFloat(balance.totalAvailable ?? "0") > 0);
 
   return (
@@ -433,7 +456,7 @@ function WidgetContent() {
           pointerEvents: "auto",
         }}
       >
-        <AnimatePresence mode="wait" initial={false}>
+        <AnimatePresence mode="popLayout" initial={false}>
           {collapsed ? (
             /* ── Collapsed floating icon ──────────────────────────────── */
             <motion.div
@@ -462,7 +485,7 @@ function WidgetContent() {
             >
       <div
         ref={cardRef}
-        className="rounded-3xl bg-white shadow-2xl shadow-black/20 overflow-hidden"
+        className="rounded-3xl bg-white shadow-2xl shadow-black/20"
       >
         <div
           ref={innerContentRef}
@@ -1049,7 +1072,6 @@ function WidgetContent() {
               background: "rgba(255,255,255,0.97)",
               border: "1px solid rgba(0,0,0,0.07)",
               boxShadow: "0 8px 28px rgba(0,0,0,0.10), 0 1px 4px rgba(0,0,0,0.05)",
-              overflow: "hidden",
               transformOrigin: menuAnchor.direction === "up" ? "bottom center" : "top center",
               animation: menuAnchor.direction === "up"
                 ? "menuInUp 140ms cubic-bezier(0.16,1,0.3,1) both"
@@ -1162,7 +1184,11 @@ function WidgetApp() {
     </Provider>
   );
 
-  return content;
+  return (
+    <TooltipProvider delayDuration={0}>
+      {content}
+    </TooltipProvider>
+  );
 }
 
 createRoot(document.getElementById("launcher-root")!).render(
