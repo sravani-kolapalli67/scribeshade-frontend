@@ -10,11 +10,24 @@ import "@/App.css";
 
 // ── Auth context ──────────────────────────────────────────────────────────────
 // The inspect window has no Clerk session (each webview has isolated storage).
-// Auth data is pushed from the launcher via the "inspect:auth" Tauri event.
+// Auth data is pushed from the launcher via two mechanisms:
+//   1. URL query params on initial open (immediate, no race condition)
+//   2. "inspect:auth" Tauri events for ongoing updates (token refresh, sign-out)
 
 const defaultAuth: InspectAuthPayload = { token: null, email: "—", userId: "—" };
 
-export const InspectAuthContext = createContext<InspectAuthPayload>(defaultAuth);
+function parseAuthFromUrl(): InspectAuthPayload {
+  const params = new URLSearchParams(window.location.search);
+  return {
+    token: params.get("token") || null,
+    email: params.get("email") || "—",
+    userId: params.get("userId") || "—",
+  };
+}
+
+const initialAuth = parseAuthFromUrl();
+
+export const InspectAuthContext = createContext<InspectAuthPayload>(initialAuth);
 
 export function useInspectAuth(): InspectAuthPayload {
   return useContext(InspectAuthContext);
@@ -23,7 +36,9 @@ export function useInspectAuth(): InspectAuthPayload {
 // ── Root component ────────────────────────────────────────────────────────────
 
 function InspectApp() {
-  const [auth, setAuth] = useState<InspectAuthPayload>(defaultAuth);
+  // Start with auth data from URL params (passed by launcher on window creation)
+  // so we never show a flash of "—" while waiting for the event handshake.
+  const [auth, setAuth] = useState<InspectAuthPayload>(initialAuth);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;

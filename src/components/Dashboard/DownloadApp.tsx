@@ -1,29 +1,52 @@
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { ChevronDown } from "lucide-react";
 
-const BACKEND_UPDATES_MANIFEST_URL = `${
-  import.meta.env.VITE_BACKEND_URL
-}/api/updates/latest.json`;
+const BACKEND_UPDATES_MANIFEST_URL = `${import.meta.env.VITE_BACKEND_URL
+  }/api/updates/latest.json`;
 
 type UpdateManifest = {
   platforms?: Record<string, { url: string; signature?: string }>;
 };
 
-async function openLatestDesktopDownload(platform: "mac" | "windows") {
+async function openLatestDesktopDownload(
+  platform: "mac" | "windows",
+  format?: "exe" | "msi",
+) {
   try {
     const res = await fetch(BACKEND_UPDATES_MANIFEST_URL, { cache: "no-store" });
-    if (!res.ok) throw new Error(`Failed to fetch latest manifest (${res.status})`);
+    if (!res.ok)
+      throw new Error(`Failed to fetch latest manifest (${res.status})`);
     const manifest = (await res.json()) as UpdateManifest;
     const platforms = manifest.platforms ?? {};
     const entries = Object.entries(platforms);
 
-    const match = entries.find(([key]) =>
-      platform === "mac"
-        ? key.toLowerCase().includes("darwin")
-        : key.toLowerCase().includes("windows"),
-    );
+    let match;
+
+    if (platform === "mac") {
+      match = entries.find(([key]) => key.toLowerCase().includes("darwin"));
+    } else {
+      // For Windows, try to match the specific format (exe/nsis or msi)
+      if (format === "msi") {
+        match = entries.find(([key]) => key.toLowerCase().includes("msi"));
+      } else if (format === "exe") {
+        match = entries.find(([key]) => key.toLowerCase().includes("nsis"));
+      }
+
+      // Fallback to any windows platform if specific format not found
+      if (!match) {
+        match = entries.find(([key]) => key.toLowerCase().includes("windows"));
+      }
+    }
 
     const url = match?.[1]?.url;
-    if (!url) throw new Error(`No ${platform} download found in latest manifest`);
+    if (!url)
+      throw new Error(`No ${platform} download found in latest manifest`);
     window.open(url, "_blank", "noopener,noreferrer");
   } catch (error) {
     console.error("[download] Unable to open latest desktop download:", error);
@@ -60,15 +83,44 @@ export function DownloadApp() {
             <AppleIcon className="w-5 h-5 mr-3 transition-transform group-hover:-translate-y-0.5" />
             Download for Mac
           </Button>
-          <Button
-            size="lg"
-            type="button"
-            onClick={() => void openLatestDesktopDownload("windows")}
-            className="w-full sm:w-auto h-14 px-8 bg-zinc-900 hover:bg-zinc-800 text-white border border-zinc-800 group rounded-xl transition-all font-semibold shadow-lg"
-          >
-            <WindowsIcon className="w-5 h-5 mr-3 transition-transform group-hover:-translate-y-0.5 text-[#00a4ef]" />
-            Download for Windows
-          </Button>
+
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                size="lg"
+                type="button"
+                className="w-full sm:w-auto h-14 px-8 bg-zinc-900 hover:bg-zinc-800 text-white border border-zinc-800 group rounded-xl transition-all font-semibold shadow-lg flex items-center justify-center"
+              >
+                <WindowsIcon className="w-5 h-5 mr-3 transition-transform group-hover:-translate-y-0.5 text-[#00a4ef]" />
+                Download for Windows
+                <ChevronDown className="ml-3 h-4 w-4 opacity-70 group-hover:translate-y-0.5 transition-transform" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="end"
+              sideOffset={8}
+              className="w-64 bg-zinc-950 border-white/10 text-white rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] p-1.5 backdrop-blur-xl"
+            >
+              <DropdownMenuItem
+                onClick={() => void openLatestDesktopDownload("windows", "exe")}
+                className="group cursor-pointer rounded-xl py-3 px-4 flex flex-col items-start gap-1 transition-all outline-none border-none hover:bg-white/10 focus:bg-white/10 data-[highlighted]:bg-white/10 [&_*]:!text-white"
+              >
+                <span className="font-bold text-sm">Windows (AMD/EXE)</span>
+                <span className="text-xs text-zinc-400">
+                  Standard installer for most users
+                </span>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={() => void openLatestDesktopDownload("windows", "msi")}
+                className="group cursor-pointer rounded-xl py-3 px-4 flex flex-col items-start gap-1 transition-all outline-none border-none hover:bg-white/10 focus:bg-white/10 data-[highlighted]:bg-white/10 [&_*]:!text-white"
+              >
+                <span className="font-bold text-sm">Windows (Intel/MSI)</span>
+                <span className="text-xs text-zinc-400">
+                  Ideal for enterprise/corporate installs
+                </span>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
     </div>

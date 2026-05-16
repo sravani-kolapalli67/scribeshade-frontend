@@ -256,10 +256,35 @@ function WidgetContent() {
       await existing.setFocus().catch(console.error);
       return;
     }
+
+    // Fetch auth data to pass immediately as URL params so the inspect window
+    // does not rely solely on the async event handshake (which can miss data
+    // if Clerk hasn't finished loading when the inspect window mounts).
+    let token: string | null = null;
+    let email = "—";
+    let userId = "—";
+    try {
+      token = isSignedIn ? await getToken() : null;
+      email =
+        user?.primaryEmailAddress?.emailAddress ??
+        user?.emailAddresses?.[0]?.emailAddress ??
+        "—";
+      userId = localStorage.getItem("userId") ?? "—";
+    } catch {
+      // Non-fatal — inspect window shows "—" for auth-dependent fields
+    }
+
+    const params = new URLSearchParams();
+    if (token) params.set("token", token);
+    params.set("email", email);
+    params.set("userId", userId);
+    const qs = params.toString();
+    const url = qs ? `inspect.html?${qs}` : "inspect.html";
+
     const sw = window.screen.availWidth;
     const sh = window.screen.availHeight;
     new WebviewWindow("inspect", {
-      url: "inspect.html",
+      url,
       title: "ScribeShade – Inspect",
       width: 360,
       height: Math.min(560, sh - 120),
@@ -270,7 +295,7 @@ function WidgetContent() {
       x: sw - 380,
       y: 80,
     });
-  }, []);
+  }, [getToken, isSignedIn, user]);
 
   // ── On-mount: apply stored private mode ───────────────────────────────────
   useEffect(() => {
