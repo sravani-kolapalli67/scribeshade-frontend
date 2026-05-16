@@ -4,7 +4,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { Activity, Wifi, WifiOff, LayoutDashboard, History, CreditCard, ExternalLink, Loader2, Cpu, Tag, RefreshCw } from "lucide-react";
 import { checkForUpdates } from "@/lib/updater";
 import { cn } from "@/lib/utils";
-import { useInspectAuth } from "@/pages/Inspect/InspectApp";
+import { useInspectAuth } from "@/features/launcher/components/InspectAuthContext";
 import { BACKEND_URL, FRONTEND_URL, APP_NAME } from "@/features/launcher/constants";
 
 type HealthStatus = "checking" | "ok" | "error";

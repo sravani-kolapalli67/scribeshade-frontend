@@ -47,21 +47,6 @@
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "visibleOnAllWorkspaces": true
-      },
-      {
-        "label": "inspect",
-        "title": "ScribeShade – Inspect",
-        "url": "inspect.html",
-        "width": 360,
-        "height": 560,
-        "transparent": false,
-        "decorations": true,
-        "visible": false,
-        "resizable": false,
-        "minimizable": true,
-        "maximizable": false,
-        "alwaysOnTop": false,
-        "skipTaskbar": false
       }
     ],
     "security": {

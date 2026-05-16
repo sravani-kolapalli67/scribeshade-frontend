@@ -18,7 +18,6 @@ export default defineConfig(async () => ({
         main: path.resolve(__dirname, "index.html"),
         floating: path.resolve(__dirname, "floating.html"),
         launcher: path.resolve(__dirname, "launcher.html"),
-        inspect: path.resolve(__dirname, "inspect.html"),
       },
     },
   },

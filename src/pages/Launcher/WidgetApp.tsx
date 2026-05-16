@@ -83,6 +83,7 @@ import { WidgetSelect } from "@/shared/components/WidgetSelect";
 import { tauriEvents } from "@/services/tauriEvents";
 import { tauriOverlay } from "@/services/tauriOverlay";
 import { DesktopAuthHydrator } from "@/components/auth/DesktopAuthHydrator";
+import { InspectDialog } from "@/features/launcher/components/InspectDialog";
 
 // ─── Redux store ──────────────────────────────────────────────────────────────
 import { store } from "@/store/store";
@@ -222,6 +223,9 @@ function WidgetContent() {
   // Used to lock private mode toggle during active sessions (Feature 4).
   const [isSessionActive, setIsSessionActive] = useState(false);
 
+  // ── Inspect dialog state (rendered as a child dialog, not a separate window) ─
+  const [inspectOpen, setInspectOpen] = useState(false);
+
   const handleCreateSession = useCallback(
     () => {
       // Only mark session active after the creation flow succeeds.
@@ -248,54 +252,13 @@ function WidgetContent() {
     [win],
   );
 
-  const handleOpenInspect = useCallback(async () => {
-    const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
-    const existing = await WebviewWindow.getByLabel("inspect");
-    if (existing) {
-      await existing.show().catch(console.error);
-      await existing.setFocus().catch(console.error);
-      return;
-    }
+  const handleOpenInspect = useCallback(() => {
+    setInspectOpen(true);
+  }, []);
 
-    // Fetch auth data to pass immediately as URL params so the inspect window
-    // does not rely solely on the async event handshake (which can miss data
-    // if Clerk hasn't finished loading when the inspect window mounts).
-    let token: string | null = null;
-    let email = "—";
-    let userId = "—";
-    try {
-      token = isSignedIn ? await getToken() : null;
-      email =
-        user?.primaryEmailAddress?.emailAddress ??
-        user?.emailAddresses?.[0]?.emailAddress ??
-        "—";
-      userId = localStorage.getItem("userId") ?? "—";
-    } catch {
-      // Non-fatal — inspect window shows "—" for auth-dependent fields
-    }
-
-    const params = new URLSearchParams();
-    if (token) params.set("token", token);
-    params.set("email", email);
-    params.set("userId", userId);
-    const qs = params.toString();
-    const url = qs ? `inspect.html?${qs}` : "inspect.html";
-
-    const sw = window.screen.availWidth;
-    const sh = window.screen.availHeight;
-    new WebviewWindow("inspect", {
-      url,
-      title: "ScribeShade – Inspect",
-      width: 360,
-      height: Math.min(560, sh - 120),
-      decorations: true,
-      shadow: true,
-      resizable: false,
-      alwaysOnTop: false,
-      x: sw - 380,
-      y: 80,
-    });
-  }, [getToken, isSignedIn, user]);
+  const handleCloseInspect = useCallback(() => {
+    setInspectOpen(false);
+  }, []);
 
   // ── On-mount: apply stored private mode ───────────────────────────────────
   useEffect(() => {
@@ -306,52 +269,6 @@ function WidgetContent() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // ── Respond to inspect window auth requests ───────────────────────────────
-  // The inspect webview has isolated localStorage — no Clerk session there.
-  // When the inspect window opens it emits "inspect:request-auth"; we reply
-  // with a fresh token + user info via emitTo so it can fetch data directly.
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    tauriEvents
-      .onInspectRequestAuth(async () => {
-        if (!isLoaded) return;
-        try {
-          const token = isSignedIn ? await getToken() : null;
-          const email =
-            user?.primaryEmailAddress?.emailAddress ??
-            user?.emailAddresses?.[0]?.emailAddress ??
-            "—";
-          const userId = localStorage.getItem("userId") ?? "—";
-          await tauriEvents.emitInspectAuth({ token, email, userId });
-        } catch {
-          // Non-fatal — inspect window shows "—" for auth-dependent fields
-        }
-      })
-      .then((fn) => { unlisten = fn; })
-      .catch(console.error);
-    return () => unlisten?.();
-  }, [getToken, isLoaded, isSignedIn, user]);
-
-  // Push auth updates proactively so inspect catches up even if it requested
-  // auth before Clerk finished loading in this window.
-  useEffect(() => {
-    if (!isLoaded) return;
-    const syncInspectAuth = async () => {
-      try {
-        const token = isSignedIn ? await getToken() : null;
-        const email =
-          user?.primaryEmailAddress?.emailAddress ??
-          user?.emailAddresses?.[0]?.emailAddress ??
-          "—";
-        const userId = localStorage.getItem("userId") ?? "—";
-        await tauriEvents.emitInspectAuth({ token, email, userId });
-      } catch {
-        // Ignore when inspect window is not open.
-      }
-    };
-    syncInspectAuth();
-  }, [getToken, isLoaded, isSignedIn, user]);
 
   // ── Auto-update check ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -1010,7 +927,9 @@ function WidgetContent() {
                                                     />
                                                   </svg>
                                                 )}
-                                              </div>
+{/* Inspect dialog — rendered as a child overlay inside the same webview */}
+      <InspectDialog open={inspectOpen} onClose={handleCloseInspect} />
+    </div>
                                               <span className="truncate">
                                                 {label}
                                               </span>
@@ -1163,6 +1082,9 @@ function WidgetContent() {
         </>,
         document.body,
       )}
+
+      {/* Inspect dialog — rendered as a child overlay inside the same webview */}
+      <InspectDialog open={inspectOpen} onClose={handleCloseInspect} />
     </div>
   );
 }
