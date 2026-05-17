@@ -177,6 +177,30 @@ export const DEFAULT_SECTIONS: SectionDef[] = [
   { id: "publications",  label: "Publications",     required: false, enabled: false },
 ];
 
+const REQUIRED_SECTION_IDS = new Set<SectionId>([
+  "personalInfo", "summary", "experience", "skills", "education",
+]);
+
+function normalizeSections(sections?: SectionDef[]): SectionDef[] {
+  if (!sections?.length) return DEFAULT_SECTIONS.map((section) => ({ ...section }));
+
+  const seen = new Set<SectionId>();
+  const normalized = sections.map((section) => {
+    seen.add(section.id);
+    return { ...section };
+  });
+
+  DEFAULT_SECTIONS.forEach((section) => {
+    if (seen.has(section.id)) return;
+    normalized.push({
+      ...section,
+      enabled: REQUIRED_SECTION_IDS.has(section.id),
+    });
+  });
+
+  return normalized;
+}
+
 export const EMPTY_FIELDS: ResumeFields = {
   name: "",
   role: "",
@@ -293,21 +317,35 @@ const resumeBuilderSlice = createSlice({
 
     /** Reorder sections: move one slot up. */
     moveSectionUp(state, action: PayloadAction<SectionId>) {
-      const idx = state.sections.findIndex((s) => s.id === action.payload);
-      if (idx > 0) {
-        const temp = state.sections[idx - 1];
-        state.sections[idx - 1] = state.sections[idx];
+      const enabledIndices = state.sections
+        .map((section, index) => ({ section, index }))
+        .filter(({ section }) => section.enabled)
+        .map(({ index }) => index);
+      const pos = enabledIndices.findIndex((index) => state.sections[index].id === action.payload);
+      if (pos > 0) {
+        const idx = enabledIndices[pos];
+        const prevIdx = enabledIndices[pos - 1];
+        const temp = state.sections[prevIdx];
+        state.sections[prevIdx] = state.sections[idx];
         state.sections[idx] = temp;
+        state.isDirty = true;
       }
     },
 
     /** Reorder sections: move one slot down. */
     moveSectionDown(state, action: PayloadAction<SectionId>) {
-      const idx = state.sections.findIndex((s) => s.id === action.payload);
-      if (idx < state.sections.length - 1) {
-        const temp = state.sections[idx + 1];
-        state.sections[idx + 1] = state.sections[idx];
+      const enabledIndices = state.sections
+        .map((section, index) => ({ section, index }))
+        .filter(({ section }) => section.enabled)
+        .map(({ index }) => index);
+      const pos = enabledIndices.findIndex((index) => state.sections[index].id === action.payload);
+      if (pos >= 0 && pos < enabledIndices.length - 1) {
+        const idx = enabledIndices[pos];
+        const nextIdx = enabledIndices[pos + 1];
+        const temp = state.sections[nextIdx];
+        state.sections[nextIdx] = state.sections[idx];
         state.sections[idx] = temp;
+        state.isDirty = true;
       }
     },
 
@@ -718,12 +756,14 @@ const resumeBuilderSlice = createSlice({
         jobDescription?: string;
         jobTitle?: string;
         company?: string;
+        sections?: SectionDef[];
         customSectionDefs?: SectionDef[];
       }>,
     ) {
-      const { title, fields, templateId, lockedFields, jobDescription, jobTitle, company, customSectionDefs } = action.payload;
+      const { title, fields, templateId, lockedFields, jobDescription, jobTitle, company, sections, customSectionDefs } = action.payload;
       if (title) state.resumeTitle = title;
       if (templateId) state.templateId = templateId;
+      state.sections = normalizeSections(sections);
       state.fields = { ...EMPTY_FIELDS, ...(fields ?? {}) };
       state.lockedFields = lockedFields ?? { name: true, email: true };
       state.past = [];

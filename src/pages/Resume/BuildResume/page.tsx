@@ -224,7 +224,7 @@ function ResumeThumbnail({
             setHtml(populateTemplate(
               r.templateCode,
               fieldsToResumeData(r.fields as ResumeFields),
-              {},
+              { sections: r.sections ?? [] },
             ));
           } catch (err) {
             console.error("[ResumeThumbnail] fetch error:", err);
@@ -1023,6 +1023,7 @@ export default function BuildResume() {
               resumeId:       r.id,
               resumeTitle:    r.title,
               fields:         r.fields,
+              sections:       r.sections ?? [],
               templateId:     r.templateId,
               templateCode:   r.templateCode ?? null,
               jobDescription: r.jobDescription ?? "",
@@ -1132,7 +1133,7 @@ export default function BuildResume() {
         const populatedHtml = populateTemplate(
           r.templateCode,
           fieldsToResumeData(r.fields as ResumeFields),
-          {},
+          { sections: r.sections ?? [] },
         );
 
         // 3. Send the fully rendered HTML to the PDF export endpoint
@@ -1178,7 +1179,11 @@ export default function BuildResume() {
         if (!res.ok) throw new Error(json.error || "Failed to load resume");
         const r = json.resume ?? json;
         if (!r.templateCode || !r.fields) throw new Error("No template or fields returned");
-        const html = populateTemplate(r.templateCode, fieldsToResumeData(r.fields as ResumeFields), {});
+        const html = populateTemplate(
+          r.templateCode,
+          fieldsToResumeData(r.fields as ResumeFields),
+          { sections: r.sections ?? [] },
+        );
         const template = r.templateName ?? (r.templateId
           ? r.templateId.charAt(0).toUpperCase() + r.templateId.slice(1)
           : "Standard");

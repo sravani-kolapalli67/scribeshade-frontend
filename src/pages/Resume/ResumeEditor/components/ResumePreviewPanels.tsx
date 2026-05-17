@@ -46,12 +46,14 @@ export function TemplateMarketplace({
   templates,
   currentTemplateId,
   fields,
+  sections,
   onSelect,
   onClose,
 }: {
   templates: TemplateItem[];
   currentTemplateId: string;
   fields: ResumeFields;
+  sections: RootState["resumeBuilder"]["sections"];
   onSelect: (id: string, code: string) => void;
   onClose: () => void;
 }) {
@@ -90,7 +92,7 @@ export function TemplateMarketplace({
 
               // Render a tiny scaled iframe preview
               let previewHtml = "";
-              try { previewHtml = populateTemplate(tpl.code, data, {}); } catch { /* ignore */ }
+              try { previewHtml = populateTemplate(tpl.code, data, { sections }); } catch { /* ignore */ }
 
               return (
                 <button
@@ -173,9 +175,11 @@ export function RightPanel({
   const dispatch = useDispatch<AppDispatch>();
   const zoom = useSelector((s: RootState) => s.resumeBuilder.zoom);
   const fields = useSelector((s: RootState) => s.resumeBuilder.fields);
+  const sections = useSelector((s: RootState) => s.resumeBuilder.sections);
 
   // Defer the expensive template render so typing stays snappy.     (rerender-use-deferred-value)
   const deferredFields = useDeferredValue(fields);
+  const deferredSections = useDeferredValue(sections);
 
   const [populatedHtml, setLocalHtml] = useState("");
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -191,7 +195,9 @@ export function RightPanel({
     clearTimeout(populateTimerRef.current);
     populateTimerRef.current = setTimeout(() => {
       try {
-        const html = populateTemplate(templateCode, fieldsToResumeData(deferredFields), {});
+        const html = populateTemplate(templateCode, fieldsToResumeData(deferredFields), {
+          sections: deferredSections,
+        });
         setLocalHtml(html);
         // Mirror to redux so TopBar (PDF export) can read it without prop drilling.
         dispatch(setPopulatedHtml(html));
@@ -200,7 +206,7 @@ export function RightPanel({
       }
     }, 400);
     return () => clearTimeout(populateTimerRef.current);
-  }, [deferredFields, templateCode, dispatch]);
+  }, [deferredFields, deferredSections, templateCode, dispatch]);
 
   const iframeTransformStyle: React.CSSProperties =
     Math.abs(finalScale - 1) < 0.005
@@ -464,4 +470,3 @@ export function FullscreenPreviewDialog({
 }
 
 // ─── FullRewritePanel ─────────────────────────────────────────────────────────────────────────────
-

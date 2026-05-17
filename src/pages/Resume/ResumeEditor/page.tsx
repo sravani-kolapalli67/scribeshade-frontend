@@ -61,6 +61,7 @@ export default function ResumeEditor() {
 
   const isDirty         = useSelector((s: RootState) => s.resumeBuilder.isDirty);
   const fieldsKey       = useSelector((s: RootState) => JSON.stringify(s.resumeBuilder.fields));
+  const sectionsKey     = useSelector((s: RootState) => JSON.stringify(s.resumeBuilder.sections));
   const resumeTitle     = useSelector((s: RootState) => s.resumeBuilder.resumeTitle);
   const autoSaveEnabled = useSelector((s: RootState) => s.resumeBuilder.autoSaveEnabled);
   const savedResumeId   = useSelector((s: RootState) => s.resumeBuilder.savedResumeId);
@@ -117,6 +118,7 @@ export default function ResumeEditor() {
         title:          finalTitle,
         fields:         parsedFields,
         templateId:     resolvedConfig.templateId ?? "classic",
+        sections:       Array.isArray(resolvedConfig.sections) ? resolvedConfig.sections : undefined,
         lockedFields:   isImported ? { name: true, email: true } : {},
         jobDescription: resolvedConfig.jobDescription ?? "",
         jobTitle:       resolvedConfig.jobTitle ?? "",
@@ -155,6 +157,7 @@ export default function ResumeEditor() {
           ...config,
           fields:         data.fields ?? {},
           templateId:     data.templateId ?? config.templateId,
+          sections:       data.sections ?? config.sections,
           resumeTitle:    data.title ?? config.resumeTitle,
           jobDescription: data.jobDescription ?? config.jobDescription ?? "",
           jobTitle:       data.jobTitle ?? config.jobTitle ?? "",
@@ -212,7 +215,40 @@ export default function ResumeEditor() {
     }, 2000);
     return () => { clearTimeout(saveTimerRef.current); clearTimeout(showSavingTimer.current); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fieldsKey, resumeTitle, autoSaveEnabled]);
+  }, [fieldsKey, sectionsKey, resumeTitle, autoSaveEnabled]);
+
+  // Keep local editor state resilient across page refreshes between saves.
+  useEffect(() => {
+    if (!isInitialized || !config) return;
+    try {
+      sessionStorage.setItem(SESSION_CONFIG_KEY, JSON.stringify({
+        ...config,
+        sourceType: config.sourceType ?? "builder",
+        resumeId: savedResumeId ?? config.resumeId ?? null,
+        resumeTitle,
+        title: resumeTitle,
+        fields,
+        sections,
+        templateId,
+        jobDescription,
+        jobTitle,
+        company,
+      }));
+    } catch {
+      // Ignore storage failures (private mode / quota).
+    }
+  }, [
+    isInitialized,
+    config,
+    savedResumeId,
+    resumeTitle,
+    fields,
+    sections,
+    templateId,
+    jobDescription,
+    jobTitle,
+    company,
+  ]);
 
   // ── Keyboard undo/redo ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -302,6 +338,7 @@ export default function ResumeEditor() {
           templates={allTemplatesRef.current}
           currentTemplateId={templateId}
           fields={fields}
+          sections={sections}
           onSelect={handleTemplateSelect}
           onClose={() => setShowTemplateMarket(false)}
         />

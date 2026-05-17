@@ -124,7 +124,7 @@ export function parseRawResume(text: string): ResumeData {
     name: lines[0] || "Your Name", role: "Professional Role",
     email: "", phone: "", links: "", summary: "",
     languages: "", frameworks: "", database: "", tools: "",
-    experiences: [], projects: [], education: [], publication: "",
+    experiences: [], projects: [], education: [], certifications: "", publication: "",
     experienceRaw: "", projectsRaw: "", educationRaw: "",
   };
   const HEADERS = ["PROFILE", "PROJECTS", "TECHNICAL SKILLS", "EDUCATION", "PUBLICATION"];
@@ -219,7 +219,7 @@ export function configToFields(config: Record<string, unknown>): { fields: Parti
       email: "email@example.com", phone: "", links: "",
       summary: manualData?.summary || "",
       languages: "", frameworks: "", database: "", tools: "",
-      experiences: [], projects: [], education: [], publication: "",
+      experiences: [], projects: [], education: [], certifications: "", publication: "",
       experienceRaw: "", projectsRaw: "", educationRaw: "",
     };
   }
