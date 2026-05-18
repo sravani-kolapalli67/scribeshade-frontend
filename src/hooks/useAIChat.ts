@@ -461,13 +461,12 @@ export const useAIChat = () => {
         const reader = response.body?.getReader();
         if (!reader) throw new Error("No reader available");
 
-        const renderedIds = await consumeSegmentedStream(
+        await consumeSegmentedStream(
           reader,
           messageId,
           setAiChat,
           newAiMessage.time,
         );
-        applyQuestionGuardrail(renderedIds, { fallbackQuestion: question });
 
         setAiChat((prev) => {
           const target = prev.find((msg) => msg.id === messageId);
@@ -498,7 +497,7 @@ export const useAIChat = () => {
         if (inFlightRef.current === 0) setIsAnswering(false);
       }
     },
-    [applyQuestionGuardrail],
+    [],
   );
 
   const handleCustomQuery = useCallback(
@@ -555,6 +554,27 @@ export const useAIChat = () => {
 
       setAiChat((prev) => [...prev, newAiMessage]);
 
+      // Build a compact context preamble from the last 3 AI-answered messages
+      // so the model can detect follow-ups and build on prior answers.
+      const recentAiAnswers = aiChatRef.current
+        .filter((m) => m.sender === "AI" && m.text?.trim())
+        .slice(-3);
+      const contextPreamble =
+        recentAiAnswers.length > 0
+          ? recentAiAnswers
+              .map((m, i) => {
+                const q = m.question?.trim() || extractQuestionFromAiText(m.text ?? "");
+                const a = m.text?.trim() ?? "";
+                return q
+                  ? `[Prior answer ${i + 1}]\nQ: ${q}\nA: ${a.slice(0, 400)}${a.length > 400 ? "..." : ""}`
+                  : `[Prior answer ${i + 1}]\n${a.slice(0, 400)}${a.length > 400 ? "..." : ""}`;
+              })
+              .join("\n\n")
+          : "";
+      const enrichedQuery = contextPreamble
+        ? `${contextPreamble}\n\n[New question / follow-up]\n${query}`
+        : query;
+
       try {
         const response = await fetch(
           `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionId}/ai-answer`,
@@ -563,7 +583,7 @@ export const useAIChat = () => {
             headers: {
               "Content-Type": "application/json",
             },
-            body: JSON.stringify({ transcript: query, isCustomQuery: true, aiModel }),
+            body: JSON.stringify({ transcript: enrichedQuery, isCustomQuery: true, aiModel }),
           },
         );
 

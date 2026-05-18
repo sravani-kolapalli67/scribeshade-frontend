@@ -10,6 +10,7 @@ import {
   type CreditPlan,
 } from "@/hooks/useCreditPlans";
 import { useUserCurrency } from "@/hooks/useUserCurrency";
+import { useCreditBrackets } from "@/hooks/useCreditBrackets";
 import {
   CURRENCY_SYMBOLS,
   CURRENCY_FLAGS,
@@ -72,8 +73,13 @@ export function CreditPlansSection({ onSuccess }: CreditPlansSectionProps) {
   const [paying, setPaying]             = useState(false);
 
   const { plans, isLoading } = useCreditPlans(currency);
+  const { brackets } = useCreditBrackets();
   const maxScore = plans.reduce((m, p) => Math.max(m, valueScore(p)), 0);
   const sym      = CURRENCY_SYMBOLS[currency];
+
+  const rateLabel = brackets[0]
+    ? `${brackets[0].creditsPerMinute} cr / min`
+    : "0.5 cr / min";
 
   const handlePay = useCallback(async (plan: CreditPlan) => {
     setPaying(true);
@@ -227,7 +233,7 @@ export function CreditPlansSection({ onSuccess }: CreditPlansSectionProps) {
           {[
             { icon: <TimerOff className="h-3 w-3" />, label: "Never expire" },
             { icon: <ShieldCheck className="h-3 w-3" />, label: "Instant delivery" },
-            { icon: <Sparkles className="h-3 w-3" />, label: "1 credit = 1h call" },
+            { icon: <Sparkles className="h-3 w-3" />, label: rateLabel },
           ].map((t) => (
             <span
               key={t.label}

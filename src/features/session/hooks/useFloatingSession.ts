@@ -440,16 +440,17 @@ export function useFloatingSession() {
       dispatch(setCurrentResponseIndex(0));
       dispatch(setIsResponsesExpanded(true));
     } else if (curr > prev) {
-      // New card(s) arrived. Always follow the latest card so the user sees
-      // the streaming answer as it comes in. The previous logic only advanced
-      // when currentResponseIndex === prev - 1, which was never true when
-      // prev was 0 (0 === -1 is false), so multi-card Analyze Screen results
-      // left the index stuck at 0 pointing at an empty/removed card.
-      dispatch(setCurrentResponseIndex(curr - 1));
+      // New card(s) arrived. Only auto-advance to the latest card when the
+      // user was already viewing the last one — preserves manual browsing.
+      // Also clamp to curr-1 to ensure we never dispatch an out-of-bounds
+      // index (guards against Redux racing ahead of React state).
+      if (currentResponseIndex >= prev - 1) {
+        dispatch(setCurrentResponseIndex(curr - 1));
+      }
     }
 
     prevResponsesLenRef.current = curr;
-  }, [aiResponses.length, dispatch]);
+  }, [aiResponses.length, currentResponseIndex, dispatch]);
 
   // Auto-expand the responses panel the moment the user triggers a generation
   // (AI Answer or Analyze Screen) so the "Generating response…" loader is
@@ -463,7 +464,7 @@ export function useFloatingSession() {
   // ── AI action handlers ──────────────────────────────────────────────────────
 
   const handleAiAnswerClick = useCallback(async () => {
-    if (isEmittingRef.current || isAnswering || isAnalyzing) return;
+    if (isEmittingRef.current) return;
     const info = sessionInfoRef.current;
     if (!info) return;
 
@@ -482,9 +483,11 @@ export function useFloatingSession() {
     try {
       await handleAiAnswer(info.sessionId, fullTranscript, selectedModelRef.current);
     } finally {
-      setTimeout(() => { isEmittingRef.current = false; }, 800);
+      // Keep the lock for 500 ms after the stream ends so rapid re-taps
+      // (double-click, keyboard repeat) cannot immediately queue another call.
+      setTimeout(() => { isEmittingRef.current = false; }, 500);
     }
-  }, [isAnswering, isAnalyzing, handleAiAnswer, micInterimTranscript, tabInterimTranscript]);
+  }, [handleAiAnswer, micInterimTranscript, tabInterimTranscript]);
 
   const handleAnalyzeScreenClick = useCallback(
     async (screenshotBlob: Blob) => {

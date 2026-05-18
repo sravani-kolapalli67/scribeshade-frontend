@@ -23,6 +23,7 @@ import {
   EyeIcon,
   PanelLeftIcon,
   FileIcon,
+  SparklesIcon,
 } from "lucide-react";
 import { Separator } from "./ui/separator";
 import { useUser } from "@clerk/clerk-react";
@@ -73,6 +74,11 @@ const data = {
       title: "Document",
       url: "/document",
       icon: FileIcon,
+    },
+    {
+      title: "Assistant",
+      url: "/assistant",
+      icon: SparklesIcon,
     },
     {
       title: "Question Bank",

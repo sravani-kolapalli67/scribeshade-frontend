@@ -359,7 +359,7 @@ export function ConnectDialog({
                     />
                     <span className="text-muted-foreground">
                       {maxBracket
-                        ? `Up to ${maxBracket.creditsFull} credit · first ${maxBracket.freeZoneMinutes} min free`
+                        ? `${maxBracket.creditsPerMinute} cr/min · first ${maxBracket.graceZoneMinutes} min free`
                         : "Free session"}
                     </span>
                   </div>

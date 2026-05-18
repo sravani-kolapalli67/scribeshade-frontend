@@ -31,6 +31,7 @@ import {
 } from "@/components/Sessions/ConnectDialog";
 import { BuyCreditsDialog } from "@/components/Billing/BuyCreditsDialog";
 import { useCreditsBalance } from "@/hooks/useCreditsBalance";
+import { useCreditBrackets } from "@/hooks/useCreditBrackets";
 
 /**
  * Segments a single transcript chunk into individual interview questions.
@@ -153,6 +154,9 @@ export default function ActiveSession() {
   const [creditWarning, setCreditWarning] = useState<number | null>(null); // remaining minutes
   const [buyCreditsOpen, setBuyCreditsOpen] = useState(false);
   const { refresh: refreshBalance } = useCreditsBalance();
+  const { brackets: creditBrackets } = useCreditBrackets();
+  const graceZoneMinutes = creditBrackets[0]?.graceZoneMinutes ?? 5;
+  const creditsPerMinute = parseFloat(creditBrackets[0]?.creditsPerMinute ?? "0.5");
 
   const handleConnectSuccess = useCallback(
     (
@@ -181,9 +185,6 @@ export default function ActiveSession() {
   // Keep ref in sync with state so endSessionNow always reads the latest value
   sessionStartedAtRef.current = sessionStartedAt;
 
-  const FREE_ZONE_MINUTES = 5;
-  const CREDITS_PER_MINUTE = 0.5;
-
   const endSessionNow = useCallback(async () => {
     if (!id) return;
     // Guard against double-invocation (both heartbeat and SSE can fire simultaneously)
@@ -204,8 +205,8 @@ export default function ActiveSession() {
       ? Math.ceil((Date.now() - new Date(startedAt).getTime()) / 60_000)
       : null;
 
-    // Client-side free-zone determination (≤5 min → no charge)
-    const isFreeZone = durationMinutes !== null && durationMinutes <= FREE_ZONE_MINUTES;
+    // Client-side grace-zone determination (≤ graceZoneMinutes → no charge)
+    const isFreeZone = durationMinutes !== null && durationMinutes <= graceZoneMinutes;
 
     try {
       // For ephemeral sessions, do NOT send transcript to the backend.
@@ -226,9 +227,9 @@ export default function ActiveSession() {
       );
       localStorage.removeItem(`aiUsage_${id}`);
 
-      // Free-zone: no credits charged — no need to poll
+      // Grace-zone: no credits charged — no need to poll
       if (isFreeZone) {
-        toast.success("Session ended — no credits charged (under 5 min)");
+        toast.success(`Session ended — no credits charged (under ${graceZoneMinutes} min)`);
       }
 
       // For paid sessions, wait up to 8 seconds for the BullMQ job to mark
@@ -260,10 +261,10 @@ export default function ActiveSession() {
             attempts++;
           }
           if (deductedReason === "FREE_ZONE") {
-            toast.success("Session ended — no credits charged (under 5 min)");
+            toast.success(`Session ended — no credits charged (under ${graceZoneMinutes} min)`);
           } else if (deductedCredits) {
             const mins = durationMinutes ?? 0;
-            toast.info(`Session ended — ${deductedCredits} credits deducted (${mins} min × ${CREDITS_PER_MINUTE} credits/min)`);
+            toast.info(`Session ended — ${deductedCredits} credits deducted (${mins} min × ${creditsPerMinute} credits/min)`);
           }
         }
       }
@@ -288,7 +289,7 @@ export default function ActiveSession() {
       }
       navigate("/sessions");
     }
-  }, [id, messages, maxAllowedMinutes, navigate, saveTranscriptEnabled]);
+  }, [id, messages, maxAllowedMinutes, navigate, saveTranscriptEnabled, graceZoneMinutes, creditsPerMinute]);
 
   const onTimeUp = useCallback(async () => {
     toast.info("Free session time is up!");

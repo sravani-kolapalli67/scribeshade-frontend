@@ -1042,90 +1042,104 @@ const FloatingApp: React.FC = () => {
       {/* AI Responses Panel */}
       {(session.isAnswering || session.isAnalyzing || isCapturePhase || session.aiResponses.length > 0) && (
         <div className="flex flex-col border-t border-white/10">
-          <div className="px-3 py-2 flex items-center justify-between shrink-0">
-            <div className="flex items-center gap-1">
-              <button
-                onClick={session.goToPrevResponse}
-                disabled={session.currentResponseIndex === 0 || session.aiResponses.length === 0}
-                className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-25 disabled:cursor-not-allowed text-white transition-all active:scale-95"
-              >
-                <ChevronLeft size={14} />
-              </button>
-              <button
-                onClick={session.goToNextResponse}
-                disabled={session.currentResponseIndex >= session.aiResponses.length - 1}
-                className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-25 disabled:cursor-not-allowed text-white transition-all active:scale-95"
-              >
-                <ChevronRight size={14} />
-              </button>
-              {session.aiResponses.length > 1 && (
-                <span className="text-[11px] text-white/40 ml-1 font-mono">
-                  {session.currentResponseIndex + 1}/{session.aiResponses.length}
-                </span>
-              )}
-              {(session.isAnswering || session.isAnalyzing || isCapturePhase) && session.aiResponses.length === 0 && (
-                <span className="flex items-center gap-1.5 ml-1 text-[11px] text-blue-400/80">
-                  <Loader2 size={11} className="animate-spin" />
-                  {isCapturePhase ? "Capturing screen..." : "Generating..."}
-                </span>
-              )}
-            </div>
-            <div className="flex items-center gap-2">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    onClick={() =>
-                      void session.handleRegenerateResponse(
-                        session.aiResponses[session.currentResponseIndex]?.id ?? "",
-                      )
-                    }
-                    disabled={
-                      !session.aiResponses[session.currentResponseIndex]?.id ||
-                      session.isAnswering ||
-                      session.isAnalyzing ||
-                      isCapturePhase
-                    }
-                    className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-25 disabled:cursor-not-allowed text-white transition-all active:scale-95"
-                  >
-                    <RotateCcw size={13} />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="left" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
-                  Regenerate answer
-                </TooltipContent>
-              </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  onClick={session.toggleResponsesExpanded}
-                  className="w-7 h-7 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 hover:text-blue-400 text-white/50 transition-all active:scale-95"
-                >
-                  {session.isResponsesExpanded ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="left" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
-                {session.isResponsesExpanded ? "Collapse" : "Expand"}
-              </TooltipContent>
-            </Tooltip>
-            </div>
-          </div>
+          {(() => {
+            // Clamp the Redux index to the current React array length so we
+            // never access aiResponses[undefined] when Redux races ahead of
+            // the React state update (root cause of blank panel / wrong counter).
+            const safeIndex = session.aiResponses.length > 0
+              ? Math.min(session.currentResponseIndex, session.aiResponses.length - 1)
+              : 0;
+            const currentResponse = session.aiResponses[safeIndex];
 
-          {session.isResponsesExpanded && session.aiResponses.length > 0 && (
-            <div className="border-t border-white/10 max-h-120 overflow-y-auto overflow-x-hidden no-scrollbar">
-              <AnswerArea
-                responses={[
-                  {
-                    messageId: session.aiResponses[session.currentResponseIndex]?.id ?? "",
-                    text: session.aiResponses[session.currentResponseIndex]?.text ?? "",
-                    isStreaming:
-                      session.currentResponseIndex === session.aiResponses.length - 1 &&
-                      (session.isAnswering || session.isAnalyzing),
-                  },
-                ].filter((r) => r.messageId)}
-                isStreaming={session.isAnswering || session.isAnalyzing}
-              />
-            </div>
-          )}
+            return (
+              <>
+                <div className="px-3 py-2 flex items-center justify-between shrink-0">
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={session.goToPrevResponse}
+                      disabled={safeIndex === 0 || session.aiResponses.length === 0}
+                      className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-25 disabled:cursor-not-allowed text-white transition-all active:scale-95"
+                    >
+                      <ChevronLeft size={14} />
+                    </button>
+                    <button
+                      onClick={session.goToNextResponse}
+                      disabled={safeIndex >= session.aiResponses.length - 1}
+                      className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-25 disabled:cursor-not-allowed text-white transition-all active:scale-95"
+                    >
+                      <ChevronRight size={14} />
+                    </button>
+                    {session.aiResponses.length > 1 && (
+                      <span className="text-[11px] text-white/40 ml-1 font-mono">
+                        {safeIndex + 1}/{session.aiResponses.length}
+                      </span>
+                    )}
+                    {(session.isAnswering || session.isAnalyzing || isCapturePhase) && session.aiResponses.length === 0 && (
+                      <span className="flex items-center gap-1.5 ml-1 text-[11px] text-blue-400/80">
+                        <Loader2 size={11} className="animate-spin" />
+                        {isCapturePhase ? "Capturing screen..." : "Generating..."}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          onClick={() =>
+                            void session.handleRegenerateResponse(
+                              currentResponse?.id ?? "",
+                            )
+                          }
+                          disabled={
+                            !currentResponse?.id ||
+                            session.isAnswering ||
+                            session.isAnalyzing ||
+                            isCapturePhase
+                          }
+                          className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-25 disabled:cursor-not-allowed text-white transition-all active:scale-95"
+                        >
+                          <RotateCcw size={13} />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="left" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
+                        Regenerate answer
+                      </TooltipContent>
+                    </Tooltip>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          onClick={session.toggleResponsesExpanded}
+                          className="w-7 h-7 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 hover:text-blue-400 text-white/50 transition-all active:scale-95"
+                        >
+                          {session.isResponsesExpanded ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="left" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
+                        {session.isResponsesExpanded ? "Collapse" : "Expand"}
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                </div>
+
+                {session.isResponsesExpanded && session.aiResponses.length > 0 && (
+                  <div className="border-t border-white/10 max-h-120 overflow-y-auto overflow-x-hidden no-scrollbar">
+                    <AnswerArea
+                      responses={[
+                        {
+                          messageId: currentResponse?.id ?? "",
+                          text: currentResponse?.text ?? "",
+                          isStreaming:
+                            safeIndex === session.aiResponses.length - 1 &&
+                            (session.isAnswering || session.isAnalyzing),
+                        },
+                      ].filter((r) => r.messageId)}
+                      isStreaming={session.isAnswering || session.isAnalyzing}
+                    />
+                  </div>
+                )}
+              </>
+            );
+          })()}
 
           {session.isResponsesExpanded &&
             (session.isAnswering || session.isAnalyzing || isCapturePhase) &&

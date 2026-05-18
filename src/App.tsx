@@ -55,6 +55,7 @@ const AIProjects = lazy(() => import("./pages/AIProjects/page"));
 const ProjectRecommendations = lazy(
   () => import("./pages/AIProjects/ProjectRecommendations/page"),
 );
+const AssistantPage = lazy(() => import("./pages/Assistant/page"));
 
 function PageLoader() {
   return (
@@ -195,6 +196,30 @@ function App() {
   // ── Temporary design preview — remove once ResumeEditorV2 is wired up ──
   if (location.pathname === "/resume/editor-v2") {
     return <ResumeEditorV2 />;
+  }
+
+  // Full-bleed assistant layout — needs full viewport height for chat UI
+  if (location.pathname === "/assistant") {
+    return (
+      <SidebarProvider>
+        <AppSidebar />
+        <SidebarInset className="flex flex-col h-screen overflow-hidden">
+          <TauriReturnBanner />
+          <Navbar />
+          <div className="flex-1 overflow-hidden min-h-0">
+            <Suspense fallback={<PageLoader />}>
+              <Routes>
+                <Route path="/assistant" element={<AssistantPage />} />
+                <Route
+                  path="*"
+                  element={<Navigate to="/assistant" replace />}
+                />
+              </Routes>
+            </Suspense>
+          </div>
+        </SidebarInset>
+      </SidebarProvider>
+    );
   }
 
   // Full-bleed editor layout — no padding wrapper, no max-width constraint

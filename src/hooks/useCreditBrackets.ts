@@ -5,7 +5,7 @@ export interface CreditBracket {
   bracketMinutes: number;
   creditsFull: string;
   creditsHalf: string;
-  freeZoneMinutes: number;
+  creditsPerMinute: string;
   graceZoneMinutes: number;
   isActive: boolean;
 }
