@@ -29,17 +29,40 @@ export async function checkForUpdates(onUserClick = false) {
     }
 
     if (update.available) {
-      const yes = await ask(
-        `Version ${update.version} is available!\n\nRelease notes:\n${update.body ?? "No notes provided."}`,
-        {
-          title: "Update Available",
-          okLabel: "Update Now",
-          cancelLabel: "Later",
-        },
-      );
-      if (yes) {
+      if (onUserClick) {
+        // Manual user flow: Prompt before download
+        const yes = await ask(
+          `Version ${update.version} is available!\n\nRelease notes:\n${update.body ?? "No notes provided."}\n\nWould you like to download, install, and restart ScribeShade now?`,
+          {
+            title: "Update Available",
+            okLabel: "Update & Restart",
+            cancelLabel: "Later",
+          },
+        );
+        if (yes) {
+          await update.downloadAndInstall();
+          await relaunch();
+        }
+      } else {
+        // Silent background flow: Download and install first, then prompt to relaunch
+        console.log(`[updater] Silent update available: v${update.version}. Downloading in background...`);
+        
         await update.downloadAndInstall();
-        await relaunch();
+        
+        console.log(`[updater] Silent update installed. Prompting for relaunch.`);
+        
+        const restartNow = await ask(
+          `A new update (v${update.version}) has been downloaded and installed successfully.\n\nWould you like to restart ScribeShade now to apply the changes?`,
+          {
+            title: "Update Installed",
+            okLabel: "Restart Now",
+            cancelLabel: "Later",
+          }
+        );
+        
+        if (restartNow) {
+          await relaunch();
+        }
       }
     } else if (onUserClick) {
       await message("You are on the latest version!", {
