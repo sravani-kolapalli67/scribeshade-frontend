@@ -387,88 +387,98 @@ const AnswerArea: React.FC<{
                 "[&_td]:border [&_td]:border-white/10 [&_td]:px-2 [&_td]:py-1",
               ].join(" ")}
             >
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
-                components={{
-                  h1: ({ children }) => (
-                    <h1 className="text-base font-bold mb-2 mt-2 text-white">
-                      {children}
-                    </h1>
-                  ),
-                  h2: ({ children }) => (
-                    <h2 className="text-sm font-bold mb-2 mt-2 text-white/90">
-                      {children}
-                    </h2>
-                  ),
-                  h3: ({ children }) => (
-                    <h3 className="text-sm font-semibold mb-1 mt-1 text-white/80">
-                      {children}
-                    </h3>
-                  ),
-                  li: ({ children }) => {
-                    const text = (() => {
-                      const extract = (node: any): string => {
-                        if (typeof node === "string") return node;
-                        if (Array.isArray(node)) return node.map(extract).join("");
-                        if (node?.props?.children) return extract(node.props.children);
-                        return "";
-                      };
-                      return extract(children);
-                    })();
-                    return (
-                      <li className="mb-0 flex items-start gap-2 group/li">
-                        <span
-                          aria-hidden="true"
-                          className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-blue-300/80"
-                        />
-                        <span className="flex-1 min-w-0">{children}</span>
-                        {text && (
-                          <span className="opacity-0 group-hover/li:opacity-100 transition-opacity shrink-0 mt-0.5">
-                            <InlineCopyButton text={text} />
-                          </span>
-                        )}
-                      </li>
-                    );
-                  },
-                  strong: ({ children }) => {
-                    const text = String(children);
-                    const config = getKeywordConfig(text);
-                    return (
-                      <strong
-                        className={cn(
-                          "font-bold transition-colors",
-                          config.color,
-                        )}
-                      >
-                        {children}
-                      </strong>
-                    );
-                  },
-                  pre: ({ children }) => {
-                    const codeElement = children as any;
-                    const language =
-                      codeElement?.props?.className?.replace("language-", "") ||
-                      "";
-                    return (
-                      <CodeBlock language={language}>{children}</CodeBlock>
-                    );
-                  },
-                  code: ({ node, inline, children, ...props }: any) => {
-                    if (inline) {
-                      return (
-                        <code className="px-1.5 py-0.5 rounded text-[12px] font-mono font-medium bg-white/10 text-blue-200 mx-0.5">
+              {resp.isStreaming && !displayText.trim() ? (
+                <div className="space-y-2 animate-pulse mt-2 py-1">
+                  <div className="h-3.5 bg-white/10 rounded w-11/12" />
+                  <div className="h-3.5 bg-white/10 rounded w-3/4" />
+                  <div className="h-3.5 bg-white/10 rounded w-5/6" />
+                </div>
+              ) : (
+                <>
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      h1: ({ children }) => (
+                        <h1 className="text-base font-bold mb-2 mt-2 text-white">
                           {children}
-                        </code>
-                      );
-                    }
-                    return <code {...props}>{children}</code>;
-                  },
-                }}
-              >
-                {parsed.answer}
-              </ReactMarkdown>
-              {resp.isStreaming && (
-                <span className="ml-1 inline-block h-3.5 w-0.5 bg-blue-400 animate-pulse" />
+                        </h1>
+                      ),
+                      h2: ({ children }) => (
+                        <h2 className="text-sm font-bold mb-2 mt-2 text-white/90">
+                          {children}
+                        </h2>
+                      ),
+                      h3: ({ children }) => (
+                        <h3 className="text-sm font-semibold mb-1 mt-1 text-white/80">
+                          {children}
+                        </h3>
+                      ),
+                      li: ({ children }) => {
+                        const text = (() => {
+                          const extract = (node: any): string => {
+                            if (typeof node === "string") return node;
+                            if (Array.isArray(node)) return node.map(extract).join("");
+                            if (node?.props?.children) return extract(node.props.children);
+                            return "";
+                          };
+                          return extract(children);
+                        })();
+                        return (
+                          <li className="mb-0 flex items-start gap-2 group/li">
+                            <span
+                              aria-hidden="true"
+                              className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-blue-300/80"
+                            />
+                            <span className="flex-1 min-w-0">{children}</span>
+                            {text && (
+                              <span className="opacity-0 group-hover/li:opacity-100 transition-opacity shrink-0 mt-0.5">
+                                <InlineCopyButton text={text} />
+                              </span>
+                            )}
+                          </li>
+                        );
+                      },
+                      strong: ({ children }) => {
+                        const text = String(children);
+                        const config = getKeywordConfig(text);
+                        return (
+                          <strong
+                            className={cn(
+                              "font-bold transition-colors",
+                              config.color,
+                            )}
+                          >
+                            {children}
+                          </strong>
+                        );
+                      },
+                      pre: ({ children }) => {
+                        const codeElement = children as any;
+                        const language =
+                          codeElement?.props?.className?.replace("language-", "") ||
+                          "";
+                        return (
+                          <CodeBlock language={language}>{children}</CodeBlock>
+                        );
+                      },
+                      code: ({ node, inline, children, ...props }: any) => {
+                        if (inline) {
+                          return (
+                            <code className="px-1.5 py-0.5 rounded text-[12px] font-mono font-medium bg-white/10 text-blue-200 mx-0.5">
+                              {children}
+                            </code>
+                          );
+                        }
+                        return <code {...props}>{children}</code>;
+                      },
+                    }}
+                  >
+                    {parsed.answer}
+                  </ReactMarkdown>
+                  {resp.isStreaming && (
+                    <span className="ml-1 inline-block h-3.5 w-0.5 bg-blue-400 animate-pulse align-middle" />
+                  )}
+                </>
               )}
             </div>
           </div>

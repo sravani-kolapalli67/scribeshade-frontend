@@ -469,19 +469,32 @@ export function useFloatingSession() {
     if (!info) return;
 
     const msgs = messagesRef.current;
-    const combined = msgs
-      .map((m) => `[${m.sender === "User" ? "YOU" : "Interviewer"}]: ${m.text}`)
-      .join("\n");
-    const fullTranscript =
-      combined +
-      (micInterimTranscript ? `\n[YOU]: ${micInterimTranscript}` : "") +
-      (tabInterimTranscript ? `\n[Interviewer]: ${tabInterimTranscript}` : "");
 
-    if (!fullTranscript.trim()) return;
+    // Resolve the SPECIFIC question to answer.
+    // Priority: live interim Interviewer text → last final Interviewer message.
+    // Sending only the specific question (not the whole transcript blob) ensures
+    // the AI answers THIS question instead of fixating on whatever was last in a
+    // 50-message concatenated dump. The backend fetches full session history from
+    // DB for context, so nothing is lost.
+    const interimText = micInterimTranscript || tabInterimTranscript;
+    const interviewerInterim =
+      !micInterimTranscript && tabInterimTranscript ? tabInterimTranscript : null;
+
+    // Prefer the live (not-yet-final) interviewer speech; fall back to the last
+    // finalised Interviewer message in the transcript; fall back to the last
+    // finalised message of any sender; fall back to any live interim text.
+    const question =
+      interviewerInterim ||
+      [...msgs].reverse().find((m) => m.sender === "Interviewer")?.text ||
+      [...msgs].reverse().find((m) => m.text)?.text ||
+      interimText ||
+      "";
+
+    if (!question.trim()) return;
 
     isEmittingRef.current = true;
     try {
-      await handleAiAnswer(info.sessionId, fullTranscript, selectedModelRef.current);
+      await handleAiAnswer(info.sessionId, question, selectedModelRef.current);
     } finally {
       // Keep the lock for 500 ms after the stream ends so rapid re-taps
       // (double-click, keyboard repeat) cannot immediately queue another call.

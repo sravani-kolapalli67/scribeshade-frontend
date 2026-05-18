@@ -758,11 +758,13 @@ export default function ActiveSession() {
         : null;
 
     // Prefer the live (not-yet-final) interviewer speech; fall back to the last
-    // finalised Interviewer message in the transcript.
+    // finalised Interviewer message in the transcript; fall back to the last
+    // finalised message of any sender; fall back to any live interim text.
     const question =
       interviewerInterim ||
       [...messages].reverse().find((m) => m.sender === "Interviewer")?.text ||
-      interimText || // last resort: any live text (even from mic)
+      [...messages].reverse().find((m) => m.text)?.text ||
+      interimText ||
       "";
 
     if (!question) return;
