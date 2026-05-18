@@ -78,7 +78,7 @@ export function CreditPlansSection({ onSuccess }: CreditPlansSectionProps) {
   const sym      = CURRENCY_SYMBOLS[currency];
 
   const rateLabel = brackets[0]
-    ? `${brackets[0].creditsPerMinute} cr / min`
+    ? `${parseFloat(brackets[0].creditsPerMinute) * 60} cr / hour`
     : "0.5 cr / min";
 
   const handlePay = useCallback(async (plan: CreditPlan) => {
