@@ -20,17 +20,23 @@ export function DesktopAuthHydrator({ children, source, loadingFallback }: Deskt
   const { sessionId } = useAuth();
   const { setActive, signOut } = useClerk();
 
+  const [hydrationState, setHydrationState] = React.useState<'idle' | 'restoring' | 'completed'>('idle');
   const [hydrated, setHydrated] = React.useState<boolean>(() => !isTauri());
-  const restoreAttemptedRef = React.useRef(false);
+
+  const isSignedInRef = React.useRef(isSignedIn);
+  React.useEffect(() => {
+    isSignedInRef.current = isSignedIn;
+  }, [isSignedIn]);
 
   React.useEffect(() => {
     if (!isTauri()) {
+      setHydrationState('completed');
       setHydrated(true);
       return;
     }
-    if (!isLoaded || restoreAttemptedRef.current) return;
+    if (!isLoaded || hydrationState !== 'idle') return;
 
-    restoreAttemptedRef.current = true;
+    setHydrationState('restoring');
 
     (async () => {
       try {
@@ -43,15 +49,29 @@ export function DesktopAuthHydrator({ children, source, loadingFallback }: Deskt
 
         if (!isSignedIn && persistedSessionId) {
           await setActive({ session: persistedSessionId });
-          console.info("[auth/hydrator] session restored", { source });
+          console.info("[auth/hydrator] setActive completed", { source });
+
+          // Wait for Clerk's React state to reflect the sign-in status (max 3 seconds)
+          let checks = 0;
+          while (checks < 30) {
+            if (isSignedInRef.current) {
+              console.info("[auth/hydrator] Clerk state reflected signed-in status", { source });
+              break;
+            }
+            await new Promise((r) => setTimeout(r, 100));
+            checks++;
+          }
         }
       } catch (error) {
         console.warn("[auth/hydrator] session restore failed", { source, error });
+        // The session was invalid or expired, so clear it
+        await clearPersistedDesktopSession().catch(() => {});
       } finally {
+        setHydrationState('completed');
         setHydrated(true);
       }
     })();
-  }, [isLoaded, isSignedIn, setActive, source]);
+  }, [isLoaded, setActive, source]);
 
   React.useEffect(() => {
     if (!isTauri()) return;
@@ -89,7 +109,7 @@ export function DesktopAuthHydrator({ children, source, loadingFallback }: Deskt
   }, [isLoaded, isSignedIn, setActive, signOut, source]);
 
   React.useEffect(() => {
-    if (!isTauri() || !isLoaded) return;
+    if (!isTauri() || !isLoaded || hydrationState !== 'completed') return;
 
     (async () => {
       try {
@@ -109,7 +129,7 @@ export function DesktopAuthHydrator({ children, source, loadingFallback }: Deskt
         console.warn("[auth/persist] update failed", { source, error });
       }
     })();
-  }, [hydrated, isLoaded, isSignedIn, sessionId, source]);
+  }, [hydrationState, hydrated, isLoaded, isSignedIn, sessionId, source]);
 
   if (!isLoaded || !hydrated) {
     return (
