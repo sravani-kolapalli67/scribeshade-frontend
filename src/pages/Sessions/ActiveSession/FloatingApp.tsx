@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { Provider } from "react-redux";
 import { ClerkProvider } from "@clerk/clerk-react";
 import { invoke } from "@tauri-apps/api/core";
+import { tauriEvents } from "@/services/tauriEvents";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
@@ -529,6 +530,22 @@ const FloatingApp: React.FC = () => {
     setOverlayPrivateState(v);
     savePrivateMode(v);
     invoke("toggle_content_protection", { protected: v }).catch(console.error);
+    // Broadcast to the launcher window (separate JS context, no shared Redux).
+    tauriEvents.emitPrivateModeChanged(v).catch(console.error);
+  }, []);
+
+  // ── Private mode cross-window sync ─────────────────────────────────────────
+  // Listen for changes emitted by the launcher and update local state only.
+  // Rust protection and localStorage are already handled by the emitting window.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    tauriEvents
+      .onPrivateModeChanged((value) => {
+        setOverlayPrivateState(value);
+      })
+      .then((fn) => { unlisten = fn; })
+      .catch(console.error);
+    return () => { unlisten?.(); };
   }, []);
 
   // Ref for safe zoom measurement (points to the FloatingSurface root).

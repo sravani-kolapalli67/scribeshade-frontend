@@ -133,6 +133,8 @@ function WidgetContent() {
     (v: boolean) => {
       dispatch(setPrivateMode__(v));
       invoke("toggle_content_protection", { protected: v }).catch(console.error);
+      // Broadcast to the floating window (separate JS context, no shared Redux).
+      tauriEvents.emitPrivateModeChanged(v).catch(console.error);
     },
     [dispatch],
   );
@@ -294,6 +296,23 @@ function WidgetContent() {
     };
   }, [dispatch, setCollapsed]);
 
+  // ── Private mode cross-window sync ──────────────────────────────────────
+  // Launcher and floating are separate JS contexts with no shared Redux store.
+  // Listen for changes emitted by the floating window and apply them here.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    tauriEvents
+      .onPrivateModeChanged((value) => {
+        dispatch(setPrivateMode__(value));
+        // Rust protection is already applied by the emitting window via
+        // toggle_content_protection (which applies to all windows). No
+        // re-invoke needed here.
+      })
+      .then((fn) => { unlisten = fn; })
+      .catch(console.error);
+    return () => { unlisten?.(); };
+  }, [dispatch]);
+
   // ── Session ended — reset ALL state to clean defaults ─────────────────────
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -303,14 +322,15 @@ function WidgetContent() {
         dispatch(resetSessionFlow());
         // 2. Clear the session-active lock so private mode toggle is unblocked
         setIsSessionActive(false);
-        // 3. Sync Redux settings with what resetOverlaySettings() wrote to localStorage
-        //    (mini window calls resetOverlaySettings() before closing, so localStorage
-        //    already has the right values — we just need to push them into Redux)
-        dispatch(setPrivateMode__(true));
+        // 3. Sync Redux settings with what resetOverlaySettings() wrote to localStorage.
+        //    Read actual stored value — do NOT hardcode true, which was overriding
+        //    the user's preference every time a session ended.
+        const storedPrivate = getPrivateMode();
+        dispatch(setPrivateMode__(storedPrivate));
         dispatch(setZoom_(ZOOM_DEFAULT));
         dispatch(setOpacity_(OPACITY_DEFAULT));
-        // 4. Re-apply content protection in Rust (private=true → protection ON)
-        invoke("toggle_content_protection", { protected: true }).catch(console.error);
+        // 4. Re-apply content protection in Rust using the actual stored value.
+        invoke("toggle_content_protection", { protected: storedPrivate }).catch(console.error);
         // 5. Expand the widget
         setCollapsed(false);
       })

@@ -463,6 +463,39 @@ export function useFloatingSession() {
     };
   }, []);
 
+  // ── sessionStorage hydration — HMR / page-reload recovery ─────────────────
+  // The floating window reuses the same WebView across sessions (it is never
+  // destroyed, only hidden). On a Vite HMR reload React fully remounts, wiping
+  // all in-memory state. The session-init Tauri event is one-shot and will
+  // NOT be re-emitted. Read the payload we persisted on the last live event
+  // and restore Redux so the UI continues from where it was.
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem("scribeshade.session-init");
+      if (!raw) return;
+      const info: SessionInitData = JSON.parse(raw);
+      if (!info?.sessionId) return;
+
+      console.log("[useFloatingSession] HMR/reload detected — restoring session from sessionStorage:", info.sessionId);
+
+      // Restore Redux session state (model, sessionId, etc.).
+      // messages are not persisted — they are ephemeral transcript entries.
+      dispatch(initSession(info));
+
+      // Tell Rust the session is still active (guards private mode lock etc.)
+      invoke("set_session_active", { active: true }).catch(() => {});
+
+      // Re-arm system audio: HMR cleanup tore down the audio pipeline,
+      // so we need it to restart. captureArmed → true triggers the
+      // "Arm → start system audio" effect below.
+      setCaptureArmed(true);
+    } catch {
+      // Corrupt or missing sessionStorage entry — start fresh.
+    }
+    // Run once on mount only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ── session-init Tauri event ────────────────────────────────────────────────
 
   useEffect(() => {

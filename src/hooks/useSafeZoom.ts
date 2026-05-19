@@ -112,13 +112,10 @@ export function useSafeZoom(
 
     setSafeMax(nextMax);
 
-    // Auto-clamp current zoom if content just grew and max dropped below it
-    const cur = zoomRef.current;
-    if (cur > nextMax) {
-      const clamped = +nextMax.toFixed(2);
-      setZoomRef.current(clamped);
-      saveZoom(clamped);
-    }
+    // NOTE: We intentionally do NOT auto-clamp the current zoom here.
+    // safeMax is a cap on the zoom controls (prevents zooming further in);
+    // it must not silently reset the user's zoom when content height changes
+    // between navigation steps (e.g. session creation step 1 → step 2).
   }, []);
 
   // Attach ResizeObserver to the natural-size content element

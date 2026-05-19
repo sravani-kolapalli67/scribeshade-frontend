@@ -44,4 +44,13 @@ export const tauriEvents = {
 
   emitInspectAuth: (payload: InspectAuthPayload): Promise<void> =>
     emitTo("inspect", "inspect:auth", payload),
+
+  // ── Private mode cross-window sync ───────────────────────────────────────
+  // Broadcast whenever any window toggles private mode so both the launcher
+  // and floating windows stay in sync without a shared Redux store.
+  emitPrivateModeChanged: (value: boolean): Promise<void> =>
+    emit("overlay:private-mode-changed", { value }),
+
+  onPrivateModeChanged: (cb: (value: boolean) => void): Promise<UnlistenFn> =>
+    listen<{ value: boolean }>("overlay:private-mode-changed", (e) => cb(e.payload.value)),
 } as const;
