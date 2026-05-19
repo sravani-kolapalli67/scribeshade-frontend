@@ -10,8 +10,8 @@ export const tauriOverlay = {
   getCursorPosition: (): Promise<[number, number]> =>
     invoke<[number, number]>("get_cursor_position"),
 
-  // setIgnoreCursorEvents: (v: boolean): Promise<void> =>
-  //   invoke("set_cursor_passthrough", { passthrough: v }),
+  setIgnoreCursorEvents: (v: boolean): Promise<void> =>
+    invoke("set_cursor_passthrough", { passthrough: v }),
 
   getOuterPosition: () => getCurrentWindow().outerPosition(),
 
