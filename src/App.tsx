@@ -18,6 +18,7 @@ import { AppSidebar } from "@/components/app-sidebar";
 import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
 import { TauriReturnBanner } from "@/components/TauriReturnBanner";
 import Navbar from "./components/Navbar";
+import { invoke } from "@tauri-apps/api/core";
 
 // Lazy-load all route-level pages so each page's JS is only downloaded when
 // the user first navigates to that route (bundle-dynamic-imports rule).
@@ -71,6 +72,7 @@ function App() {
   const navigate = useNavigate();
   useSyncUser();
 
+  
   // ── Auth sync: broadcast sign-out to widget
   // Navigation from widget → dashboard is handled via URL params (no event
   // needed — Rust calls win.navigate(url?openCreate=true&isFree=true) so the

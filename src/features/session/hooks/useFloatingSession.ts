@@ -52,6 +52,10 @@ import {
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "";
 
+function normalizeTranscriptText(text: string): string {
+  return text.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
 function getLanguageCode(lang: string): string {
   const mapping: Record<string, string> = {
     English: "en",
@@ -65,6 +69,96 @@ function getLanguageCode(lang: string): string {
     Japanese: "ja",
   };
   return mapping[lang] || "en";
+}
+
+// Fallback window (ms) used only when no AI answer has been given yet in this
+// session. Covers a multi-question interviewer monologue at the very start.
+const FIRST_ANSWER_WINDOW_MS = 120_000;
+
+/**
+ * Resolve question from multiple fallback sources.
+ *
+ * cutoffTimestamp is the timestamp of the LAST successful AI answer.
+ * Only messages AFTER that timestamp are considered — this prevents
+ * previously-answered questions from being merged with the current one
+ * when the user asks a series of short questions one by one.
+ *
+ * Priority:
+ * 1. Live interim text from system audio (Interviewer / tab audio)
+ * 2. All Interviewer messages after the cutoff, joined as one transcript
+ * 3. All User messages after the cutoff, joined as one transcript
+ *
+ * Returns { question, source } or null if all sources are empty.
+ */
+function resolveQuestionFromContext(
+  liveInterimText: string,
+  allMessages: { text: string; sender: string; timestamp: number }[],
+  _lastMessage: { text: string; sender: string } | null,
+  lastAnswerTimestamp: number | null,
+): { question: string; source: string } | null {
+  // Priority 1: Live interim text from system audio
+  if (liveInterimText?.trim()) {
+    return { question: liveInterimText.trim(), source: "live_interim" };
+  }
+
+  // Determine the cutoff:
+  // • If an answer has been given before: use that timestamp so only messages
+  //   that arrived AFTER the last answer are included.
+  // • First-ever click: use a 120s fallback to capture a full opening monologue.
+  const cutoff =
+    lastAnswerTimestamp !== null
+      ? lastAnswerTimestamp
+      : Date.now() - FIRST_ANSWER_WINDOW_MS;
+
+  // Priority 2: Join all Interviewer messages that arrived after the cutoff.
+  // Speech-to-text delivers each sentence as a separate Redux message, so a
+  // two-question block produces two entries. Joining them reconstructs the
+  // full question block without leaking previously-answered content.
+  const recentInterviewer = allMessages
+    .filter((m) => m.sender === "Interviewer" && m.timestamp > cutoff && m.text?.trim())
+    .map((m) => m.text.trim());
+
+  if (recentInterviewer.length > 0) {
+    return {
+      question: recentInterviewer.join(" "),
+      source: "transcript_history",
+    };
+  }
+
+  // Priority 3: Join all User messages that arrived after the cutoff.
+  const recentUser = allMessages
+    .filter((m) => m.sender === "User" && m.timestamp > cutoff && m.text?.trim())
+    .map((m) => m.text.trim());
+
+  if (recentUser.length > 0) {
+    return {
+      question: recentUser.join(" "),
+      source: "user_transcript",
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Check if a question was recently answered (within threshold ms)
+ * Returns { isRecent: boolean, lastAnswerTime: number | null }
+ */
+function isRecentlyAnswered(
+  normalizedQuestion: string,
+  answeredQuestionsHistory: { text: string; normalizedText: string; timestamp: number }[],
+  thresholdMs: number = 3000,
+): { isRecent: boolean; lastAnswerTime: number | null } {
+  const now = Date.now();
+  for (const record of answeredQuestionsHistory) {
+    if (record.normalizedText === normalizedQuestion) {
+      const timeSinceAnswer = now - record.timestamp;
+      if (timeSinceAnswer < thresholdMs) {
+        return { isRecent: true, lastAnswerTime: timeSinceAnswer };
+      }
+    }
+  }
+  return { isRecent: false, lastAnswerTime: null };
 }
 
 export function useFloatingSession() {
@@ -88,6 +182,12 @@ export function useFloatingSession() {
   const sessionInfoRef = useRef<SessionInitData | null>(null);
   const messagesRef = useRef<TranscriptMessage[]>([]);
   const selectedModelRef = useRef(selectedModel);
+  // Track answered questions with timestamp to allow re-answering after 3+ seconds
+  const answeredQuestionsHistoryRef = useRef<{ text: string; normalizedText: string; timestamp: number }[]>([]);
+  // Timestamp of the most recent successful AI answer click.
+  // Used as the message cutoff so only NEW messages since the last answer
+  // are included in the next question — prevents stale questions being merged.
+  const lastAnswerTimestampRef = useRef<number | null>(null);
 
   sessionInfoRef.current = sessionInfo;
   messagesRef.current = messages;
@@ -377,8 +477,10 @@ export function useFloatingSession() {
       // Dismiss lingering toasts from prior session (e.g. "Session ended")
       toast.dismiss();
 
-      // Reset all prior-session AI chat state
+      // Reset all prior-session AI chat state and deduplication history
       setAiChat([]);
+      answeredQuestionsHistoryRef.current = [];
+      lastAnswerTimestampRef.current = null;
 
       // Hydrate Redux slice (resets messages, panels, warnings, isEnding)
       dispatch(initSession(info));
@@ -464,62 +566,130 @@ export function useFloatingSession() {
   // ── AI action handlers ──────────────────────────────────────────────────────
 
   const handleAiAnswerClick = useCallback(async () => {
-    if (isEmittingRef.current) return;
+    console.log("[useFloatingSession] handleAiAnswerClick clicked.");
+    if (isEmittingRef.current) {
+      console.log("[useFloatingSession] handleAiAnswerClick: Suppressed click (isEmittingRef is true).");
+      return;
+    }
     const info = sessionInfoRef.current;
-    if (!info) return;
+    if (!info) {
+      console.log("[useFloatingSession] handleAiAnswerClick: Suppressed click (no sessionInfo available).");
+      return;
+    }
 
     const msgs = messagesRef.current;
+    const liveInterviewerText = tabInterimTranscript.trim();
 
-    // Resolve the SPECIFIC question to answer.
-    // Priority: live interim Interviewer text → last final Interviewer message.
-    // Sending only the specific question (not the whole transcript blob) ensures
-    // the AI answers THIS question instead of fixating on whatever was last in a
-    // 50-message concatenated dump. The backend fetches full session history from
-    // DB for context, so nothing is lost.
-    const interimText = micInterimTranscript || tabInterimTranscript;
-    const interviewerInterim =
-      !micInterimTranscript && tabInterimTranscript ? tabInterimTranscript : null;
+    // Try to resolve question from multiple sources.
+    // Pass lastAnswerTimestampRef so only messages AFTER the last answered
+    // question are included — prevents merging already-answered questions.
+    const resolved = resolveQuestionFromContext(
+      liveInterviewerText,
+      msgs,
+      lastMessage,
+      lastAnswerTimestampRef.current,
+    );
 
-    // Prefer the live (not-yet-final) interviewer speech; fall back to the last
-    // finalised Interviewer message in the transcript; fall back to the last
-    // finalised message of any sender; fall back to any live interim text.
-    const question =
-      interviewerInterim ||
-      [...msgs].reverse().find((m) => m.sender === "Interviewer")?.text ||
-      [...msgs].reverse().find((m) => m.text)?.text ||
-      interimText ||
-      "";
+    if (!resolved) {
+      const interviewerCount = msgs.filter((m) => m.sender === "Interviewer").length;
+      const userCount = msgs.filter((m) => m.sender === "User").length;
+      console.log("[useFloatingSession] handleAiAnswerClick: No question found from any source. Aborting.", {
+        liveInterimText: liveInterviewerText,
+        interviewerMessagesCount: interviewerCount,
+        userMessagesCount: userCount,
+        totalMessages: msgs.length,
+        lastMessageSender: lastMessage?.sender,
+      });
+      return;
+    }
 
-    if (!question.trim()) return;
+    const { question, source } = resolved;
+    console.log("[useFloatingSession] handleAiAnswerClick: Resolved question from", source, ":", question);
+
+    // Check if this question was recently answered (within 3 seconds)
+    const normalizedQuestion = normalizeTranscriptText(question);
+    const { isRecent, lastAnswerTime } = isRecentlyAnswered(
+      normalizedQuestion,
+      answeredQuestionsHistoryRef.current,
+      3000,
+    );
+
+    if (isRecent) {
+      console.log(
+        `[useFloatingSession] handleAiAnswerClick: Question answered ${lastAnswerTime}ms ago. Blocking rapid re-answer.`,
+      );
+      return;
+    }
+
+    console.log("[useFloatingSession] handleAiAnswerClick: Invoking handleAiAnswer with:", {
+      sessionId: info.sessionId,
+      question,
+      source,
+      model: selectedModelRef.current,
+    });
 
     isEmittingRef.current = true;
     try {
       await handleAiAnswer(info.sessionId, question, selectedModelRef.current);
+
+      // Advance the cutoff to NOW so the next AI Answer click only picks up
+      // messages that arrive after this answer completes.
+      lastAnswerTimestampRef.current = Date.now();
+
+      // Record this answered question for the rapid-refire dedup check.
+      answeredQuestionsHistoryRef.current.push({
+        text: question,
+        normalizedText: normalizedQuestion,
+        timestamp: Date.now(),
+      });
+      // Keep only last 50 answers in history to prevent memory leak
+      if (answeredQuestionsHistoryRef.current.length > 50) {
+        answeredQuestionsHistoryRef.current = answeredQuestionsHistoryRef.current.slice(-50);
+      }
+      console.log("[useFloatingSession] handleAiAnswerClick: Successfully answered question.");
     } finally {
-      // Keep the lock for 500 ms after the stream ends so rapid re-taps
-      // (double-click, keyboard repeat) cannot immediately queue another call.
-      setTimeout(() => { isEmittingRef.current = false; }, 500);
+      isEmittingRef.current = false;
     }
-  }, [handleAiAnswer, micInterimTranscript, tabInterimTranscript]);
+  }, [handleAiAnswer, tabInterimTranscript, lastMessage]);
 
   const handleAnalyzeScreenClick = useCallback(
     async (screenshotBlob: Blob) => {
+      console.log("[useFloatingSession] handleAnalyzeScreenClick triggered.");
       // isAnalyzeEmittingRef is the source of truth — avoids stale isAnalyzing
       // closure values that could block legitimate calls after the first one.
-      if (isAnalyzeEmittingRef.current) return;
+      if (isAnalyzeEmittingRef.current) {
+        console.log("[useFloatingSession] handleAnalyzeScreenClick: Suppressed click (isAnalyzeEmittingRef is true).");
+        return;
+      }
       const info = sessionInfoRef.current;
-      if (!info) return;
+      if (!info) {
+        console.log("[useFloatingSession] handleAnalyzeScreenClick: Suppressed click (no sessionInfo available).");
+        return;
+      }
+
+      // Use same question resolution logic as AI Answer for context
+      const msgs = messagesRef.current;
+      const liveInterviewerText = tabInterimTranscript.trim();
+      const resolved = resolveQuestionFromContext(liveInterviewerText, msgs, lastMessage, lastAnswerTimestampRef.current);
+      const contextQuestion = resolved?.question || "(no context)";
+
+      console.log("[useFloatingSession] handleAnalyzeScreenClick: Initiating handleAnalyzeScreen with:", {
+        sessionId: info.sessionId,
+        screenshotSize: screenshotBlob.size,
+        contextQuestion,
+        model: selectedModelRef.current,
+      });
 
       isAnalyzeEmittingRef.current = true;
       setIsCapturing(true);
       try {
         await handleAnalyzeScreen(info.sessionId, screenshotBlob, selectedModelRef.current);
       } finally {
+        isAnalyzeEmittingRef.current = false;
         setIsCapturing(false);
-        setTimeout(() => { isAnalyzeEmittingRef.current = false; }, 500);
       }
     },
-    [handleAnalyzeScreen],
+    [handleAnalyzeScreen, tabInterimTranscript, lastMessage],
   );
 
   const handleSend = useCallback(async () => {

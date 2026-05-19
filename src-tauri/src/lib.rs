@@ -2443,10 +2443,25 @@ fn get_cursor_position(app: AppHandle) -> Result<(f64, f64), String> {
 /// Toggle whether the given window passes mouse events through to whatever
 /// is below it.  When `passthrough = true`, the window becomes
 /// click-through; when `false`, it captures clicks normally.
+///
+/// DevTools is rendered inside the same fullscreen transparent overlay window.
+/// If the app leaves that host window in passthrough mode, DevTools can paint
+/// and receive hover updates but mouse clicks go to the app behind it. In debug
+/// builds we force passthrough off so Inspect Element / Console stay clickable.
+/// Set `SS_ENABLE_CURSOR_PASSTHROUGH=1` before `pnpm tauri dev` to test the
+/// production click-through behavior locally.
 #[tauri::command]
 fn set_cursor_passthrough(window: Window, passthrough: bool) -> Result<(), String> {
+    let effective_passthrough = if cfg!(debug_assertions)
+        && std::env::var("SS_ENABLE_CURSOR_PASSTHROUGH").as_deref() != Ok("1")
+    {
+        false
+    } else {
+        passthrough
+    };
+
     window
-        .set_ignore_cursor_events(passthrough)
+        .set_ignore_cursor_events(effective_passthrough)
         .map_err(|e| e.to_string())
 }
 // ─────────────────────────────────────────────────────────────────────────────

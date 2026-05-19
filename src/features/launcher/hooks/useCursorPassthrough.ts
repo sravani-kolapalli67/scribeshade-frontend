@@ -1,6 +1,6 @@
-import { useEffect, useMemo } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 interface UseCursorPassthroughOptions {
   isDraggingRef: React.MutableRefObject<boolean>;
@@ -17,8 +17,6 @@ interface UseCursorPassthroughOptions {
 export function useCursorPassthrough({
   isDraggingRef,
 }: UseCursorPassthroughOptions): void {
-  const win = useMemo(() => getCurrentWindow(), []);
-
   useEffect(() => {
     let raf = 0;
     let cancelled = false;
@@ -31,7 +29,7 @@ export function useCursorPassthrough({
       if (p === lastPassthrough) return;
       lastPassthrough = p;
       try {
-        await win.setIgnoreCursorEvents(p);
+        await invoke("set_cursor_passthrough", { passthrough: p });
       } catch (e) {
         console.error("[passthrough]", e);
       }
@@ -52,6 +50,7 @@ export function useCursorPassthrough({
         const now = performance.now();
         if (now - lastCacheUpdate > 250) {
           lastCacheUpdate = now;
+          const win = getCurrentWindow();
           const [pos, scale] = await Promise.all([
             win.outerPosition(),
             win.scaleFactor(),
@@ -136,7 +135,9 @@ export function useCursorPassthrough({
     return () => {
       cancelled = true;
       cancelAnimationFrame(raf);
-      win.setIgnoreCursorEvents(false).catch(console.error);
+      invoke("set_cursor_passthrough", { passthrough: false }).catch(
+        console.error,
+      );
     };
-  }, [win, isDraggingRef]);
+  }, [isDraggingRef]);
 }
