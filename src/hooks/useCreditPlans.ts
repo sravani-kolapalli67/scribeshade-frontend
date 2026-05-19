@@ -11,6 +11,8 @@ export interface CreditPlan {
   amountMajor: string;
   amountMinor: number;
   feature: string;
+  isPopular: boolean;
+  valuePct: number;
 }
 
 async function fetchPlans(currency: string): Promise<CreditPlan[]> {

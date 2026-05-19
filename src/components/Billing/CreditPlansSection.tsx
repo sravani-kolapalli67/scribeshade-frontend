@@ -51,12 +51,11 @@ function loadRazorpayScript(): Promise<boolean> {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
-const POPULAR_CODE    = "standard_60";
-const BEST_VALUE_CODE = "mega_600";
+// ─────────────────────────────────────────────────────────────────────────────
 
+// Use database-driven isPopular and valuePct instead of hardcoded codes
 function valueScore(plan: CreditPlan): number {
-  const price = parseFloat(plan.amountMajor);
-  return price > 0 ? parseFloat(plan.credits) / price : 0;
+  return plan.valuePct;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -74,7 +73,10 @@ export function CreditPlansSection({ onSuccess }: CreditPlansSectionProps) {
 
   const { plans, isLoading } = useCreditPlans(currency);
   const { brackets } = useCreditBrackets();
-  const maxScore = plans.reduce((m, p) => Math.max(m, valueScore(p)), 0);
+  
+  // Calculate best value dynamically from database valuePct
+  const maxScore = plans.reduce((m, p) => Math.max(m, p.valuePct), 0);
+  const bestValuePlan = plans.find(p => p.valuePct === maxScore);
   const sym      = CURRENCY_SYMBOLS[currency];
 
   const rateLabel = brackets[0]
@@ -269,9 +271,9 @@ export function CreditPlansSection({ onSuccess }: CreditPlansSectionProps) {
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
           {plans.map((plan) => {
             const isSelected  = selectedPlan?.code === plan.code;
-            const isPopular   = plan.code === POPULAR_CODE;
-            const isBestValue = plan.code === BEST_VALUE_CODE;
-            const score        = valueScore(plan);
+            const isPopular   = plan.isPopular;
+            const isBestValue = bestValuePlan?.code === plan.code;
+            const score        = plan.valuePct;
             const valuePercent = maxScore > 0 ? Math.round((score / maxScore) * 100) : 0;
 
             return (

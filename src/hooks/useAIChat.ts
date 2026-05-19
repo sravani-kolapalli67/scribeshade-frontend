@@ -1040,7 +1040,7 @@ export const useAIChat = () => {
   );
 
   const handleRegenerate = useCallback(
-    async (sessionId: string, messageId: string, aiModel: string) => {
+    async (sessionId: string, messageId: string, aiModel: string, questionOverride?: string) => {
       console.log(`[useAIChat] handleRegenerate triggered. sessionId: ${sessionId}, messageId: ${messageId}, model: ${aiModel}`);
       const targetMessage = aiChatRef.current.find((m) => m.id === messageId);
       if (!targetMessage) {
@@ -1048,10 +1048,13 @@ export const useAIChat = () => {
         return;
       }
 
+      // Prefer fresh context resolved by the caller (wider transcript window)
+      // over the stale question captured at original click time.
       const extractedQ = extractQuestionFromAiText(targetMessage.text ?? "");
-      const question = extractedQ || targetMessage.question?.trim() || "";
+      const cachedQ = extractedQ || targetMessage.question?.trim() || "";
+      const question = questionOverride?.trim() || cachedQ;
 
-      console.log(`[useAIChat] handleRegenerate: Extracted question for regeneration: "${question}"`);
+      console.log(`[useAIChat] handleRegenerate: question source: ${questionOverride?.trim() ? "fresh_context" : "cached"}, question: "${question}"`);
       if (!question) {
         console.warn("[useAIChat] handleRegenerate: No question could be resolved for this message. Aborting.");
         return;

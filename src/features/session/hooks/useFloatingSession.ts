@@ -75,6 +75,16 @@ function getLanguageCode(lang: string): string {
 // session. Covers a multi-question interviewer monologue at the very start.
 const FIRST_ANSWER_WINDOW_MS = 120_000;
 
+// When regenerate is clicked we intentionally wait a bit so additional
+// transcript chunks can arrive before rebuilding the question context.
+const REGENERATE_CONTEXT_DELAY_MS = 2200;
+
+// Extra historical context added during regenerate.
+// Helps reconstruct incomplete interviewer questions.
+const REGENERATE_CONTEXT_LOOKBACK_MS = 15000;
+
+// Fallback message count used when transcript is fragmented.
+
 /**
  * Resolve question from multiple fallback sources.
  *
@@ -87,9 +97,14 @@ const FIRST_ANSWER_WINDOW_MS = 120_000;
  * 1. Live interim text from system audio (Interviewer / tab audio)
  * 2. All Interviewer messages after the cutoff, joined as one transcript
  * 3. All User messages after the cutoff, joined as one transcript
+ * 4. Fallback: most recent N messages regardless of cutoff — ensures AI
+ *    Answer always has something to send when the user explicitly clicks
+ *    it mid-session (e.g. the cutoff has advanced past all transcript).
  *
- * Returns { question, source } or null if all sources are empty.
+ * Returns { question, source } or null if there are no messages at all.
  */
+const FALLBACK_MSG_COUNT = 12;
+
 function resolveQuestionFromContext(
   liveInterimText: string,
   allMessages: { text: string; sender: string; timestamp: number }[],
@@ -105,9 +120,10 @@ function resolveQuestionFromContext(
   // • If an answer has been given before: use that timestamp so only messages
   //   that arrived AFTER the last answer are included.
   // • First-ever click: use a 120s fallback to capture a full opening monologue.
+  // • Ensure cutoff is at least 5 seconds old to handle rapid clicks after answers.
   const cutoff =
     lastAnswerTimestamp !== null
-      ? lastAnswerTimestamp
+      ? Math.min(lastAnswerTimestamp, Date.now() - 5000)
       : Date.now() - FIRST_ANSWER_WINDOW_MS;
 
   // Priority 2: Join all Interviewer messages that arrived after the cutoff.
@@ -137,8 +153,26 @@ function resolveQuestionFromContext(
     };
   }
 
+  // Priority 4 fallback: cutoff-filtered sources are empty (e.g. the user
+  // stopped speaking and lastAnswerTimestamp is newer than all transcript).
+  // Use the most recent FALLBACK_MSG_COUNT messages regardless of cutoff so
+  // that AI Answer always generates when explicitly clicked and regenerate
+  // always has context to send.
+  const recentFallback = allMessages
+    .filter((m) => m.text?.trim())
+    .slice(-FALLBACK_MSG_COUNT);
+
+  if (recentFallback.length > 0) {
+    return {
+      question: recentFallback.map((m) => m.text.trim()).join(" "),
+      source: "transcript_fallback",
+    };
+  }
+
   return null;
 }
+
+
 
 /**
  * Check if a question was recently answered (within threshold ms)
@@ -188,6 +222,10 @@ export function useFloatingSession() {
   // Used as the message cutoff so only NEW messages since the last answer
   // are included in the next question — prevents stale questions being merged.
   const lastAnswerTimestampRef = useRef<number | null>(null);
+  // The cutoff that was active BEFORE the last answer was given.
+  // Used by regenerate so it can widen the window back to pre-click context,
+  // picking up any additional transcript that arrived after an early accidental click.
+  const prevAnswerTimestampRef = useRef<number | null>(null);
 
   sessionInfoRef.current = sessionInfo;
   messagesRef.current = messages;
@@ -665,6 +703,9 @@ export function useFloatingSession() {
     try {
       await handleAiAnswer(info.sessionId, question, selectedModelRef.current);
 
+      // Save pre-advance cutoff so regenerate can widen the window back to
+      // include any transcript that arrived after an early accidental click.
+      prevAnswerTimestampRef.current = lastAnswerTimestampRef.current;
       // Advance the cutoff to NOW so the next AI Answer click only picks up
       // messages that arrive after this answer completes.
       lastAnswerTimestampRef.current = Date.now();
@@ -736,9 +777,30 @@ export function useFloatingSession() {
     async (messageId: string) => {
       const info = sessionInfoRef.current;
       if (!info || !messageId) return;
-      await handleRegenerate(info.sessionId, messageId, selectedModelRef.current);
+
+      // Try to resolve fresher context using the pre-advance cutoff.
+      // This picks up transcript that arrived AFTER the original (possibly early)
+      // AI Answer click but BEFORE the cutoff was advanced on completion.
+      // Falls back to the cached question stored on the message card if no
+      // new context is found.
+      const liveText = tabInterimTranscript.trim();
+      const freshResolved = resolveQuestionFromContext(
+        liveText,
+        messagesRef.current,
+        null,
+        lastAnswerTimestampRef.current,
+      );
+
+      const questionOverride = freshResolved?.question ?? undefined;
+      console.log(
+        "[useFloatingSession] handleRegenerateResponse: fresh context resolve:",
+        freshResolved?.source ?? "none",
+        questionOverride ? `"${questionOverride.slice(0, 120)}..."` : "(using cached question)",
+      );
+
+      await handleRegenerate(info.sessionId, messageId, selectedModelRef.current, questionOverride);
     },
-    [handleRegenerate],
+    [handleRegenerate, tabInterimTranscript],
   );
 
   // ── Mic toggle ──────────────────────────────────────────────────────────────

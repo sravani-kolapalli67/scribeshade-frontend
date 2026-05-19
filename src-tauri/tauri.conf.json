@@ -53,7 +53,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["appimage", "deb", "rpm", "dmg", "msi", "nsis"],
     "createUpdaterArtifacts": true,
     "icon": [
       "icons/icon.ico",
@@ -65,6 +65,14 @@
     "macOS": {
       "infoPlist": "Info.plist",
       "entitlements": "entitlements.plist"
+    },
+    "linux": {
+      "deb": {
+        "depends": []
+      },
+      "rpm": {
+        "depends": []
+      }
     }
   },
   "plugins": {
