@@ -10,6 +10,7 @@ export interface Message {
   time: string;
   timestamp?: number;
   question?: string;
+  snapshotId?: string;
 }
 
 interface TranscriptProps {

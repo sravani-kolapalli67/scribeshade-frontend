@@ -1,5 +1,14 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { Message } from "@/pages/Sessions/ActiveSession/Transcript";
+import { 
+  prepareGeneration, 
+  shouldTriggerGeneration, 
+  createGenerationGuard, 
+  generateSegmentId,
+  createTranscriptStabilizer,
+  type GenerationMode,
+  type GenerationDecision 
+} from '@/lib/generation-pipeline';
 
 const SEGMENT_MARKER = /\n?={3,}NEXT_QUESTION={3,}\n?/;
 const QUESTION_MARKER = /(?:\*\*\s*)?QUESTION\s*:/i;
@@ -55,6 +64,54 @@ function normalizeSttTranscript(text: string): string {
     result = result.replace(pattern, replacement);
   }
   return result;
+}
+
+/**
+ * Sanitizes input question text to remove duplicate questions, sentences,
+ * or consecutive repeating phrases before triggering AI answer.
+ */
+function deduplicateQuestionsInText(text: string): string {
+  if (!text?.trim()) return text;
+
+  // 1. Sentence-level deduplication
+  const sentences = text.match(/[^.!?]+[.!?]*/g) || [text];
+  const seen = new Set<string>();
+  const uniqueSentences: string[] = [];
+
+  for (const rawSentence of sentences) {
+    const trimmed = rawSentence.trim();
+    if (!trimmed) continue;
+    const normalized = trimmed.toLowerCase().replace(/[^a-z0-9]/gi, "").trim();
+    if (!normalized) {
+      uniqueSentences.push(trimmed);
+      continue;
+    }
+    if (seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    uniqueSentences.push(trimmed);
+  }
+  let result = uniqueSentences.join(" ");
+
+  // 2. Phrase-level consecutive sequence deduplication
+  const deduplicatePhrases = (str: string): string => {
+    const words = str.split(/\s+/);
+    const normalizedWords = words.map((w) => w.toLowerCase().replace(/[^a-z0-9]/gi, ""));
+    for (let len = 2; len <= Math.floor(words.length / 2); len++) {
+      for (let i = 0; i <= words.length - 2 * len; i++) {
+        const first = normalizedWords.slice(i, i + len).join(" ");
+        const second = normalizedWords.slice(i + len, i + 2 * len).join(" ");
+        if (first && first === second) {
+          words.splice(i + len, len);
+          return deduplicatePhrases(words.join(" "));
+        }
+      }
+    }
+    return words.join(" ");
+  };
+
+  return deduplicatePhrases(result);
 }
 
 // ── Multi-question splitter ─────────────────────────────────────────────────
@@ -216,6 +273,60 @@ async function safelyCancelReader(
   }
 }
 
+/**
+ * Shared utility: parses raw AI backend text into structured { question, answer }.
+ *
+ * The backend may return text in one of two forms:
+ *   1. "**QUESTION:** ... **ANSWER:** ..."  — structured (new format)
+ *   2. Plain answer text                    — legacy / custom-query
+ *
+ * This is the SINGLE SOURCE OF TRUTH for parsing. Both the streaming data layer
+ * (flushToState in consumeSegmentedStream) and the render layer (ChatMessage)
+ * must call this function to guarantee identical results.
+ *
+ * Mid-stream safety: when **ANSWER:** hasn't arrived yet during streaming,
+ * the entire text is treated as a partial answer (no question shown yet).
+ */
+export function parseAnswerContent(rawText: string, fallbackQuestion?: string): {
+  question: string;
+  answer: string;
+} {
+  if (!rawText?.trim()) {
+    return { question: fallbackQuestion?.trim() ?? "", answer: "" };
+  }
+
+  const text = rawText.trim();
+
+  // Match structured "**QUESTION:** ... **ANSWER:** ..." format.
+  // Use a non-greedy match for question, and the rest is the answer.
+  const structuredMatch = text.match(
+    /\*{0,2}\s*QUESTION\s*:?\s*\*{0,2}\s*([\s\S]*?)\s*\*{0,2}\s*ANSWER\s*:?\s*\*{0,2}\s*([\s\S]*)/i,
+  );
+
+  if (structuredMatch) {
+    const question = structuredMatch[1].trim();
+    const answer = structuredMatch[2].trim();
+    return {
+      question: question || fallbackQuestion?.trim() || "",
+      answer,
+    };
+  }
+
+  // No **ANSWER:** found yet (partial stream or plain text).
+  // Treat the whole text as the answer; question comes from fallback.
+  // Strip any orphaned **QUESTION:** prefix if present (mid-stream partial).
+  const orphanQMatch = text.match(
+    /^\*{0,2}\s*QUESTION\s*:?\s*\*{0,2}\s*([\s\S]*)$/i,
+  );
+  if (orphanQMatch) {
+    // Partial: QUESTION content is streaming but ANSWER hasn't arrived.
+    // Return empty answer to show loading state, not garbled question text.
+    return { question: fallbackQuestion?.trim() ?? "", answer: "" };
+  }
+
+  return { question: fallbackQuestion?.trim() ?? "", answer: text };
+}
+
 interface ConsumeStreamResult {
   /** IDs of cards that were created and have real content. */
   activeIds: string[];
@@ -234,7 +345,6 @@ async function consumeSegmentedStream(
   baseTime: string,
   signal?: AbortSignal,
 ): Promise<ConsumeStreamResult> {
-  console.log(`[useAIChat] consumeSegmentedStream started for message ID: ${initialMessageId}`);
   const decoder = new TextDecoder();
   let buffer = "";
   // Number of leading `parts` to discard (preamble filtering).
@@ -245,42 +355,49 @@ async function consumeSegmentedStream(
   const segmentTexts: string[] = [""];
   const segmentIds: string[] = [initialMessageId];
 
-  // Track which segment ids we've already hidden mid-stream (sentinel detected early).
-  const midStreamDropped = new Set<string>();
-
   const flushToState = () => {
     if (signal?.aborted) {
-      console.log(`[useAIChat] consumeSegmentedStream flushToState aborted.`);
       return;
     }
     setAiChat((prev) => {
       const next = [...prev];
       for (let i = 0; i < segmentIds.length; i++) {
         const sid = segmentIds[i];
-        // If this segment contains the sentinel at any point during streaming,
-        // immediately remove its card so it never flashes on screen.
-        if (NO_QUESTION_MARKER.test(segmentTexts[i])) {
-          if (!midStreamDropped.has(sid)) {
-            console.log(`[useAIChat] NO_NEW_QUESTION sentinel matched in segment index ${i} (ID: ${sid}). Dropping segment.`);
-            midStreamDropped.add(sid);
-          }
+
+        let rawText = segmentTexts[i];
+        let snapshotId: string | undefined = undefined;
+
+        // Strip snapshot sentinel
+        const snapMatch = rawText.match(/===SNAPSHOT_ID=([a-f0-9\-]+)===/i);
+        if (snapMatch) {
+          snapshotId = snapMatch[1];
+          rawText = rawText.replace(/===SNAPSHOT_ID=([a-f0-9\-]+)===/gi, "").trim();
         }
-        if (midStreamDropped.has(sid)) {
-          // Remove from state immediately — don't render or update.
-          const idx = next.findIndex((m) => m.id === sid);
-          if (idx >= 0) next.splice(idx, 1);
-          continue;
-        }
+
+        // Extract structured question + answer from raw backend response.
+        // We do this BEFORE stripping so we can populate the `question` field
+        // on new segment cards (mirroring what handleAiAnswerSingle does).
+        const { question: extractedQuestion, answer: displayText } = parseAnswerContent(rawText);
+
         const idx = next.findIndex((m) => m.id === sid);
         if (idx >= 0) {
-          next[idx] = { ...next[idx], text: segmentTexts[i] };
+          // Preserve existing question if already set (e.g. from handleAiAnswerSingle);
+          // use the newly extracted one if the existing message has none.
+          const existingQuestion = next[idx].question?.trim() || "";
+          next[idx] = {
+            ...next[idx],
+            text: displayText,
+            question: existingQuestion || extractedQuestion,
+            ...(snapshotId ? { snapshotId } : {}),
+          };
         } else {
-          console.log(`[useAIChat] consumeSegmentedStream spawning new card in UI:`, { id: sid, time: baseTime });
           next.push({
             id: sid,
             sender: "AI",
-            text: segmentTexts[i],
+            text: displayText,
             time: baseTime,
+            question: extractedQuestion,
+            ...(snapshotId ? { snapshotId } : {}),
           });
         }
       }
@@ -290,7 +407,6 @@ async function consumeSegmentedStream(
 
   while (true) {
     if (signal?.aborted) {
-      console.log(`[useAIChat] consumeSegmentedStream reader loop: Abort detected.`);
       break;
     }
     let readResult: ReadableStreamReadResult<Uint8Array>;
@@ -298,27 +414,22 @@ async function consumeSegmentedStream(
       readResult = await reader.read();
     } catch (readErr: any) {
       // AbortError from reader.cancel() — treat as clean abort
-      if (readErr?.name === "AbortError" || signal?.aborted) {
-        console.log(`[useAIChat] consumeSegmentedStream: reader.read() threw on abort.`);
-      } else {
+      if (readErr?.name !== "AbortError" && !signal?.aborted) {
         console.error(`[useAIChat] consumeSegmentedStream: reader.read() threw unexpectedly:`, readErr);
       }
       break;
     }
     if (signal?.aborted) {
-      console.log(`[useAIChat] consumeSegmentedStream reader loop: Abort detected after read.`);
       await safelyCancelReader(reader);
       break;
     }
     const { done, value } = readResult;
     if (done) {
-      console.log(`[useAIChat] consumeSegmentedStream reader loop: Stream complete.`);
       break;
     }
 
     const chunkStr = decoder.decode(value, { stream: true });
     buffer += chunkStr;
-    console.log(`[useAIChat] consumeSegmentedStream: Read stream chunk (${value.length} bytes). Buffer length: ${buffer.length} chars.`);
 
     const parts = buffer.split(SEGMENT_MARKER);
 
@@ -329,7 +440,6 @@ async function consumeSegmentedStream(
       const first = parts[0].trim();
       if (!QUESTION_MARKER.test(first)) {
         // Preamble. Drop the placeholder card and shift everything by one.
-        console.log(`[useAIChat] consumeSegmentedStream: Preamble detected ("${first.slice(0, 100)}..."). Dropping initial placeholder card.`);
         leadingSkip = 1;
         if (!signal?.aborted) {
           setAiChat((prev) => prev.filter((m) => m.id !== initialMessageId));
@@ -338,18 +448,12 @@ async function consumeSegmentedStream(
         // id so the existing initialMessageId is fully forgotten.
         segmentIds[0] = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         segmentTexts[0] = "";
-      } else {
-        console.log("[useAIChat] consumeSegmentedStream: No preamble detected. parts[0] starts with QUESTION marker.");
       }
     }
 
     const renderable = parts.length - leadingSkip;
-    if (parts.length > 1) {
-      console.log(`[useAIChat] consumeSegmentedStream: Split detected. Parts: ${parts.length}, LeadingSkip: ${leadingSkip}, Renderable segments: ${renderable}`);
-    }
     while (segmentIds.length < renderable) {
       const nextId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      console.log(`[useAIChat] consumeSegmentedStream: Creating new segment ID: ${nextId} for segment index ${segmentIds.length}`);
       segmentIds.push(nextId);
       segmentTexts.push("");
     }
@@ -362,44 +466,15 @@ async function consumeSegmentedStream(
   }
 
   if (signal?.aborted) {
-    console.log(`[useAIChat] consumeSegmentedStream: Stream loop finished but aborted flag is active.`);
     await safelyCancelReader(reader);
     return { activeIds: [], sentinelOnly: false };
   }
 
   // Final flush — also catches the case where the stream ended WITHOUT any
   // separator AND the single segment happened to be preamble-only (rare).
-  if (!preambleDecided) {
-    console.log(`[useAIChat] consumeSegmentedStream: Stream ended without any segment separators.`);
-  }
-
   flushToState();
 
-  // Final cleanup: ensure any sentinel cards detected mid-stream OR only at
-  // the very end (no separators, stream ended) are removed from state.
-  const allDropped = new Set<string>(midStreamDropped);
-  let sentinelDetected = false;
-  for (let i = 0; i < segmentTexts.length; i++) {
-    if (NO_QUESTION_MARKER.test(segmentTexts[i])) {
-      console.log(`[useAIChat] Final cleanup: NO_NEW_QUESTION sentinel found in final text for ID ${segmentIds[i]}. Dropping.`);
-      allDropped.add(segmentIds[i]);
-      sentinelDetected = true;
-    }
-  }
-  // Also count mid-stream sentinel drops towards the sentinelDetected flag.
-  if (midStreamDropped.size > 0) sentinelDetected = true;
-
-  if (allDropped.size && !signal?.aborted) {
-    console.log(`[useAIChat] Final cleanup: Removing ${allDropped.size} dropped cards from UI state.`);
-    setAiChat((prev) => prev.filter((m) => !allDropped.has(m.id)));
-  }
-
-  const activeIds = segmentIds.filter((sid) => !allDropped.has(sid));
-  // sentinelOnly = backend returned ONLY the sentinel and no real answer cards.
-  const sentinelOnly = sentinelDetected && activeIds.length === 0;
-
-  console.log(`[useAIChat] consumeSegmentedStream: Completed. Returning ${activeIds.length} active cards. sentinelOnly=${sentinelOnly}`);
-  return { activeIds, sentinelOnly };
+  return { activeIds: segmentIds, sentinelOnly: false };
 }
 
 export const useAIChat = () => {
@@ -426,6 +501,11 @@ export const useAIChat = () => {
   // re-issued within 4 s (e.g. transcript echo, double-click, debounced
   // multi-question splitter firing twice).
   const recentQuestionsRef = useRef<{ q: string; t: number }[]>([]);
+
+  // Pipeline generation guard: prevents duplicate stream cards for the same semantic segment.
+  const generationGuardRef = useRef(createGenerationGuard());
+  // Tracks the last successfully generated transcript for continuation detection.
+  const previousContextRef = useRef<{ transcript: string; timestamp: number } | null>(null);
 
   // Stable ref so handleAiAnswer can call handleAiAnswerSingle without a
   // forward-reference ordering issue (handleAiAnswerSingle is defined after).
@@ -576,7 +656,6 @@ export const useAIChat = () => {
         const reader = response.body?.getReader();
         if (!reader) throw new Error("No reader available");
 
-        console.log("[useAIChat] handleAnalyzeScreen: Commencing consumeSegmentedStream.");
         const { activeIds: renderedIds, sentinelOnly: analyzeSentinel } = await consumeSegmentedStream(
           reader,
           messageId,
@@ -680,8 +759,8 @@ export const useAIChat = () => {
 
   const handleAiAnswer = useCallback(
     async (sessionId: string, question: string, aiModel: string) => {
-      // Normalize STT transcript errors before anything else
-      const normalizedQuestion = normalizeSttTranscript(question);
+      // Normalize STT transcript errors and deduplicate duplicates before anything else
+      const normalizedQuestion = deduplicateQuestionsInText(normalizeSttTranscript(question));
       console.log(`[useAIChat] handleAiAnswer triggered. sessionId: ${sessionId}, question: "${normalizedQuestion.slice(0, 100)}...", model: ${aiModel}`);
       if (!normalizedQuestion.trim()) {
         console.log("[useAIChat] handleAiAnswer: Question is empty. Aborting.");
@@ -698,20 +777,45 @@ export const useAIChat = () => {
       }
       recentQuestionsRef.current = [...recent, { q: dedupeKey, t: now }].slice(-10);
 
-      // Multi-question detection: log how many questions were found, then send
-      // the FULL normalized transcript to handleAiAnswerSingle as one call.
-      // The backend processes all questions in one AI request and returns each
-      // answer separated by ===NEXT_QUESTION===. consumeSegmentedStream then
-      // creates one answer card per question automatically.
-      // We do NOT fire multiple separate calls because each call to
-      // startNewRequest() aborts the previous stream — the first question
-      // would always get cancelled before completing.
-      const parts = splitMultiQuestions(normalizedQuestion);
-      if (parts.length > 1) {
-        console.log(`[useAIChat] handleAiAnswer: Multi-question detected (${parts.length} parts). Sending as single request — backend will segment answers.`);
+      // Route through the unified generation pipeline
+      // Use 'button' mode for manual clicks to bypass noise classification
+      const decision = prepareGeneration({ 
+        transcript: normalizedQuestion, 
+        mode: 'button', 
+        sessionId, 
+        aiModel 
+      }, previousContextRef.current?.transcript);
+
+      if (decision.shouldGenerate === false) {
+        console.log(`[useAIChat] handleAiAnswer: Pipeline blocked generation. Reason: ${decision.reason}`);
+        return;
       }
 
-      await handleAiAnswerSingleRef.current(sessionId, normalizedQuestion, aiModel);
+      const segmentId = generateSegmentId(decision.groupedTranscript);
+      if (!generationGuardRef.current.canStartGeneration(segmentId, decision.groupedTranscript)) {
+        console.log(`[useAIChat] handleAiAnswer: Generation guard blocked duplicate segment.`);
+        return;
+      }
+
+      generationGuardRef.current.lockGeneration(segmentId, decision.groupedTranscript);
+
+      try {
+        if (decision.segmentCount === 1) {
+          await handleAiAnswerSingleRef.current(sessionId, decision.groupedTranscript, aiModel);
+        } else {
+          for (let i = 0; i < decision.segments.length; i++) {
+            await handleAiAnswerSingleRef.current(sessionId, decision.segments[i], aiModel);
+            if (i < decision.segments.length - 1) {
+              await new Promise(r => setTimeout(r, 500));
+            }
+          }
+        }
+
+        // Update previous context after successful generation
+        previousContextRef.current = { transcript: normalizedQuestion, timestamp: Date.now() };
+      } finally {
+        generationGuardRef.current.releaseGeneration(segmentId);
+      }
     },
     [startNewRequest],
   );
@@ -771,7 +875,6 @@ export const useAIChat = () => {
         const reader = response.body?.getReader();
         if (!reader) throw new Error("No reader available");
 
-        console.log("[useAIChat] handleAiAnswer: Commencing consumeSegmentedStream.");
         const { sentinelOnly } = await consumeSegmentedStream(
           reader,
           messageId,
@@ -914,7 +1017,8 @@ export const useAIChat = () => {
         question: query,
       };
 
-      console.log(`[useAIChat] handleCustomQuery: Spawning temporary AI card messageId: ${aiMessageId}`);
+      // Spawn placeholder AI response card immediately
+      console.log(`[useAIChat] handleCustomQuery: Spawning placeholder AI response card ID: ${aiMessageId}`);
       setAiChat((prev) => [...prev, newAiMessage]);
 
       // Build a context preamble from the last 5 AI-answered messages in the current
@@ -941,6 +1045,25 @@ export const useAIChat = () => {
 
       console.log("[useAIChat] handleCustomQuery: Context preamble built. Enriched query content:", enrichedQuery);
 
+      // Route through the unified generation pipeline
+      const decision = prepareGeneration({ 
+        transcript: enrichedQuery, 
+        mode: 'manual', 
+        sessionId, 
+        aiModel, 
+        isCustomQuery: true 
+      }, previousContextRef.current?.transcript);
+
+      // For custom queries, ALWAYS generate (don't block on shouldGenerate since user explicitly typed)
+      // But still use the guard to prevent duplicates
+      const segmentId = generateSegmentId(decision.groupedTranscript);
+      if (!generationGuardRef.current.canStartGeneration(segmentId, decision.groupedTranscript)) {
+        console.log(`[useAIChat] handleCustomQuery: Generation guard blocked duplicate segment.`);
+        return;
+      }
+
+      generationGuardRef.current.lockGeneration(segmentId, decision.groupedTranscript);
+
       try {
         const targetUrl = `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionId}/ai-answer`;
         console.log(`[useAIChat] handleCustomQuery: Dispatching POST to ${targetUrl} for streaming custom answer.`);
@@ -965,46 +1088,16 @@ export const useAIChat = () => {
         const reader = response.body?.getReader();
         if (!reader) throw new Error("No reader available");
 
-        const decoder = new TextDecoder();
-        let streamedText = "";
+        await consumeSegmentedStream(
+          reader,
+          aiMessageId,
+          setAiChat,
+          newAiMessage.time,
+          controller.signal,
+        );
 
-        console.log("[useAIChat] handleCustomQuery: Starting stream read loop.");
-        try {
-          while (true) {
-            if (controller.signal.aborted) {
-              console.log(`[useAIChat] handleCustomQuery: Signal aborted during stream read for request: ${reqId}`);
-              await safelyCancelReader(reader);
-              break;
-            }
-            let readResult: ReadableStreamReadResult<Uint8Array>;
-            try {
-              readResult = await reader.read();
-            } catch (readErr: any) {
-              if (readErr?.name === "AbortError" || controller.signal.aborted) break;
-              throw readErr;
-            }
-            if (controller.signal.aborted) {
-              await safelyCancelReader(reader);
-              break;
-            }
-            const { done, value } = readResult;
-            if (done) {
-              console.log("[useAIChat] handleCustomQuery: Stream read finished.");
-              break;
-            }
-
-            const chunk = decoder.decode(value, { stream: true });
-            streamedText += chunk;
-
-            setAiChat((prev) =>
-              prev.map((msg) =>
-                msg.id === aiMessageId ? { ...msg, text: streamedText } : msg,
-              ),
-            );
-          }
-        } finally {
-          await safelyCancelReader(reader);
-        }
+        // Update previous context after successful generation
+        previousContextRef.current = { transcript: normalizedQuery, timestamp: Date.now() };
       } catch (error: any) {
         if (error.name === "AbortError") {
           console.log("[useAIChat] Custom query aborted:", reqId);
@@ -1025,6 +1118,7 @@ export const useAIChat = () => {
           ),
         );
       } finally {
+        generationGuardRef.current.releaseGeneration(segmentId);
         if (activeRequestIdRef.current === reqId) {
           console.log(`[useAIChat] handleCustomQuery: finally block for request ID: ${reqId}. Resetting isAnswering.`);
           pendingLoadingResetRef.current = null;
@@ -1048,8 +1142,6 @@ export const useAIChat = () => {
         return;
       }
 
-      // Prefer fresh context resolved by the caller (wider transcript window)
-      // over the stale question captured at original click time.
       const extractedQ = extractQuestionFromAiText(targetMessage.text ?? "");
       const cachedQ = extractedQ || targetMessage.question?.trim() || "";
       const question = questionOverride?.trim() || cachedQ;
@@ -1065,21 +1157,46 @@ export const useAIChat = () => {
       setIsAnswering(true);
       setIsAnalyzing(false);
 
-      // Clear the existing text so the card streams from scratch in-place.
-      console.log(`[useAIChat] handleRegenerate: Clearing text for messageId: ${messageId} to prepare for fresh stream.`);
+      console.log(`[useAIChat] handleRegenerate: Clearing text for messageId: ${messageId} to prepare for fresh stream. Preserving question field.`);
       setAiChat((prev) =>
         prev.map((msg) => (msg.id === messageId ? { ...msg, text: "" } : msg)),
       );
 
+      // Route through the unified generation pipeline
+      const decision = prepareGeneration({ 
+        transcript: question, 
+        mode: 'regenerate', 
+        sessionId, 
+        aiModel, 
+        snapshotId: targetMessage.snapshotId 
+      }, previousContextRef.current?.transcript);
+
+      // Regenerate mode always passes through (the pipeline bypasses classification for regenerate)
+      // But still use guard
+      const segmentId = generateSegmentId(decision.groupedTranscript);
+      if (!generationGuardRef.current.canStartGeneration(segmentId, decision.groupedTranscript)) {
+        console.log(`[useAIChat] handleRegenerate: Generation guard blocked duplicate segment.`);
+        return;
+      }
+
+      generationGuardRef.current.lockGeneration(segmentId, decision.groupedTranscript);
+
       try {
         const targetUrl = `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionId}/ai-answer`;
-        console.log(`[useAIChat] handleRegenerate: Dispatching POST to ${targetUrl} with body:`, { transcript: question, isRegenerate: true, aiModel });
+        const requestBody = {
+          transcript: question,
+          isRegenerate: true,
+          regenerate: true,
+          aiModel,
+          snapshotId: targetMessage.snapshotId
+        };
+        console.log(`[useAIChat] handleRegenerate: Dispatching POST to ${targetUrl} with body:`, requestBody);
         const response = await fetch(
           targetUrl,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ transcript: question, isRegenerate: true, aiModel }),
+            body: JSON.stringify(requestBody),
             signal: controller.signal,
           },
         );
@@ -1093,68 +1210,16 @@ export const useAIChat = () => {
         const reader = response.body?.getReader();
         if (!reader) throw new Error("No reader available");
 
-        const decoder = new TextDecoder();
-        let streamedText = "";
+        await consumeSegmentedStream(
+          reader,
+          messageId,
+          setAiChat,
+          targetMessage.time || new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          controller.signal,
+        );
 
-        console.log("[useAIChat] handleRegenerate: Starting stream read loop.");
-        try {
-          while (true) {
-            if (controller.signal.aborted) {
-              console.log(`[useAIChat] handleRegenerate: Signal aborted during stream read for request: ${reqId}`);
-              await safelyCancelReader(reader);
-              break;
-            }
-            let readResult: ReadableStreamReadResult<Uint8Array>;
-            try {
-              readResult = await reader.read();
-            } catch (readErr: any) {
-              if (readErr?.name === "AbortError" || controller.signal.aborted) break;
-              throw readErr;
-            }
-            if (controller.signal.aborted) {
-              await safelyCancelReader(reader);
-              break;
-            }
-            const { done, value } = readResult;
-            if (done) {
-              console.log("[useAIChat] handleRegenerate: Stream read finished.");
-              break;
-            }
-
-            const chunk = decoder.decode(value, { stream: true });
-            streamedText += chunk;
-
-            const renderText = streamedText.replace(NO_QUESTION_MARKER, "");
-            setAiChat((prev) =>
-              prev.map((msg) =>
-                msg.id === messageId ? { ...msg, text: renderText } : msg,
-              ),
-            );
-          }
-        } finally {
-          await safelyCancelReader(reader);
-        }
-
-        if (controller.signal.aborted) return;
-
-        const finalCleanText = streamedText.replace(NO_QUESTION_MARKER, "").trim();
-        if (!finalCleanText) {
-          console.log("[useAIChat] handleRegenerate: Stream ended empty. Showing failure message.");
-          setAiChat((prev) =>
-            prev.map((msg) =>
-              msg.id === messageId
-                ? { ...msg, text: "I couldn't regenerate the answer. Please try again." }
-                : msg,
-            ),
-          );
-        } else if (finalCleanText !== streamedText) {
-          console.log("[useAIChat] handleRegenerate: Applying final clean text without sentinels.");
-          setAiChat((prev) =>
-            prev.map((msg) =>
-              msg.id === messageId ? { ...msg, text: finalCleanText } : msg,
-            ),
-          );
-        }
+        // Update previous context after successful generation
+        previousContextRef.current = { transcript: question, timestamp: Date.now() };
       } catch (error: any) {
         if (error.name === "AbortError") {
           console.log("[useAIChat] Regenerate aborted:", reqId);
@@ -1167,11 +1232,15 @@ export const useAIChat = () => {
         setAiChat((prev) =>
           prev.map((msg) =>
             msg.id === messageId
-              ? { ...msg, text: "Sorry, I couldn't regenerate the answer." }
+              ? {
+                  ...msg,
+                  text: "Sorry, I couldn't regenerate the answer.",
+                }
               : msg,
           ),
         );
       } finally {
+        generationGuardRef.current.releaseGeneration(segmentId);
         if (activeRequestIdRef.current === reqId) {
           console.log(`[useAIChat] handleRegenerate: finally block for request ID: ${reqId}. Resetting isAnswering.`);
           pendingLoadingResetRef.current = null;

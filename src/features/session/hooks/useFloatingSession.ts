@@ -49,11 +49,62 @@ import {
   selectHeartbeatParams,
   selectTimerParams,
 } from "@/features/session/selectors/floatingSessionSelectors";
+import { isScenarioBased, extractContextFromMessages, buildDynamicTranscriptWindow } from "@/semantic";
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "";
 
 function normalizeTranscriptText(text: string): string {
   return text.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Deduplicates repeated adjacent phrases within a single transcript string (up to 6 words).
+ */
+function deduplicatePhrases(text: string): string {
+  let cleaned = text.replace(/\s+/g, " ").trim();
+  const words = cleaned.split(" ");
+  for (let n = 1; n <= Math.min(6, Math.floor(words.length / 2)); n++) {
+    for (let i = 0; i <= words.length - 2 * n; i++) {
+      const first = words.slice(i, i + n).join(" ").toLowerCase();
+      const second = words.slice(i + n, i + 2 * n).join(" ").toLowerCase();
+      const normFirst = first.replace(/[^a-z0-9\s]/gi, "").trim();
+      const normSecond = second.replace(/[^a-z0-9\s]/gi, "").trim();
+      if (normFirst === normSecond && normFirst.length > 0) {
+        words.splice(i + n, n);
+        i--;
+      }
+    }
+  }
+  return words.join(" ");
+}
+
+/**
+ * Removes sliding-window overlaps between the end of lastText and the start of newText.
+ */
+function removeOverlap(lastText: string, newText: string): string {
+  const normLast = lastText.toLowerCase().trim().replace(/[^a-z0-9\s]/gi, "");
+  const normNew = newText.toLowerCase().trim().replace(/[^a-z0-9\s]/gi, "");
+  
+  const lastWords = normLast.split(/\s+/);
+  const newWords = normNew.split(/\s+/);
+  
+  let overlapWordsCount = 0;
+  const maxSearch = Math.min(lastWords.length, newWords.length, 15);
+  
+  for (let len = 1; len <= maxSearch; len++) {
+    const lastSuffix = lastWords.slice(-len).join(" ");
+    const newPrefix = newWords.slice(0, len).join(" ");
+    if (lastSuffix === newPrefix) {
+      overlapWordsCount = len;
+    }
+  }
+  
+  if (overlapWordsCount > 0) {
+    const actualNewWords = newText.trim().split(/\s+/);
+    return actualNewWords.slice(overlapWordsCount).join(" ");
+  }
+  
+  return newText;
 }
 
 function getLanguageCode(lang: string): string {
@@ -116,6 +167,43 @@ function resolveQuestionFromContext(
     return { question: liveInterimText.trim(), source: "live_interim" };
   }
 
+  // Priority 1.5: Scenario-based context preservation using new semantic engine
+  // Check if recent transcript contains scenario markers and extract full context block
+  const recentFallback = allMessages
+    .filter((m) => m.text?.trim())
+    .slice(-FALLBACK_MSG_COUNT);
+
+  if (recentFallback.length > 0) {
+    const fallbackText = recentFallback.map((m) => m.text.trim()).join(" ");
+    
+    // If this is a scenario-based question, use expanded context window
+    // Wrap in try-catch to prevent app freeze if semantic engine has issues
+    try {
+      if (isScenarioBased(fallbackText)) {
+        // Build dynamic context window for scenario-based questions
+        const windowConfig = buildDynamicTranscriptWindow("scenario");
+        const scenarioContext = extractContextFromMessages(allMessages, windowConfig, lastAnswerTimestamp);
+        
+        if (scenarioContext && scenarioContext.length > fallbackText.length) {
+          console.log(
+            "[resolveQuestionFromContext] Scenario-based question detected. Using expanded context window:",
+            windowConfig.messageCount,
+            "messages,",
+            windowConfig.timeWindowMs,
+            "ms",
+          );
+          return {
+            question: deduplicatePhrases(scenarioContext),
+            source: "scenario_context",
+          };
+        }
+      }
+    } catch (error) {
+      console.error("[resolveQuestionFromContext] Semantic engine error, falling back to standard logic:", error);
+      // Fall through to standard logic below
+    }
+  }
+
   // Determine the cutoff:
   // • If an answer has been given before: use that timestamp so only messages
   //   that arrived AFTER the last answer are included.
@@ -158,13 +246,12 @@ function resolveQuestionFromContext(
   // Use the most recent FALLBACK_MSG_COUNT messages regardless of cutoff so
   // that AI Answer always generates when explicitly clicked and regenerate
   // always has context to send.
-  const recentFallback = allMessages
-    .filter((m) => m.text?.trim())
-    .slice(-FALLBACK_MSG_COUNT);
-
   if (recentFallback.length > 0) {
+    // Apply deduplication to the joined fallback text to prevent duplicate loops
+    const joinedText = recentFallback.map((m) => m.text.trim()).join(" ");
+    const dedupedText = deduplicatePhrases(joinedText);
     return {
-      question: recentFallback.map((m) => m.text.trim()).join(" "),
+      question: dedupedText,
       source: "transcript_fallback",
     };
   }
@@ -264,11 +351,13 @@ export function useFloatingSession() {
 
   const isDupeMessage = useCallback(
     (sender: "User" | "Interviewer", text: string, timestamp: number): boolean => {
-      const normalized = text.toLowerCase().trim().replace(/[.!?]/g, "");
-      return messagesRef.current.some((m) => {
+      const normalized = text.toLowerCase().trim().replace(/[^a-z0-9\s]/gi, "");
+      // Check against recent messages from the same sender (last 20)
+      // Remove timestamp constraint to prevent accumulation of duplicate questions
+      const recentMessages = messagesRef.current.slice(-20);
+      return recentMessages.some((m) => {
         if (m.sender !== sender) return false;
-        if (Math.abs(m.timestamp - timestamp) > 2000) return false;
-        const existing = m.text.toLowerCase().trim().replace(/[.!?]/g, "");
+        const existing = m.text.toLowerCase().trim().replace(/[^a-z0-9\s]/gi, "");
         return (
           existing === normalized ||
           existing.includes(normalized) ||
@@ -284,10 +373,19 @@ export function useFloatingSession() {
   const handleUserTranscript = useCallback(
     (text: string, isFinal: boolean) => {
       if (!isFinal || !text.trim()) return;
+      
+      let cleanText = deduplicatePhrases(text);
+      const lastSameSenderMsg = [...messagesRef.current].reverse().find((m) => m.sender === "User");
+      if (lastSameSenderMsg) {
+        cleanText = removeOverlap(lastSameSenderMsg.text, cleanText);
+      }
+      cleanText = cleanText.trim();
+      if (!cleanText) return;
+
       const sid = sessionInfoRef.current?.sessionId;
       const now = Date.now();
 
-      if (isDupeMessage("User", text, now)) return;
+      if (isDupeMessage("User", cleanText, now)) return;
 
       if (sid) {
         fetch(`${BACKEND_URL}/api/session/${sid}/save-message`, {
@@ -295,7 +393,7 @@ export function useFloatingSession() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             role: "USER",
-            question: text,
+            question: cleanText,
             answer: "",
             time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
           }),
@@ -306,7 +404,7 @@ export function useFloatingSession() {
         addMessage({
           id: Math.random().toString(36).slice(7),
           sender: "User",
-          text,
+          text: cleanText,
           timestamp: now,
         }),
       );
@@ -317,10 +415,19 @@ export function useFloatingSession() {
   const handleInterviewerTranscript = useCallback(
     (text: string, isFinal: boolean) => {
       if (!isFinal || !text.trim()) return;
+      
+      let cleanText = deduplicatePhrases(text);
+      const lastSameSenderMsg = [...messagesRef.current].reverse().find((m) => m.sender === "Interviewer");
+      if (lastSameSenderMsg) {
+        cleanText = removeOverlap(lastSameSenderMsg.text, cleanText);
+      }
+      cleanText = cleanText.trim();
+      if (!cleanText) return;
+
       const sid = sessionInfoRef.current?.sessionId;
       const now = Date.now();
 
-      if (isDupeMessage("Interviewer", text, now)) return;
+      if (isDupeMessage("Interviewer", cleanText, now)) return;
 
       if (sid) {
         fetch(`${BACKEND_URL}/api/session/${sid}/save-message`, {
@@ -328,7 +435,7 @@ export function useFloatingSession() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             role: "INTERVIEWER",
-            question: text,
+            question: cleanText,
             answer: "",
             time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
           }),
@@ -339,7 +446,7 @@ export function useFloatingSession() {
         addMessage({
           id: Math.random().toString(36).slice(7),
           sender: "Interviewer",
-          text,
+          text: cleanText,
           timestamp: now,
         }),
       );
@@ -677,20 +784,10 @@ export function useFloatingSession() {
     const { question, source } = resolved;
     console.log("[useFloatingSession] handleAiAnswerClick: Resolved question from", source, ":", question);
 
-    // Check if this question was recently answered (within 3 seconds)
-    const normalizedQuestion = normalizeTranscriptText(question);
-    const { isRecent, lastAnswerTime } = isRecentlyAnswered(
-      normalizedQuestion,
-      answeredQuestionsHistoryRef.current,
-      3000,
-    );
+    // Removed rapid re-answer blocking - user wants to be able to click multiple times
+    // even for the same question to get different answers
 
-    if (isRecent) {
-      console.log(
-        `[useFloatingSession] handleAiAnswerClick: Question answered ${lastAnswerTime}ms ago. Blocking rapid re-answer.`,
-      );
-      return;
-    }
+    const normalizedQuestion = normalizeTranscriptText(question);
 
     console.log("[useFloatingSession] handleAiAnswerClick: Invoking handleAiAnswer with:", {
       sessionId: info.sessionId,
@@ -778,23 +875,30 @@ export function useFloatingSession() {
       const info = sessionInfoRef.current;
       if (!info || !messageId) return;
 
-      // Try to resolve fresher context using the pre-advance cutoff.
-      // This picks up transcript that arrived AFTER the original (possibly early)
-      // AI Answer click but BEFORE the cutoff was advanced on completion.
-      // Falls back to the cached question stored on the message card if no
-      // new context is found.
+      // Try to resolve fresher context using live interim text only.
+      // If live text is empty, let handleRegenerate use the cached question
+      // from the message itself - DO NOT use transcript_fallback which joins
+      // all messages and causes duplicate question loops.
       const liveText = tabInterimTranscript.trim();
-      const freshResolved = resolveQuestionFromContext(
-        liveText,
-        messagesRef.current,
-        null,
-        lastAnswerTimestampRef.current,
-      );
+      let questionOverride: string | undefined = undefined;
 
-      const questionOverride = freshResolved?.question ?? undefined;
+      if (liveText) {
+        const freshResolved = resolveQuestionFromContext(
+          liveText,
+          messagesRef.current,
+          null,
+          lastAnswerTimestampRef.current,
+        );
+        // Only use fresh context if it's from live_interim or transcript_history
+        // (not transcript_fallback which joins all messages)
+        if (freshResolved && freshResolved.source !== "transcript_fallback") {
+          questionOverride = freshResolved.question;
+        }
+      }
+
       console.log(
         "[useFloatingSession] handleRegenerateResponse: fresh context resolve:",
-        freshResolved?.source ?? "none",
+        questionOverride ? "live_context" : "cached_question",
         questionOverride ? `"${questionOverride.slice(0, 120)}..."` : "(using cached question)",
       );
 

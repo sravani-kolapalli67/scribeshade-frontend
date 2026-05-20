@@ -13,6 +13,13 @@ import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "@/lib/utils";
+import {
+  createTranscriptStabilizer,
+  prepareGeneration,
+  shouldTriggerGeneration,
+  classifyTranscript,
+  isContinuationOfPreviousQuestion,
+} from "@/lib/generation-pipeline";
 
 import {
   ResizableHandle,
@@ -79,6 +86,56 @@ function segmentQuestions(text: string): string[] {
   if (questionParts.length >= 1) return questionParts;
 
   return [];
+}
+
+/**
+ * Deduplicates repeated adjacent phrases within a single transcript string (up to 6 words).
+ */
+function deduplicatePhrases(text: string): string {
+  let cleaned = text.replace(/\s+/g, " ").trim();
+  const words = cleaned.split(" ");
+  for (let n = 1; n <= Math.min(6, Math.floor(words.length / 2)); n++) {
+    for (let i = 0; i <= words.length - 2 * n; i++) {
+      const first = words.slice(i, i + n).join(" ").toLowerCase();
+      const second = words.slice(i + n, i + 2 * n).join(" ").toLowerCase();
+      const normFirst = first.replace(/[^a-z0-9\s]/gi, "").trim();
+      const normSecond = second.replace(/[^a-z0-9\s]/gi, "").trim();
+      if (normFirst === normSecond && normFirst.length > 0) {
+        words.splice(i + n, n);
+        i--; // Step back to check again with the updated array
+      }
+    }
+  }
+  return words.join(" ");
+}
+
+/**
+ * Removes sliding-window overlaps between the end of lastText and the start of newText.
+ */
+function removeOverlap(lastText: string, newText: string): string {
+  const normLast = lastText.toLowerCase().trim().replace(/[^a-z0-9\s]/gi, "");
+  const normNew = newText.toLowerCase().trim().replace(/[^a-z0-9\s]/gi, "");
+  
+  const lastWords = normLast.split(/\s+/);
+  const newWords = normNew.split(/\s+/);
+  
+  let overlapWordsCount = 0;
+  const maxSearch = Math.min(lastWords.length, newWords.length, 15);
+  
+  for (let len = 1; len <= maxSearch; len++) {
+    const lastSuffix = lastWords.slice(-len).join(" ");
+    const newPrefix = newWords.slice(0, len).join(" ");
+    if (lastSuffix === newPrefix) {
+      overlapWordsCount = len;
+    }
+  }
+  
+  if (overlapWordsCount > 0) {
+    const actualNewWords = newText.trim().split(/\s+/);
+    return actualNewWords.slice(overlapWordsCount).join(" ");
+  }
+  
+  return newText;
 }
 
 export default function ActiveSession() {
@@ -271,6 +328,36 @@ export default function ActiveSession() {
     } catch (error) {
       console.error("Error ending session directly:", error);
     } finally {
+      // Stop all transcription streams and screen share gracefully
+      try {
+        // Stop mic transcription
+        if (!isTauri()) {
+          micTranscription.stopTranscription();
+        } else {
+          // For Tauri, invoke the stop command
+          await invoke("stop_mic_transcription").catch(() => {});
+        }
+        
+        // Stop tab transcription (browser only)
+        if (!isTauri()) {
+          tabTranscription.stopTranscription();
+          tabAudioTranscription.stopTranscription();
+        }
+        
+        // Stop screen share stream
+        if (stream) {
+          stream.getTracks().forEach((track) => {
+            try {
+              track.stop();
+            } catch (e) {
+              console.warn("Error stopping track:", e);
+            }
+          });
+        }
+      } catch (err) {
+        console.error("Stream cleanup error:", err);
+      }
+
       // Clean up overlay and main windows
       try {
         const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
@@ -351,6 +438,63 @@ export default function ActiveSession() {
 
   const autoGenerateResponse = location.state?.connectData?.autoGenerateResponse ?? false;
 
+  // ── Comprehensive cleanup on unmount ──────────────────────────────────────
+  // Each transcription hook (useDeepgram, useNativeTabTranscription) has its own
+  // cleanup effect that calls stopTranscription(). We don't duplicate that here.
+  // The parent only cleans up screen stream and internal refs.
+  useEffect(() => {
+    return () => {
+      // Stop screen share stream (not handled by hooks)
+      try {
+        if (stream) {
+          stream.getTracks().forEach((track) => {
+            try {
+              track.stop();
+            } catch (e) {
+              console.warn("Error stopping screen track on unmount:", e);
+            }
+          });
+        }
+      } catch (err) {
+        console.warn("Error stopping screen stream on unmount:", err);
+      }
+
+      // Clear pending timers and refs (not handled by hooks)
+      try {
+        pendingTranscriptRef.current = [];
+        stabilizerRef.current?.destroy();
+        stabilizerRef.current = null;
+        previousAutoContextRef.current = null;
+      } catch (err) {
+        console.warn("Error clearing refs on unmount:", err);
+      }
+    };
+    // Empty dependency array ensures this only runs on unmount
+  }, []);
+
+  // ── Screen stream cleanup on stream change ──────────────────────────────────
+  // When user picks a new tab/screen, the old stream's tracks should stop.
+  // This is separate from the unmount cleanup to handle mid-session stream changes.
+  useEffect(() => {
+    return () => {
+      // This cleanup runs when the component unmounts OR when 'stream' changes
+      // If stream changes (user picked a new tab), the old stream is cleaned up
+      // by the useScreenShare hook, so this is just a safety measure.
+      if (stream) {
+        stream.getTracks().forEach((track) => {
+          try {
+            if (track.readyState === 'live') {
+              track.stop();
+            }
+          } catch (e) {
+            console.warn("Error stopping screen track in stream cleanup:", e);
+          }
+        });
+      }
+    };
+  }, [stream]);
+
+
   // Monotonic sequence + per-source dedup memory.
   // - `transcriptSeqRef` provides a strict ordering stamp on every accepted
   //   transcript chunk. Useful for replay safety and downstream consumers.
@@ -378,37 +522,67 @@ export default function ActiveSession() {
   // questions (since speakers pause >1.8 s between distinct topics).
   const pendingTranscriptRef = useRef<string[]>([]);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const DEBOUNCE_MS = 1800;
+  const DEBOUNCE_MS = 1200;
 
-  // Clear any pending debounce timer on unmount so a stale timer can't fire
-  // an AI call after the session view is gone.
+  // Stabilizer-based auto-answer pipeline
+  const stabilizerRef = useRef<ReturnType<typeof createTranscriptStabilizer> | null>(null);
+  const previousAutoContextRef = useRef<{ transcript: string; timestamp: number } | null>(null);
+
+  // Clear any pending debounce timer and refs on unmount (also covered by
+  // comprehensive cleanup above, but kept for clarity of intent).
   useEffect(() => {
     return () => {
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
         debounceTimerRef.current = null;
       }
-      pendingTranscriptRef.current = [];
     };
   }, []);
 
   const handleTranscript = useCallback(
     (sender: "User" | "Interviewer", text: string, isFinal: boolean) => {
       if (isFinal && text.trim()) {
-        console.log(`[Transcript Final] ${sender}: ${text}`);
+        const now = Date.now();
+        console.log(`[Transcript Final Input] ${sender}: ${text}`);
         setMessages((prev) => {
-          const now = Date.now();
-          const normalizedNew = text.toLowerCase().trim().replace(/[.!?]/g, "");
+          let cleanText = deduplicatePhrases(text);
+          // Look for overlap with the last message from the same sender
+          const lastSameSenderMsg = [...prev].reverse().find((m) => m.sender === sender);
+          if (lastSameSenderMsg) {
+            cleanText = removeOverlap(lastSameSenderMsg.text, cleanText);
+          }
+          cleanText = cleanText.trim();
+          if (!cleanText) {
+            console.log(`[Dedupe] Empty after overlap removal from ${sender}: "${text}"`);
+            return prev;
+          }
+
+          const normalizedNew = cleanText.toLowerCase().trim().replace(/[^a-z0-9\s]/gi, "");
           const ownKey = `${sender}::${normalizedNew}`;
 
           // ── Pass 1: same-source replay/duplicate within 5s ────────────
-          // Catches Deepgram re-emitting the same final, websocket reconnect
-          // replays, and React StrictMode double-invocations.
-          const recent = recentChunksRef.current.filter((c) => now - c.t < 5000);
-          if (recent.some((c) => c.key === ownKey)) {
-            console.log(`[Dedup-self] Suppressed replay from ${sender}: "${text}"`);
+          // Catches Deepgram re-emitting the same final, websocket reconnect replays.
+          // IMPORTANT: Only suppress if ALREADY in current state. This prevents
+          // React StrictMode double-renders from suppressing valid new messages.
+          // StrictMode renders the component twice in dev; the second render with
+          // the same input should add the message, not suppress it.
+          const isAlreadyInState = prev.some((m) => {
+            if (m.sender !== sender) return false;
+            const normExisting = m.text
+              .toLowerCase()
+              .trim()
+              .replace(/[^a-z0-9\s]/gi, "");
+            return normExisting === normalizedNew;
+          });
+
+          if (isAlreadyInState) {
+            console.log(`[Dedup-self] Suppressed replay from ${sender}: "${cleanText}"`);
             return prev;
           }
+
+          // Track in ref for future dedup, but don't use it to suppress messages
+          // that aren't already in state.
+          const recent = recentChunksRef.current.filter((c) => now - c.t < 5000);
           recentChunksRef.current = [...recent, { key: ownKey, t: now }].slice(-20);
 
           // ── Pass 2: cross-source echo within 2s (mic ↔ tab audio) ─────
@@ -417,7 +591,7 @@ export default function ActiveSession() {
             const normalizedExisting = m.text
               .toLowerCase()
               .trim()
-              .replace(/[.!?]/g, "");
+              .replace(/[^a-z0-9\s]/gi, "");
             return (
               normalizedExisting === normalizedNew ||
               normalizedExisting.includes(normalizedNew) ||
@@ -426,7 +600,7 @@ export default function ActiveSession() {
           });
 
           if (isEcho) {
-            console.log(`[Dedupe] Suppressed echo from ${sender}: "${text}"`);
+            console.log(`[Dedupe] Suppressed echo from ${sender}: "${cleanText}"`);
             return prev;
           }
 
@@ -439,7 +613,7 @@ export default function ActiveSession() {
           const newMsg: Message = {
             id: stableId,
             sender,
-            text,
+            text: cleanText,
             time: new Date().toLocaleTimeString([], {
               hour: "2-digit",
               minute: "2-digit",
@@ -447,8 +621,9 @@ export default function ActiveSession() {
             timestamp: now,
           };
 
-          // Save to backend — skip entirely for ephemeral sessions.
-          if (saveTranscriptEnabled) {
+          // Save to backend — skip entirely for ephemeral sessions, and skip under Tauri
+          // because the mini window (useFloatingSession) handles DB persistence for Tauri.
+          if (saveTranscriptEnabled && !isTauri()) {
             fetch(
               `${import.meta.env.VITE_BACKEND_URL}/api/session/${id}/save-message`,
               {
@@ -456,21 +631,13 @@ export default function ActiveSession() {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                   role: sender === "User" ? "USER" : "INTERVIEWER",
-                  question: text,
+                  question: cleanText,
                   answer: "",
                   time: newMsg.time,
                 }),
               },
             ).catch((err) =>
               console.error("Failed to save transcript segment:", err),
-            );
-          }
-
-          // Forward structured transcript to the mini overlay so it can render
-          // both sides even when native SCKit audio is unavailable (e.g. Windows).
-          if (isTauri()) {
-            emit("overlay-transcript", { sender, text, timestamp: now }).catch(
-              () => {},
             );
           }
 
@@ -485,26 +652,9 @@ export default function ActiveSession() {
           // distinct question (numbered list, '?'-terminated sequence, or
           // word-numbered list) gets its own AI call with a small stagger.
           if (sender === "Interviewer" && autoGenerateResponse && id) {
-            pendingTranscriptRef.current.push(text);
-            if (debounceTimerRef.current) {
-              clearTimeout(debounceTimerRef.current);
-            }
-            debounceTimerRef.current = setTimeout(() => {
-              const joined = pendingTranscriptRef.current.join(" ").trim();
-              pendingTranscriptRef.current = [];
-              debounceTimerRef.current = null;
-              if (!joined) return;
-              const questions = segmentQuestions(joined);
-              const targets = questions.length > 0 ? questions : [joined];
-              targets.forEach((q, i) => {
-                setTimeout(
-                  () => {
-                    handleAiAnswerRef.current?.(id, q, selectedModelRef.current);
-                  },
-                  i * 500,
-                );
-              });
-            }, DEBOUNCE_MS);
+            pendingTranscriptRef.current.push(cleanText);
+            const joined = pendingTranscriptRef.current.join(" ").trim();
+            stabilizerRef.current?.feed(joined);
           }
 
           return [...prev, newMsg];
@@ -544,7 +694,7 @@ export default function ActiveSession() {
     model: "nova-3",
     language: getLanguageCode(selectedLanguage),
     onTranscript: onInterviewerTranscript,
-    enabled: !isConnectDialogOpen,
+    enabled: !isConnectDialogOpen && !isTauri(),
   });
 
   // ── Browser tab audio transcription (getDisplayMedia path) ────────────────
@@ -564,6 +714,7 @@ export default function ActiveSession() {
 
   // Auto-start / stop browser tab audio transcription based on stream audio
   useEffect(() => {
+    if (isTauri()) return;
     if (streamHasAudio) {
       tabAudioTranscription.startTranscription();
     } else {
@@ -574,6 +725,7 @@ export default function ActiveSession() {
 
   // Surface cpal errors as toasts
   useEffect(() => {
+    if (isTauri()) return;
     if (tabTranscription.error) toast.error(tabTranscription.error);
   }, [tabTranscription.error]);
 
@@ -582,15 +734,151 @@ export default function ActiveSession() {
     if (tabAudioTranscription.error) toast.error(tabAudioTranscription.error);
   }, [tabAudioTranscription.error]);
 
-  // Merged tab transcription state (SCKit native + browser stream audio)
-  const mergedTabIsTranscribing =
-    tabTranscription.isTranscribing || tabAudioTranscription.isTranscribing;
-  const mergedTabIsConnecting =
-    tabTranscription.isConnecting || tabAudioTranscription.isConnecting;
-  const mergedTabInterimTranscript =
-    tabTranscription.interimTranscript ||
-    tabAudioTranscription.interimTranscript;
-  const mergedTabError = tabTranscription.error || tabAudioTranscription.error;
+  // Tauri STT states
+  const [tauriMicActive, setTauriMicActive] = useState(false);
+  const [tauriMicConnecting, setTauriMicConnecting] = useState(false);
+  const [tauriMicInterim, setTauriMicInterim] = useState("");
+
+  const [tauriTabActive, setTauriTabActive] = useState(false);
+  const [tauriTabConnecting, setTauriTabConnecting] = useState(false);
+  const [tauriTabInterim, setTauriTabInterim] = useState("");
+  const [tauriError, setTauriError] = useState<string | null>(null);
+
+  // ── Unified transcription states (Tauri vs Web) ──────────────────────────
+  const isMicTranscribing = isTauri() ? tauriMicActive : micTranscription.isTranscribing;
+  const isMicConnectingState = isTauri() ? tauriMicConnecting : micTranscription.isConnecting;
+  const activeMicInterimTranscript = isTauri() ? tauriMicInterim : micTranscription.interimTranscript;
+
+  const mergedTabIsTranscribing = isTauri()
+    ? tauriTabActive
+    : (tabTranscription.isTranscribing || tabAudioTranscription.isTranscribing);
+  const mergedTabIsConnecting = isTauri()
+    ? tauriTabConnecting
+    : (tabTranscription.isConnecting || tabAudioTranscription.isConnecting);
+  const mergedTabInterimTranscript = isTauri()
+    ? tauriTabInterim
+    : (tabTranscription.interimTranscript || tabAudioTranscription.interimTranscript);
+  const mergedTabError = isTauri()
+    ? tauriError
+    : (tabTranscription.error || tabAudioTranscription.error);
+
+  const onUserTranscriptRef = useRef(onUserTranscript);
+  const onInterviewerTranscriptRef = useRef(onInterviewerTranscript);
+
+  useEffect(() => {
+    onUserTranscriptRef.current = onUserTranscript;
+  }, [onUserTranscript]);
+
+  useEffect(() => {
+    onInterviewerTranscriptRef.current = onInterviewerTranscript;
+  }, [onInterviewerTranscript]);
+
+  // Tauri STT listeners
+  useEffect(() => {
+    if (!isTauri()) return;
+
+    let unlistenMicTx: (() => void) | undefined;
+    let unlistenMicSt: (() => void) | undefined;
+    let unlistenSysTx: (() => void) | undefined;
+    let unlistenSysSt: (() => void) | undefined;
+
+    // Mic transcript listener
+    listen<{ text: string; is_final: boolean }>("stt:mic", (event) => {
+      const { text, is_final } = event.payload;
+      if (is_final) {
+        setTauriMicInterim("");
+        onUserTranscriptRef.current(text, true);
+      } else {
+        setTauriMicInterim(text);
+      }
+    }).then((fn) => { unlistenMicTx = fn; }).catch(() => {});
+
+    // Mic status listener
+    listen<{ status: string; error?: string }>("stt:status:mic", (event) => {
+      const { status, error } = event.payload;
+      if (status === "transcribing") {
+        setTauriMicActive(true);
+        setTauriMicConnecting(false);
+      } else if (status === "connecting") {
+        setTauriMicConnecting(true);
+      } else {
+        setTauriMicActive(false);
+        setTauriMicConnecting(false);
+      }
+      if (status === "error" && error) {
+        setTauriError(error);
+        toast.error(`Mic: ${error}`);
+      } else if (status === "transcribing") {
+        setTauriError(null);
+      }
+    }).then((fn) => { unlistenMicSt = fn; }).catch(() => {});
+
+    // System audio transcript listener
+    listen<{ text: string; is_final: boolean }>("stt:system-audio", (event) => {
+      const { text, is_final } = event.payload;
+      if (is_final) {
+        setTauriTabInterim("");
+        onInterviewerTranscriptRef.current(text, true);
+      } else {
+        setTauriTabInterim(text);
+      }
+    }).then((fn) => { unlistenSysTx = fn; }).catch(() => {});
+
+    // System audio status listener
+    listen<{ status: string; error?: string }>("stt:status:system", (event) => {
+      const { status, error } = event.payload;
+      if (status === "transcribing") {
+        setTauriTabActive(true);
+        setTauriTabConnecting(false);
+      } else if (status === "connecting") {
+        setTauriTabConnecting(true);
+      } else {
+        setTauriTabActive(false);
+        setTauriTabConnecting(false);
+      }
+      if (status === "error" && error) {
+        setTauriError(error);
+        toast.error(`System Audio: ${error}`);
+      } else if (status === "transcribing") {
+        setTauriError(null);
+      }
+    }).then((fn) => { unlistenSysSt = fn; }).catch(() => {});
+
+    return () => {
+      unlistenMicTx?.();
+      unlistenMicSt?.();
+      unlistenSysTx?.();
+      unlistenSysSt?.();
+    };
+  }, []);
+
+  const toggleTauriOrBrowserMic = useCallback(async () => {
+    if (isTauri()) {
+      if (tauriMicActive || tauriMicConnecting) {
+        await invoke("stop_mic_transcription").catch(() => {});
+        setTauriMicActive(false);
+        setTauriMicConnecting(false);
+        setTauriMicInterim("");
+      } else {
+        setTauriMicConnecting(true);
+        try {
+          await invoke("start_mic_transcription", {
+            language: getLanguageCode(selectedLanguage),
+            model: "nova-3",
+          });
+        } catch (e) {
+          toast.error(`Mic: ${String(e)}`);
+          setTauriMicConnecting(false);
+        }
+      }
+    } else {
+      if (micTranscription.isTranscribing) {
+        micTranscription.stopTranscription();
+      } else {
+        micTranscription.startTranscription();
+      }
+    }
+  }, [selectedLanguage, tauriMicActive, tauriMicConnecting, micTranscription]);
 
   const {
     aiChat,
@@ -607,6 +895,99 @@ export default function ActiveSession() {
 
   // Wire handleAiAnswer into the stable ref so handleTranscript can call it.
   handleAiAnswerRef.current = handleAiAnswer;
+
+  // Stable ref for handleStableTranscript so the stabilizer callback always
+  // invokes the latest version without recreating the stabilizer instance.
+  const handleStableTranscriptRef = useRef<((t: string) => void) | null>(null);
+
+  const handleStableTranscript = useCallback((stableTranscript: string) => {
+    if (!id || !handleAiAnswer) return;
+
+    // Get classification with previous context for continuation detection
+    const classification = classifyTranscript(
+      stableTranscript,
+      previousAutoContextRef.current?.transcript,
+    );
+
+    // Check continuation — if within 8s of previous, check if it's a follow-up
+    if (previousAutoContextRef.current) {
+      const timeDelta = Date.now() - previousAutoContextRef.current.timestamp;
+      if (
+        isContinuationOfPreviousQuestion(
+          stableTranscript,
+          previousAutoContextRef.current.transcript,
+          timeDelta,
+        )
+      ) {
+        // Merge with previous and re-classify
+        const merged =
+          previousAutoContextRef.current.transcript + " " + stableTranscript;
+        // The pipeline's prepareGeneration handles merging internally,
+        // but we pass the previous context so it can detect continuation
+        // eslint-disable-next-line no-console
+        console.log(
+          "[AutoAnswer] Continuation detected, merged:",
+          merged.slice(0, 80),
+        );
+      }
+    }
+
+    // Use shouldTriggerGeneration to decide
+    const triggerResult = shouldTriggerGeneration({
+      transcript: stableTranscript,
+      isStable: true,
+      classification,
+      lastGenerationTimestamp: previousAutoContextRef.current?.timestamp ?? 0,
+      recentQuestions: [], // The useAIChat hook handles its own recent dedup
+    });
+
+    if (!triggerResult.trigger) {
+      // eslint-disable-next-line no-console
+      console.log("[AutoAnswer] Skipped:", triggerResult.reason);
+      return;
+    }
+
+    // Route based on classification
+    if (classification.shouldGroup) {
+      // Grouped scenario: ONE call with full transcript
+      handleAiAnswer(id, stableTranscript, selectedModel);
+    } else {
+      // Independent questions: call for each segment with stagger
+      const segments = classification.segments;
+      segments.forEach((segment, index) => {
+        setTimeout(() => {
+          handleAiAnswer(id, segment, selectedModel);
+        }, index * 500);
+      });
+    }
+
+    // Clear the pending buffer so the next batch starts fresh
+    pendingTranscriptRef.current = [];
+
+    // Update previous context for continuation detection
+    previousAutoContextRef.current = {
+      transcript: stableTranscript,
+      timestamp: Date.now(),
+    };
+  }, [id, selectedModel, handleAiAnswer]);
+
+  handleStableTranscriptRef.current = handleStableTranscript;
+
+  // Initialize stabilizer with 1200ms freeze window
+  useEffect(() => {
+    if (!stabilizerRef.current) {
+      stabilizerRef.current = createTranscriptStabilizer(
+        (stableSnapshot) => {
+          handleStableTranscriptRef.current?.(stableSnapshot);
+        },
+        { freezeWindowMs: 1200 },
+      );
+    }
+    return () => {
+      stabilizerRef.current?.destroy();
+      stabilizerRef.current = null;
+    };
+  }, []);
 
   // Restore persisted transcript + AI answers on mount (survives refresh / back-nav).
   // Skipped entirely for ephemeral sessions — nothing should be restored.
@@ -670,6 +1051,7 @@ export default function ActiveSession() {
                 time,
                 // Restore the original question so Regenerate works on history entries too.
                 question: m.question || "",
+                snapshotId: m.snapshotId,
               });
             }
           } else {
@@ -750,10 +1132,10 @@ export default function ActiveSession() {
     // 50-message concatenated dump.  The backend fetches full session history from
     // DB for context, so nothing is lost.
     const interimText =
-      micTranscription.interimTranscript || mergedTabInterimTranscript;
+      activeMicInterimTranscript || mergedTabInterimTranscript;
 
     const interviewerInterim =
-      !micTranscription.interimTranscript && mergedTabInterimTranscript
+      !activeMicInterimTranscript && mergedTabInterimTranscript
         ? mergedTabInterimTranscript
         : null;
 
@@ -782,7 +1164,7 @@ export default function ActiveSession() {
     id,
     messages,
     handleAiAnswer,
-    micTranscription.interimTranscript,
+    activeMicInterimTranscript,
     mergedTabInterimTranscript,
     selectedModel,
   ]);
@@ -861,15 +1243,15 @@ export default function ActiveSession() {
       await emit("overlay-update", {
         transcript: combinedTranscript,
         interimTranscript:
-          micTranscription.interimTranscript || mergedTabInterimTranscript,
+          activeMicInterimTranscript || mergedTabInterimTranscript,
         status:
-          micTranscription.isConnecting || mergedTabIsConnecting
+          isMicConnectingState || mergedTabIsConnecting
             ? "Connecting"
-            : micTranscription.isTranscribing || mergedTabIsTranscribing
+            : isMicTranscribing || mergedTabIsTranscribing
               ? "Recording"
               : "Connected",
-        isMicActive: micTranscription.isTranscribing,
-        isMicConnecting: micTranscription.isConnecting,
+        isMicActive: isMicTranscribing,
+        isMicConnecting: isMicConnectingState,
         timerText: formattedTime,
         sessionId: id || null,
         selectedModel: selectedModel,
@@ -878,8 +1260,8 @@ export default function ActiveSession() {
     syncOverlay();
   }, [
     messages,
-    micTranscription.isTranscribing,
-    micTranscription.interimTranscript,
+    isMicTranscribing,
+    activeMicInterimTranscript,
     mergedTabIsTranscribing,
     mergedTabInterimTranscript,
     formattedTime,
@@ -902,45 +1284,34 @@ export default function ActiveSession() {
     forwardToOverlay();
   }, [aiChat, isAnswering, isAnalyzing]);
 
-  // Stable refs for overlay event handlers to prevent listener leakage
-  const onAiAnswerRef = useRef(onAiAnswer);
-  const onAnalyzeScreenRef = useRef(onAnalyzeScreen);
-  const handleCustomQueryRef = useRef(handleCustomQuery);
-
-  const onToggleMicRef = useRef(() => {
-    if (micTranscription.isTranscribing) {
-      micTranscription.stopTranscription();
-    } else {
-      micTranscription.startTranscription();
+  const onClear = useCallback(() => {
+    if (isTauri()) {
+      setTauriMicInterim("");
+      setTauriTabInterim("");
     }
-  });
-
-  const onClearRef = useRef(() => {
     micTranscription.clearTranscript();
     tabTranscription.clearTranscript();
     tabAudioTranscription.clearTranscript();
     setMessages([]);
-  });
+    pendingTranscriptRef.current = [];
+    stabilizerRef.current?.cancel();
+    previousAutoContextRef.current = null;
+  }, [micTranscription, tabTranscription, tabAudioTranscription]);
 
+  // Stable refs for overlay event handlers to prevent listener leakage
+  const onAiAnswerRef = useRef(onAiAnswer);
+  const onAnalyzeScreenRef = useRef(onAnalyzeScreen);
+  const handleCustomQueryRef = useRef(handleCustomQuery);
+  const onToggleMicRef = useRef(toggleTauriOrBrowserMic);
+  const onClearRef = useRef(onClear);
   const endSessionNowRef = useRef(endSessionNow);
 
   onAiAnswerRef.current = onAiAnswer;
   onAnalyzeScreenRef.current = onAnalyzeScreen;
   handleCustomQueryRef.current = handleCustomQuery;
   endSessionNowRef.current = endSessionNow;
-  onToggleMicRef.current = () => {
-    if (micTranscription.isTranscribing) {
-      micTranscription.stopTranscription();
-    } else {
-      micTranscription.startTranscription();
-    }
-  };
-  onClearRef.current = () => {
-    micTranscription.clearTranscript();
-    tabTranscription.clearTranscript();
-    tabAudioTranscription.clearTranscript();
-    setMessages([]);
-  };
+  onToggleMicRef.current = toggleTauriOrBrowserMic;
+  onClearRef.current = onClear;
 
   // Listen for overlay events (AI answer, analyze screen, exit)
   useEffect(() => {
@@ -1041,7 +1412,7 @@ export default function ActiveSession() {
   useKeyboardShortcut("g", onAiAnswer, {
     disabled:
       (messages.length === 0 &&
-        !micTranscription.interimTranscript &&
+        !activeMicInterimTranscript &&
         !mergedTabInterimTranscript) ||
       isAnswering,
   });
@@ -1052,25 +1423,14 @@ export default function ActiveSession() {
 
   const transcriptProps = {
     messages,
-    micInterimTranscript: micTranscription.interimTranscript,
-    isMicTranscribing: micTranscription.isTranscribing,
+    micInterimTranscript: activeMicInterimTranscript,
+    isMicTranscribing: isMicTranscribing,
     tabInterimTranscript: mergedTabInterimTranscript,
     isTabTranscribing: mergedTabIsTranscribing,
-    isConnecting: micTranscription.isConnecting || mergedTabIsConnecting,
-    error: micTranscription.error || mergedTabError,
-    onToggleMic: () => {
-      if (micTranscription.isTranscribing) {
-        micTranscription.stopTranscription();
-      } else {
-        micTranscription.startTranscription();
-      }
-    },
-    onClear: () => {
-      micTranscription.clearTranscript();
-      tabTranscription.clearTranscript();
-      tabAudioTranscription.clearTranscript();
-      setMessages([]);
-    },
+    isConnecting: isMicConnectingState || mergedTabIsConnecting,
+    error: (isTauri() ? tauriError : micTranscription.error) || mergedTabError,
+    onToggleMic: toggleTauriOrBrowserMic,
+    onClear,
     onMinimize: toggleFullscreen,
     onChangeTab: startShare,
     onOpenOverlay: handleOpenOverlay,
@@ -1084,7 +1444,7 @@ export default function ActiveSession() {
     isAnswering,
     canAnswer:
       messages.length > 0 ||
-      !!micTranscription.interimTranscript ||
+      !!activeMicInterimTranscript ||
       !!mergedTabInterimTranscript,
     canAnalyze: !!stream,
     onAiAnswer,

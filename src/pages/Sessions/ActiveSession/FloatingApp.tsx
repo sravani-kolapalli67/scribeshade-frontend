@@ -76,6 +76,7 @@ interface AIDisplayResponse {
   text: string;
   isStreaming: boolean;
   messageId: string;
+  question?: string;
 }
 
 const getLanguageCode = (lang: string): string => {
@@ -323,11 +324,16 @@ const AnswerArea: React.FC<{
           : resp.text;
         const parsed = parseAIResponse(displayText);
 
+        // The question comes from the message's `.question` field (set by
+        // parseAnswerContent during streaming) — NOT from re-parsing the
+        // `.text` body, which already has the QUESTION: label stripped.
+        const finalQuestion = resp.question?.trim() || parsed.question || "";
+
         // Universal "Copy All" payload — always includes the question (when
         // present) followed by the answer, so users can paste a self-contained
         // Q&A snippet into notes / Slack / docs in one click.
-        const copyAllPayload = parsed.question
-          ? `Question:\n${parsed.question}\n\nAnswer:\n${parsed.answer}`
+        const copyAllPayload = finalQuestion
+          ? `Question:\n${finalQuestion}\n\nAnswer:\n${parsed.answer}`
           : parsed.answer;
 
         return (
@@ -343,7 +349,7 @@ const AnswerArea: React.FC<{
               this block shows the AI's *summarized* version so the user can
               copy the cleaned-up phrasing the AI is actually answering.
             */}
-            {parsed.question && (
+            {finalQuestion && (
               <div className="mb-4 group/question">
                 <div className="flex items-center gap-2 mb-1.5">
                   <HelpCircle className="h-4 w-4 text-blue-400 shrink-0" />
@@ -351,11 +357,11 @@ const AnswerArea: React.FC<{
                     Question
                   </span>
                   <span className="opacity-0 group-hover/question:opacity-100 transition-opacity">
-                    <InlineCopyButton text={parsed.question} />
+                    <InlineCopyButton text={finalQuestion} />
                   </span>
                 </div>
                 <div className="text-[15px] leading-snug font-bold text-white wrap-break-word">
-                  {parsed.question}
+                  {finalQuestion}
                 </div>
                 {/* Horizontal divider separating Question from Answer */}
                 <div className="mt-3 h-px w-full bg-white/15" />
@@ -1155,6 +1161,7 @@ const FloatingApp: React.FC = () => {
                         {
                           messageId: currentResponse?.id ?? "",
                           text: currentResponse?.text ?? "",
+                          question: currentResponse?.question ?? "",
                           isStreaming:
                             safeIndex === session.aiResponses.length - 1 &&
                             (session.isAnswering || session.isAnalyzing),

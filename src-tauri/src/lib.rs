@@ -2049,15 +2049,19 @@ async fn ensure_microphone_permission() -> Result<(), String> {
             ),
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
-        // Windows/Linux: permission is either always granted (Windows) or
-        // managed by the DE (Linux).  Probe the device as a basic sanity check.
+        // Windows: permission is always granted. Probe the device as a basic sanity check.
         use cpal::traits::{DeviceTrait, HostTrait};
         let host = cpal::default_host();
         host.default_input_device()
             .ok_or_else(|| "No default input device found".to_string())
             .and_then(|d| d.default_input_config().map(|_| ()).map_err(|e| e.to_string()))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        // Linux: managed by the DE, skip device probe for now
+        Ok(())
     }
 }
 

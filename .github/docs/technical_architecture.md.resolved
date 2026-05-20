@@ -1,0 +1,689 @@
+# ScribeShade: AI Answer Lifecycle & Context Architecture
+**Technical Specification & Optimization Blueprint**  
+*Document Version: 1.4.0*  
+*Author: Senior AI Systems Architect*
+
+---
+
+## 1. Executive Summary
+
+ScribeShade is a desktop-first productivity application designed to provide real-time interview coaching, screen analysis, and resume/project tailoring. This document details the lifecycle of the AI-powered answering system, analyzing how context is gathered, processed, and transmitted to LLMs via OpenRouter. 
+
+The current system relies on a monolithic context assembly pipeline that transmits up to **15,000+ tokens** on every single user request. This document exposes key structural bottlenecks—specifically payload bloat, redundant historical context injection, and sequential vector embeddings—and presents a concrete, implementable blueprint for a **Context Intelligence Engine (CIE)**. The CIE introduces rolling transcript memory, semantic context pruning, and token budgeting, aiming to reduce latency by **40%** and API token costs by **65%** while preserving output relevance.
+
+---
+
+## 2. Current Architecture Overview
+
+The system bridges a high-performance Tauri desktop app (Rust + React) with a TypeScript/Express backend, orchestrating audio capture, transcription, semantic retrieval, and streaming LLM inference.
+
+### High-Level System Architecture
+
+```mermaid
+graph TD
+    %% Frontend Components
+    subgraph Frontend [Tauri Desktop Client]
+        Launcher["Launcher Widget (WidgetApp.tsx)"]
+        Overlay["Mini Transcription Overlay (FloatingApp.tsx)"]
+        useNative["useNativeTabTranscription Hook"]
+        useAIChat["useAIChat Hook (Vite React)"]
+    end
+
+    %% OS & Third Party
+    subgraph AudioCapture [OS Loopback]
+        SCKit["ScreenCaptureKit (macOS 13.0+)"]
+    end
+    
+    subgraph ThirdParty [Third-Party Services]
+        DG["Deepgram WebSocket API"]
+        OR["OpenRouter API Gateway"]
+    end
+
+    %% Backend Services
+    subgraph Backend [ScribeShade Express Backend]
+        Router["Session Router (session.router.ts)"]
+        Controller["Session Controller (session.controller.ts)"]
+        Service["Session Service (session.service.ts)"]
+        RAG["RAG Service (rag.service.ts)"]
+        Embed["Embedding Service (embedding.service.ts)"]
+        PrismaDB[("PostgreSQL DB (Prisma + pgvector)")]
+    end
+
+    %% Flow Connections
+    SCKit -->|Raw Float32 PCM| Launcher
+    Launcher -->|axum WS / i16 PCM| useNative
+    useNative -->|PCM linear16| DG
+    DG -->|Live Text Chunks| useNative
+    useNative -->|Local Transcript State| useAIChat
+    
+    useAIChat -->|POST /api/session/:id/ai-answer| Router
+    Router --> Controller
+    Controller --> Service
+    Service -->|Query| RAG
+    RAG -->|Generate Query Vector| Embed
+    Embed -->|REST POST /embeddings| OR
+    OR -->|2560-dim Array| Embed
+    Embed -->|Query vector distance < 0.6| PrismaDB
+    PrismaDB -->|Semantic Chunk Excerpts| Service
+    Service -->|Combined System + User Prompts| OR
+    OR -->|Inference Stream (Gemini 2.0 / Fallback)| Service
+    Service -->|Chunked Response Text| Controller
+    Controller -->|res.write Chunk Stream| useAIChat
+```
+
+---
+
+## 3. Session Creation Lifecycle
+
+A session's lifecycle begins in the frontend dashboard and proceeds through a state machine that controls database entries, credit allocations, and watchdog threads.
+
+```
+[Session Flow]  PRE_CHECK ──► ACTIVE ◄──► PAUSED ──► COMPLETING ──► COMPLETED / CREDIT_EXHAUSTED
+```
+
+### Step-by-Step Lifecycle
+
+1. **Initialization (`PRE_CHECK`)**:
+   - The user selects a target company, job description, resume, supporting documents, and candidate projects.
+   - The frontend triggers `POST /api/session/create-session` (handled via `multer().any()` to process JSON and binary multipart data).
+   - The backend creates a `Session` record with a status of `PRE_CHECK`.
+   
+2. **Activation Check & Credit Hold**:
+   - When the session starts, the frontend calls `POST /api/session/:id/activate`.
+   - The backend runs a validation check:
+     - Checks if another session is `ACTIVE`, `PAUSED`, or `DISCONNECTED` for the user, returning a `409 Conflict` (code `ACTIVE_SESSION_EXISTS`) if so.
+     - Resolves the internal database user ID from the Clerk authentication token (`clerkId` $\rightarrow$ internal UUID).
+     - If the session is billable (`free === false`), it queries `UserCreditBalance`. It calls `creditsService.computeMaxAllowedMinutes(available)` to calculate the `maxAllowedMinutes` cap and records the current bracket configuration snapshot.
+   - An atomic transactional block (`prisma.$transaction`) transitions the status to `ACTIVE`, records `startedAt`, and initializes `creditsHeld`.
+
+3. **Active Monitoring (Watchdog & Heartbeats)**:
+   - A BullMQ worker (`session-watchdog`) ticks every 60 seconds to detect disconnected clients.
+   - The client sends heartbeat requests (`POST /session/:id/heartbeat`). If heartbeats cease, the session transitions to `DISCONNECTED` and, after a grace window, automatically ends via `AUTO_ENDED` (enforcing ledger charges).
+   - If credits exhaust during execution, the heartbeat endpoint triggers `creditExhaustionClose`, notifying the client via SSE and initiating a `CREDIT_EXHAUSTED` state.
+
+4. **Deactivation (`COMPLETING` $\rightarrow$ `COMPLETED`)**:
+   - Upon session termination, `POST /api/session/:id/deactivate` is invoked.
+   - Status transitions to `COMPLETING`.
+   - If billable, a BullMQ job `credit-deduction` calculates the final duration and deducts credits from the user's ledger, releasing the hold.
+   - Ephemeral Cleanups: If the user selected `saveTranscription === false`, the database transaction wipes the `transcript` and `messages` JSON fields to protect privacy, leaving an empty array.
+
+---
+
+## 4. Real-Time Transcript Pipeline
+
+ScribeShade avoids virtual audio drivers by tapping macOS's ScreenCaptureKit API directly. The audio stream feeds into a localized transcription loop.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant HW as macOS Audio Output (SCKit)
+    participant Rust as Tauri Rust Backend (axum WS)
+    participant Hook as useNativeTabTranscription
+    participant DG as Deepgram WebSocket
+    participant UI as ActiveSession React Page
+
+    Note over HW,Rust: Taps system audio graph directly
+    HW->>Rust: Intercept audio buffers (Float32 PCM)
+    Rust->>Rust: Downsample & convert to i16 LE PCM
+    Hook->>Rust: Connect Local WS (ws://127.0.0.1:port)
+    Rust-->>Hook: Send Metadata { sampleRate, channels }
+    Hook->>DG: Connect WSS (linear16 + sampleRate + multichannel)
+    
+    Loop Live Audio Capture
+        HW->>Rust: Audio Packets
+        Rust->>Hook: Binary PCM frames (ArrayBuffer)
+        Hook->>DG: Send binary PCM frame
+        DG-->>Hook: Return JSON Transcript (is_final: false)
+        Hook->>UI: Update interimTranscript state (UI flashes text)
+        DG-->>Hook: Return JSON Transcript (is_final: true)
+        Hook->>UI: Append text to transcript state
+    end
+
+    Note over Hook,DG: Keep-alive ping sent every 8s to prevent 12s timeout
+```
+
+- **Downsampling & Forwarding**: Rust downsamples SCKit's float32 stream to interleaved `i16 LE` PCM and hosts a local WebSocket server (port selected dynamically). The frontend hook `useNativeTabTranscription` establishes a connection, receives metadata, and pipe-forwards raw audio buffers to Deepgram.
+- **Deepgram Configurations**: Uses `multichannel=true` for stereo loopback, `smart_format=true`, and `endpointing=1500` to isolate distinct verbal statements.
+- **Local State Aggregation**: The transcript state accumulates final results and tracks temporary transcripts.
+
+---
+
+## 5. AI Answer Button Lifecycle
+
+The user interacts with the transcription stream via two trigger actions: clicking the **AI Answer** button (transcribed voice) or **Analyze Screen** (visual screenshot OCR). Both trigger streaming execution pipelines.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant UI as useAIChat Hook (Frontend)
+    participant API as Session Controller (Backend)
+    participant Serv as Session Service
+    participant DB as Prisma (PostgreSQL)
+    participant OR as OpenRouter API
+
+    UI->>API: POST /api/session/:id/ai-answer { transcript: "...", aiModel: "..." }
+    Note over UI,API: Request isolates and cancels prior running streams
+
+    activate API
+    API->>Serv: getAIAnswer(id, transcript, isCustomQuery, isRegenerate, model)
+    activate Serv
+    
+    Serv->>DB: Fetch Session details, JD, and ResumeId
+    Serv->>Serv: Build RAG Query & Fetch context
+    
+    Serv->>DB: Query semantically matching TranscriptChunks
+    DB-->>Serv: Return topK matches (distance < 0.6)
+    
+    Serv->>Serv: Construct System Prompt (Rules 0-8) & User Message
+    
+    Serv->>OR: Call Model Stream (Gemini 2.0 / GPT-4o)
+    activate OR
+    OR-->>Serv: SSE Text stream chunks
+    deactivate OR
+
+    Loop Stream Translation
+        Serv-->>API: Yield delta text tokens
+        API-->>UI: Write raw text chunk (res.write)
+        Note over UI: useAIChat splits stream on ===NEXT_QUESTION===
+    end
+
+    deactivate Serv
+    API-->>UI: Close connection (res.end)
+    deactivate API
+
+    Note over Serv,DB: Post-Processing Loop (Runs Asynchronously)
+    Serv->>Serv: Parse final response into Q&A blocks
+    Serv->>DB: Write to QA Table & append to messages JSON
+```
+
+---
+
+## 6. Current Context Assembly System
+
+Before dispatching an inference call, ScribeShade compiles a massive context envelope to ensure the response aligns with the candidate's background.
+
+```mermaid
+flowchart TD
+    %% Start
+    Start([Trigger AI Answer / Screen Analysis]) --> FetchSession[Read Session Row from DB]
+
+    %% Context Extraction branches
+    FetchSession --> FetchResume[Fetch Session Resume + ATS score]
+    FetchSession --> FetchDocs[Fetch Document text - Truncate to 2000 chars]
+    FetchSession --> FetchProj[Fetch Selected Projects JSON]
+    FetchSession --> FetchQA[Fetch Past Session QAs + Global QAs]
+    FetchSession --> FetchVec[Run pgvector query on transcript chunks]
+
+    %% Compilation
+    FetchResume --> CompileContext[Combine Context Fields]
+    FetchDocs --> CompileContext
+    FetchProj --> CompileContext
+    FetchQA --> CompileContext
+    FetchVec --> CompileContext
+
+    %% Final Prompts
+    CompileContext --> SystemPrompt["buildSystemMessage(context)
+    Contains: Resume, Doc, Projects,
+    History, Vector chunks,
+    Behavioral rules (0-8)"]
+    
+    CompileContext --> UserPrompt["buildUserMessage(transcript)
+    Contains: Question, Projects reminder,
+    Sentinel Instructions"]
+    
+    SystemPrompt --> ORCall[Submit to OpenRouter]
+    UserPrompt --> ORCall
+```
+
+### Static vs. Dynamic Fields in Context Compile
+
+1. **Resume Content (Static per session)**: Reads `Resume.resumeContext` in full and appends the `atsAnalysis` output (score, strengths, weaknesses).
+2. **Supporting Documents (Static per session)**: Extracts plain text and performs a substring truncation at `2000` characters.
+3. **Candidate Projects (Static per session)**: Serializes the JSON project lists. Generates STAR-aligned bullet points, elevator pitches, and key metrics.
+4. **Recent Conversation History (Dynamic)**:
+   - Slices the last 8 Q&A message items from `Session.messages`.
+   - Reads the last 2 Q&As from the user's past 3 sessions.
+   - Appends the last 10 global Q&A entries from the `QA` table.
+5. **Semantic RAG Context (Dynamic)**: Executes a cosine distance query against historical transcripts to inject relevant context.
+
+---
+
+## 7. Current RAG / Embedding System
+
+ScribeShade implements RAG using a `pgvector` store mapped over `TranscriptChunk` tables.
+
+```
+Embedding Model: perplexity/pplx-embed-v1-4b (2560 Dimensions)
+Vector Database Matcher: Cosine Distance (<=> operator)
+Threshold: distance < 0.6
+Limit: topK (default 5)
+```
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Serv as Session Service
+    participant RAG as Rag Service
+    participant Embed as Embedding Service
+    participant OR as OpenRouter (Embedding API)
+    participant DB as PostgreSQL (pgvector)
+
+    Serv->>RAG: retrieveContext(sessionId, userId, query)
+    activate RAG
+    RAG->>Embed: generateEmbedding(query)
+    activate Embed
+    
+    Embed->>OR: POST /embeddings { model: "perplexity/pplx-embed-v1-4b", input: query }
+    OR-->>Embed: return 2560-dimensional vector
+    deactivate Embed
+    
+    RAG->>DB: SQL Query with <=> operator (Cosine Distance)
+    Note over RAG,DB: SELECT * FROM TranscriptChunk WHERE distance < 0.6 ORDER BY distance LIMIT 5
+    DB-->>RAG: return matching chunks
+    RAG-->>Serv: return serialized transcript segments
+    deactivate RAG
+```
+
+### Segmentation and Indexing Mechanics
+
+- **Transcript Chunking**: When a session finishes, `RagService.processSession` segments transcripts. It splits the content using a regular expression capturing question delimiters:
+  `/(?:\n|^)(===NEXT_QUESTION===|\*\*?Extracted Question:|\*\*?QUESTION:|\*\*?Question \d+:)/i`
+- **Embedding Generation**: It generates an embedding for each segmented Q&A pair and executes a raw SQL INSERT with the vector array formatted as a string.
+- **Failures and Fallbacks**: If embedding fails on the primary model, it catches the error and falls back to a secondary model. If both fail, it logs the exception, returns an empty array, and lets the session proceed without vector context.
+
+---
+
+## 8. Current Token Usage Analysis
+
+The current context assembly pipeline is highly redundant. It sends a static envelope containing every available context item on every request.
+
+### Token Budget Breakdown (Typical Session)
+
+| Component | Content Description | Character Count | Estimated Tokens | Reuse Frequency |
+| :--- | :--- | :--- | :--- | :--- |
+| **System Prompt Metadata** | System instructions, Rules (0-8), structural sentinels | ~9,000 chars | ~2,250 tokens | 100% (Every request) |
+| **Candidate Resume** | Full text of CV + ATS rating summaries | ~12,000 chars | ~3,000 tokens | 100% (Every request) |
+| **Supporting Docs** | Technical spec, project PDF (truncated) | 2,000 chars | 500 tokens | 100% (Every request) |
+| **Candidate Projects** | 3 structured projects (metrics, challenges) | ~8,000 chars | ~2,000 tokens | 100% (Every request) |
+| **Recent Session History** | Last 8 turns of Q&As generated in session | ~10,000 chars | ~2,500 tokens | Dynamic (Grows over session) |
+| **Past Sessions History** | Last 2 Q&As from 3 past sessions | ~6,000 chars | ~1,500 tokens | 100% (Every request) |
+| **Global QA History** | Last 10 Q&As from other sessions | ~8,000 chars | ~2,000 tokens | 100% (Every request) |
+| **Semantic RAG Chunks** | 5 vector-matched transcript chunks | ~4,000 chars | ~1,000 tokens | Dynamic |
+| **Active Question/Input** | Spoken audio transcript query / vision OCR | ~400 chars | ~100 tokens | Dynamic |
+| **Total Context Size** | **Cumulative request payload** | **~49,400 chars** | **~14,850 tokens** | **Every single click** |
+
+### Cost Implications (Google Gemini 2.0 Flash)
+
+At standard OpenRouter Gemini 2.0 Flash pricing rates ($0.075 / 1M input tokens):
+- **1 Answering Click**: $0.00111
+- **Session average (40 interactions)**: $0.0445
+- **1,000 active users running 10 sessions/month**: **$445.00/month** in raw input costs.
+- If fallbacks trigger to `openai/gpt-4o-mini` ($0.150 / 1M input tokens), input costs double.
+- **Latency Overheads**: Sending 15k tokens over HTTP adds 300–600ms of payload transmission and parsing overhead on the LLM side before generation begins.
+
+---
+
+## 9. Current Problems & Bottlenecks
+
+### A. Payload Bloat & Redundant History
+The primary driver of high token costs is the lack of context pruning. The system sends the user's resume, supporting documents, projects, past session history, and global QA archive on every request, even if the question is a simple conceptual query (e.g., *"What is a data race?"*).
+
+### B. High Cost of Vision Payloads
+During screen analysis, the raw captured image is appended to the payload. While the system attempts basic compression, visual tokens are highly expensive. Sending a large image alongside the 15k token textual context envelope exacerbates latency and cost.
+
+### C. Sequential Blockers in the RAG Pipeline
+Context retrieval requires resolving semantic search chunks. ScribeShade generates query embeddings synchronously on every `ai-answer` request. The API thread blocks on OpenRouter's `/embeddings` endpoint. If this call experiences network latency, the stream start is delayed, degrading the user experience.
+
+### D. Single-Route Congestion
+All answering tasks (custom query, microphone stream, and regenerates) share the same monolithic backend route `/api/session/:id/ai-answer`. This lack of specialization prevents applying optimized parameters (such as low-token routing for simple chats versus deep-context routing for system design) to different types of requests.
+
+---
+
+## 10. Proposed Context Intelligence Engine (CIE)
+
+The proposed **Context Intelligence Engine (CIE)** replaces the monolithic prompt assembly pipeline with an adaptive broker that selectively injects context based on the query.
+
+```mermaid
+graph TD
+    Query([Incoming Question]) --> Classifier{Query Classifier}
+    
+    Classifier -->|Conceptual Chat| LiteRoute[Lite Context Builder]
+    Classifier -->|Behavioral / STAR| ProjRoute[Project & STAR Context Builder]
+    Classifier -->|Technical / Code| TechnicalRoute[Code & RAG Context Builder]
+    
+    subgraph CIE [Context Intelligence Engine]
+        LiteRoute --> Config1[1. System instructions
+        2. Last 3 turns of history
+        3. No projects/resume]
+        
+        ProjRoute --> Config2[1. System instructions
+        2. Relevant project ONLY
+        3. Relevant resume bullet
+        4. Last 5 turns of history]
+        
+        TechnicalRoute --> Config3[1. System instructions
+        2. Top 3 RAG chunks
+        3. Target tech spec document
+        4. Last 5 turns of history]
+    end
+
+    Config1 --> Assembly[Context Assembler & Token Budgeter]
+    Config2 --> Assembly
+    Config3 --> Assembly
+
+    Assembly --> TokenCheck{Under Token Budget?}
+    TokenCheck -->|Yes| Stream[Dispatch Stream]
+    TokenCheck -->|No| Compress[Apply Summarization / Truncation]
+    Compress --> Assembly
+```
+
+### CIE Context Routing Strategy
+
+- **Conceptual Queries** (*"Explain JWT"*): Excludes projects, resumes, and historical sessions. Relies on the core LLM knowledge base, reducing input tokens to **< 2,000**.
+- **Behavioral Questions** (*"Tell me about a time you failed"*): Injects only the single project that matches the semantic intent of the question, rather than serializing all projects.
+- **RAG-Triggered Queries** (*"How did we solve the latency issue in our database?"*): Dynamically extracts relevant transcript chunks using semantic matching, omitting unrelated historical records.
+
+---
+
+## 11. Proposed Retrieval Architecture
+
+To optimize RAG operations, retrieval must decouple the embedding process from the user request thread and implement smart caching.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant UI as Client View
+    participant API as Express API Thread
+    participant Queue as Redis Queue (BullMQ)
+    participant Worker as Async Indexing Worker
+    participant Embed as Embedding Service
+    participant DB as pgvector Database
+
+    Note over UI,API: Async Indexing Pipeline (Post-Answer)
+    API->>Queue: Enqueue indexing job { sessionId, content }
+    API-->>UI: Instantly return HTTP 200 (Success)
+    
+    activate Worker
+    Queue->>Worker: Process indexing job
+    Worker->>Embed: Generate embedding vector
+    Embed-->>Worker: Return embedding
+    Worker->>DB: Write TranscriptChunk row to pgvector
+    deactivate Worker
+
+    Note over UI,DB: Proposed Parallel Query Pipeline
+    UI->>API: POST /ai-answer { query: "..." }
+    activate API
+    API->>Embed: Generate query vector (Async call)
+    API->>DB: Fetch Session static info (JD, config)
+    Note over API,DB: Executed in parallel using Promise.all()
+    Embed-->>API: Query vector
+    API->>DB: Cosine distance search using vector
+    DB-->>API: Return top 3 semantic matches
+    API->>API: Assemble budget-limited prompt
+    API-->>UI: Stream response
+    deactivate API
+```
+
+### Retrieval Optimizations
+
+- **Parallel Context Fetching**: Resolves the session configuration, resume metadata, and query vector in parallel using `Promise.all()`. This eliminates sequential DB round-trips and reduces initial response latency by **200–350ms**.
+- **Asynchronous Vector Indexing**: Decouples the segmentation and indexing of transcript chunks from the response stream, moving it to an asynchronous background worker.
+
+---
+
+## 12. Proposed Rolling Transcript Memory
+
+To prevent conversation history from bloating the token footprint over long sessions, we propose replacing the raw JSON history dump with an **Adaptive Sliding Window**.
+
+```mermaid
+graph LR
+    subgraph MemoryWindow [Active Session Conversation History]
+        direction LR
+        S1["Turn 1-2 (Compressed Summary)"] -.-> S2["Turn 3-5 (Compressed Summary)"]
+        S2 -.-> T6["Turn 6 (Full QA Card)"]
+        T6 --> T7["Turn 7 (Full QA Card)"]
+        T7 --> T8["Turn 8 (Full QA Card)"]
+    end
+    
+    subgraph TokenSavings [Memory Consumption]
+        S1 --> P1["~200 Tokens"]
+        T8 --> P2["~1,000 Tokens"]
+    end
+```
+
+### Memory Mechanics
+
+1. **Active Core (Turns $N-3$ to $N$)**: The last 3 Q&As are preserved in full detail (including syntax-highlighted code blocks) to maintain immediate follow-up accuracy.
+2. **Intermediate Buffer (Turns $N-7$ to $N-4$)**: Intermediate turns are stripped of code blocks and prose, retaining only the raw question text and a single-sentence response summary.
+3. **Summary Base (Turns $< N-8$)**: Older interactions are summarized into a system prompt paragraph:
+   > *"In earlier conversation, the candidate discussed database scaling options and resolved a mock coding task using Python."*
+4. **Historical Pruning**: Completely removes the global QA history and past sessions from the default system prompt, retrieving them only via vector search if semantically triggered.
+
+---
+
+## 13. Proposed Token Budgeting System
+
+The token budgeting system enforces strict size limits on context assembly. Before a request is dispatched, the budget manager enforces allocation limits.
+
+```mermaid
+flowchart TD
+    Start[Compile Prompt Context] --> CheckTotal{Total Size > 4000 Tokens?}
+    CheckTotal -->|No| Dispatch[Dispatch to OpenRouter]
+    CheckTotal -->|Yes| ApplyBudget[Apply Segment Budgets]
+    
+    subgraph Allocation [Strict Ceiling Allocations]
+        ApplyBudget --> B1[Resume: Limit to 1000 tokens via summarization]
+        ApplyBudget --> B2[Supporting Docs: Trim to 400 tokens]
+        ApplyBudget --> B3[Projects: Exclude non-matching projects]
+        ApplyBudget --> B4[History: Apply sliding window compression]
+    end
+    
+    B1 --> Rebuild[Reassemble Prompt]
+    B2 --> Rebuild
+    B3 --> Rebuild
+    B4 --> Rebuild
+    
+    Rebuild --> CheckTotal
+```
+
+### Target Allocation Map
+
+| Segment | Target Token Cap | Action on Overflow |
+| :--- | :--- | :--- |
+| **System Rules & Sentinel Prompts** | 800 tokens | None (Core static instructions) |
+| **Candidate Resume** | 1,000 tokens | Extract core skills; exclude outdated work history |
+| **Supporting Documents** | 400 tokens | Extract text snippets matching the query's keywords |
+| **Candidate Projects** | 800 tokens | Exclude projects that do not match the query |
+| **Sliding Window History** | 600 tokens | Summarize older turns; remove code blocks |
+| **Semantic RAG Context** | 400 tokens | Reduce `topK` matches from 5 to 2 |
+| **Active Question** | Unlimited | Reserved for the current input |
+| **Total Prompt Ceiling** | **4,000 tokens** | **Reduces input size by 73%** |
+
+---
+
+## 14. Proposed Caching Strategy
+
+The system can reduce database and API round-trips by implementing caching for static and dynamic context.
+
+```
+                  ┌────────────────────────────────────────┐
+                  │          Incoming Request              │
+                  └───────────────────┬────────────────────┘
+                                      │
+                                      ▼
+                       /─────────────────────────────\
+                      <  Is static context cached?    >
+                       \─────────────────────────────/
+                               /             \
+                        Yes   /               \  No
+                             /                 \
+                            ▼                   ▼
+                 ┌────────────────────┐   ┌───────────────────────────┐
+                 │ Read from Redis    │   │ Query PostgreSQL DB       │
+                 │ (Resume, Projects) │   │ (Process in parallel)     │
+                 └────────────────────┘   └─────────────┬─────────────┘
+                                                        │
+                                                        ▼
+                                          ┌───────────────────────────┐
+                                          │ Save to Redis Cache       │
+                                          │ (Expires in 1 Hour)       │
+                                          └───────────────────────────┘
+```
+
+1. **Static Session Context Caching**:
+   - **Mechanism**: Store the serialized candidate resume and project data in Redis under the key `session:context:<session_id>` upon session activation.
+   - **TTL**: 1 hour (aligns with the maximum session duration).
+   - **Benefit**: Saves up to 5 database queries per request.
+
+2. **Vector Query Caching**:
+   - **Mechanism**: Cache query embeddings in Redis using a hash of the normalized query text: `embedding:cache:<query_hash>`.
+   - **Benefit**: Resolves repeat queries instantly (e.g., clicking *Regenerate* or re-transcribing a common question), avoiding OpenRouter embedding latency and costs.
+
+---
+
+## 15. Proposed Failure Handling System
+
+To prevent API timeouts or network outages from disrupting active sessions, we propose a multi-tiered fallback architecture.
+
+```mermaid
+flowchart TD
+    Start[Dispatch LLM Inference Call] --> PrimaryCall{Primary API Call}
+    
+    PrimaryCall -->|Success| Stream[Stream to client]
+    
+    PrimaryCall -->|Timeout / 500 / 429| FallbackCall{Fallback API Call}
+    FallbackCall -->|Success| Stream
+    
+    FallbackCall -->|Failure| DBRecovery{Local Recovery Engine}
+    DBRecovery -->|Has Cached QA| CacheOutput[Stream prior answer from cache]
+    DBRecovery -->|No Cache| ErrorOutput[Stream system error card]
+```
+
+### Timeout & Retry Policy
+
+1. **Fast-Fail Timeouts**:
+   - Reduce the primary model timeout from 30 seconds to **8 seconds** during active streaming sessions.
+   - If the primary model stalls, the system aborts the request and routes it to the fallback model.
+
+2. **Hierarchical Fallbacks**:
+   - **Primary Model**: `google/gemini-2.0-flash-001` (Fast, low cost, handles vision).
+   - **Fallback Model**: `openai/gpt-4o-mini` (High reliability, low cost).
+   - **Offline Mode**: If both models are unreachable, the system searches the local `QA` table for semantically similar questions, returning a cached answer to prevent a complete service failure.
+
+---
+
+## 16. Proposed Multi-Model Routing
+
+The system can optimize cost and latency by routing different types of requests to specialized models.
+
+```
+                         Incoming Request
+                                │
+                                ▼
+                       /─────────────────\
+                      <    Request Type   >
+                       \─────────────────/
+                         /      │      \
+           Screen Capture       │       \  Microphone / Custom Chat
+                                │        \
+                                ▼         ▼
+                   /─────────────────\   /─────────────────\
+                  <  Contains Code?   > <  Contains Code?   >
+                   \─────────────────/   \─────────────────/
+                     /             \       /             \
+              Yes   /           No  \     /  Yes      No  \
+                   /                 \   /                 \
+                  ▼                   ▼ ▼                   ▼
+         ┌─────────────────┐   ┌──────────────┐    ┌─────────────────┐
+         │ Gemini 2.0 Pro  │   │ Gemini Flash │    │ GPT-4o-Mini     │
+         │ (Deep logic /   │   │ (Fast visual │    │ (Ultra-low cost │
+         │  vision reasoning)  │  parsing)    │    │  standard chat) │
+         └─────────────────┘   └──────────────┘    └─────────────────┘
+```
+
+- **Standard Chats**: Routed to lightweight models (`openai/gpt-4o-mini`) to minimize costs.
+- **Complex Logic & Code**: Routed to higher-tier models (`google/gemini-2.0-flash-001` or `google/gemini-1.5-pro` for complex logic).
+- **Vision Queries**: Routed to vision-optimized models (`google/gemini-2.0-flash-001`).
+
+---
+
+## 17. Estimated Cost Reduction
+
+Implementing the CIE, token budgeting, and caching strategies is estimated to significantly reduce operating costs.
+
+### Cost Comparison (1,000 Sessions, ~40 requests/session)
+
+```mermaid
+gantt
+    title Token Footprint Optimization
+    dateFormat  X
+    axisFormat %s
+    
+    section Monolithic Context (Old)
+    Input Tokens (15k/req)   :active, 0, 15000
+    
+    section Optimized Context (New)
+    CIE Budgeted (4k/req)    :done, 0, 4000
+```
+
+| Parameter | Monolithic Context (Current) | Budgeted Context (CIE) | Projected Savings |
+| :--- | :--- | :--- | :--- |
+| **Avg. Input Tokens / Request** | 14,850 tokens | 4,000 tokens | **-73.0%** |
+| **Input Cost / Request (Gemini)** | $0.00111 | $0.00030 | **-73.0%** |
+| **Avg. Output Tokens / Request** | 450 tokens | 400 tokens | -11.1% |
+| **Output Cost / Request** | $0.000135 | $0.000120 | -11.1% |
+| **Total Cost / Session (40 reqs)** | **$0.0498** | **$0.0168** | **-66.2%** |
+| **Monthly Cost / 1,000 Active Users** | **$498.00** | **$168.00** | **Save $330.00/mo** |
+| **Average Stream Start Latency** | 1.8 seconds | 0.9 seconds | **-50.0%** |
+
+---
+
+## 18. Final Recommended Production Architecture
+
+To implement the Context Intelligence Engine (CIE) while maintaining backward compatibility, we recommend a modular, service-based refactoring plan.
+
+```mermaid
+graph TD
+    %% Controllers and Routers
+    Router["session.router.ts"] --> Controller["session.controller.ts"]
+    
+    %% CIE Core System
+    Controller --> CIE["cie.service.ts
+    (Context Intelligence Engine)"]
+    
+    %% CIE Sub-Components
+    CIE --> Classifier["Query Classifier
+    (Route request type)"]
+    CIE --> Budgeter["Token Budgeter
+    (Enforce 4k limits)"]
+    CIE --> Cache["Context Cache Manager
+    (Redis Storage Gateway)"]
+    
+    %% Supporting Services
+    Classifier --> RAG["rag.service.ts
+    (Parallelized vector fetching)"]
+    Classifier --> Memory["memory.service.ts
+    (Adaptive sliding window history)"]
+    
+    %% Target Execution
+    Budgeter --> TargetModel["OpenRouter Client Dispatcher"]
+```
+
+### Key Implementation Milestones
+
+1. **Develop the CIE Service (`src/features/session/cie.service.ts`)**:
+   - Centralize context assembly logic.
+   - Implement query classification using pattern matching to identify conceptual, behavioral, or technical requests.
+   
+2. **Implement Token Budgeting & Truncation**:
+   - Integrate a lightweight token estimator (e.g., `js-tiktoken`).
+   - Implement dynamic truncation for resumes, supporting documents, and projects when the context size exceeds the token budget.
+   - Set up strict limits: Resumes capped at 1,000 tokens, supporting docs at 400 tokens, projects at 800 tokens, sliding history window at 600 tokens.
+
+3. **Upgrade the RAG Service**:
+   - Refactor the database query logic to use parallel execution paths (`Promise.all`).
+   - Move post-session transcript indexing and vector generation tasks to asynchronous background jobs.
+
+4. **Integrate Redis Caching**:
+   - Cache static session context (resumes, projects) in Redis to minimize database load.
+   - Cache query embeddings to prevent duplicate processing.

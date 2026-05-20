@@ -1,7 +1,7 @@
 # ScribeShade Backend API Reference
 
-Last updated: 2026-05-04
-Document version: v1.7.0
+Last updated: 2026-05-19
+Document version: v1.8.0
 
 Base URL:
 - Local: `http://localhost:3200/api`
@@ -675,24 +675,27 @@ Error examples:
 ```
 
 ### POST /session/:id/ai-answer
-Streams AI answer from transcript.
+Streams AI answer from transcript, supporting either live transcript processing or context restoration from a generation snapshot for regeneration.
 
 Request:
 ```json
 {
   "transcript": "user question transcript",
   "isCustomQuery": false,
+  "isRegenerate": false,
+  "regenerate": false,
+  "snapshotId": "optional-uuid-of-original-generation-to-restore-context",
   "aiModel": "Gemini 2.0 Flash"
 }
 ```
 
 Success `200`:
-- Streamed `text/plain` chunks.
+- Streamed `text/plain` chunks. If snapshotId is generated or used, the stream will terminate with `\n===SNAPSHOT_ID=<uuid>===` appended at the end of the text.
 
 Error examples:
 - `400`
 ```json
-{ "error": "No transcript provided" }
+{ "error": "No transcript or snapshotId provided" }
 ```
 - `500`
 ```json
@@ -1746,6 +1749,7 @@ Recommended client flow:
 
 | Version | Date | Summary |
 |---|---|---|
+| v1.8.0 | 2026-05-19 | Updated `POST /session/:id/ai-answer` request body to accept `snapshotId` and `regenerate`/`isRegenerate` flags for context-restored regeneration, and stream response to append `\n===SNAPSHOT_ID=<uuid>===`. |
 | v1.7.0 | 2026-05-04 | Added 4 previously undocumented endpoints: `POST /auth/tauri-ticket` (Tauri desktop sign-in token), `GET /session/:id/events` (SSE real-time stream), `POST /session-notes/:sessionId/generate` (AI session notes generation), `GET /session-notes/:sessionId` (retrieve notes). Added **Session Notes APIs** section. |
 | v1.6.0 | 2026-05-05 | Updated `POST /resume/ats-score` response to include `grade` (letter grade A+–F) and `sectionScores` (per-section numeric scores). Updated `POST /resume/generate-cover-letter` response to include `wordCount`; request now accepts optional `userName` and `userEmail`. Updated `POST /resume/create-template` to require `name` field; `GET /resume/all-templates` now returns `name`. Three default templates (Classic, Modern, Minimal) seeded via `pnpm seed:templates`. |
 | v1.5.0 | 2026-05-04 | Added 8 Resume Builder endpoints: `POST /resume/builder/save`, `GET /resume/builder/list`, `GET /resume/builder/:id`, `DELETE /resume/builder/:id`, `POST /resume/builder/generate` (1cr), `POST /resume/builder/enhance-section` (0.5cr), `POST /resume/builder/tailor` (1cr), `POST /resume/builder/export-pdf`. Added `BuiltResume` Prisma model and migration. |

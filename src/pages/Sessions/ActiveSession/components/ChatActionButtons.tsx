@@ -24,7 +24,7 @@ export const ChatActionButtons = ({
     <div className="flex gap-3">
       <AIAnswerButton
         onClick={onAiAnswer}
-        disabled={!canAnswer || isAnalyzing}
+        disabled={!canAnswer || isAnalyzing || isAnswering}
         isLoading={isAnswering}
         isFullscreen={isFullscreen}
       />
