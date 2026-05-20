@@ -47,7 +47,7 @@ const data = {
       isActive: false,
       items: [
         {
-          title: "Resume",
+          title: "Upload",
           url: "/resume/all",
         },
         {
