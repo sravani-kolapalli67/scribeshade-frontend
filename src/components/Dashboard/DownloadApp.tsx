@@ -87,30 +87,30 @@ async function openLatestDesktopDownload(
 
 export function DownloadApp() {
   return (
-    <div className="w-full max-w-6xl mx-auto py-8 sm:py-12 px-5 sm:px-8 bg-linear-to-br from-brand to-blue-700 rounded-2xl sm:rounded-3xl overflow-hidden relative shadow-2xl shadow-brand/20 my-4 sm:my-8 border border-white/10">
+    <div className="w-full max-w-6xl mx-auto py-8 sm:py-10 lg:py-12 px-5 sm:px-8 lg:px-10 bg-linear-to-br from-brand to-blue-700 rounded-2xl sm:rounded-3xl overflow-hidden relative shadow-2xl shadow-brand/20 my-4 sm:my-8 border border-white/10">
       {/* Background decorative blobs */}
       <div className="absolute top-0 -left-1/4 w-1/2 h-full bg-white/20 blur-[120px] rounded-full pointer-events-none" />
       <div className="absolute bottom-0 -right-1/4 w-1/2 h-full bg-blue-400/20 blur-[120px] rounded-full pointer-events-none" />
 
-      <div className="relative z-10 flex flex-col lg:flex-row items-center justify-between gap-10">
-        <div className="flex-1 text-center lg:text-left space-y-4">
-          <h2 className="text-2xl sm:text-3xl md:text-4xl font-bold text-white tracking-tight">
+      <div className="relative z-10 flex flex-col gap-8 sm:gap-10">
+        <div className="w-full max-w-3xl text-center lg:text-left space-y-4">
+          <h2 className="text-3xl sm:text-4xl md:text-5xl font-bold text-white tracking-tight leading-tight">
             Take ScribeShade Anywhere
           </h2>
-          <p className="text-blue-50 text-lg max-w-2xl mx-auto lg:mx-0 leading-relaxed font-medium">
+          <p className="text-blue-50 text-base sm:text-lg md:text-xl max-w-2xl mx-auto lg:mx-0 leading-relaxed font-medium">
             Get the full power of ScribeShade with native performance, global
             shortcuts, and seamless interview assistance directly from your
             desktop.
           </p>
         </div>
 
-        <div className="flex flex-col sm:flex-row items-center gap-4 w-full lg:w-auto shrink-0 justify-center">
+        <div className="w-full grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 sm:gap-4">
           {/* ── Mac ── */}
           <Button
             size="lg"
             type="button"
             onClick={() => void openLatestDesktopDownload("mac")}
-            className="w-full sm:w-auto h-14 px-8 bg-white hover:bg-blue-50 text-brand group rounded-xl transition-all font-bold"
+            className="w-full h-14 sm:h-15 px-6 sm:px-8 bg-white hover:bg-blue-50 text-brand group rounded-xl transition-all font-bold"
           >
             <AppleIcon className="w-5 h-5 mr-3 transition-transform group-hover:-translate-y-0.5" />
             Download for Mac
@@ -122,7 +122,7 @@ export function DownloadApp() {
               <Button
                 size="lg"
                 type="button"
-                className="w-full sm:w-auto h-14 px-8 bg-zinc-900 hover:bg-zinc-800 text-white border border-zinc-800 group rounded-xl transition-all font-semibold shadow-lg flex items-center justify-center"
+                className="w-full h-14 sm:h-15 px-6 sm:px-8 bg-zinc-900 hover:bg-zinc-800 text-white border border-zinc-800 group rounded-xl transition-all font-semibold shadow-lg flex items-center justify-center"
               >
                 <WindowsIcon className="w-5 h-5 mr-3 transition-transform group-hover:-translate-y-0.5 text-[#00a4ef]" />
                 Download for Windows
@@ -161,7 +161,7 @@ export function DownloadApp() {
               <Button
                 size="lg"
                 type="button"
-                className="w-full sm:w-auto h-14 px-8 bg-zinc-900 hover:bg-zinc-800 text-white border border-zinc-800 group rounded-xl transition-all font-semibold shadow-lg flex items-center justify-center"
+                className="w-full h-14 sm:h-15 px-6 sm:px-8 bg-zinc-900 hover:bg-zinc-800 text-white border border-zinc-800 group rounded-xl transition-all font-semibold shadow-lg flex items-center justify-center"
               >
                 <LinuxIcon className="w-5 h-5 mr-3 transition-transform group-hover:-translate-y-0.5 text-yellow-400" />
                 Download for Linux
