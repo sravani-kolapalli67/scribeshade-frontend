@@ -17,6 +17,7 @@ interface TranscriptHeaderProps {
   isFullscreen?: boolean;
   onMinimize?: () => void;
   onChangeTab?: () => void;
+  currentMicDevice?: string;
 }
 
 export const TranscriptHeader = ({
@@ -31,6 +32,7 @@ export const TranscriptHeader = ({
   setAutoScroll,
   isFullscreen = false,
   onMinimize,
+  currentMicDevice,
   onChangeTab,
 }: TranscriptHeaderProps) => {
   const statusText = isConnecting
@@ -80,6 +82,16 @@ export const TranscriptHeader = ({
               >
                 Your Mic
               </span>
+              {currentMicDevice && (
+                <span
+                  className={cn(
+                    "text-[9px] font-medium transition-colors",
+                    isFullscreen ? "text-white/50" : "text-slate-400",
+                  )}
+                >
+                  • {currentMicDevice}
+                </span>
+              )}
               <span
                 className={cn(
                   "text-[10px] font-extrabold uppercase transition-colors",

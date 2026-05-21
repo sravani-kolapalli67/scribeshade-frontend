@@ -7,51 +7,82 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { ChevronDown } from "lucide-react";
 
-const BACKEND_UPDATES_MANIFEST_URL = `${import.meta.env.VITE_BACKEND_URL
-  }/api/updates/latest.json`;
+const BACKEND_UPDATES_MANIFEST_URL = `${import.meta.env.VITE_BACKEND_URL}/api/updates/latest.json`;
 
 type UpdateManifest = {
   platforms?: Record<string, { url: string; signature?: string }>;
 };
 
+/**
+ * Fetches the latest manifest and opens the download URL for the given platform/format.
+ * Throws (instead of silently redirecting to the JSON) when no URL is found.
+ */
 async function openLatestDesktopDownload(
-  platform: "mac" | "windows",
-  format?: "exe" | "msi",
+  platform: "mac" | "windows" | "linux",
+  format?: "exe" | "msi" | "appimage" | "deb" | "rpm",
 ) {
+  let res: Response;
   try {
-    const res = await fetch(BACKEND_UPDATES_MANIFEST_URL, { cache: "no-store" });
-    if (!res.ok)
-      throw new Error(`Failed to fetch latest manifest (${res.status})`);
-    const manifest = (await res.json()) as UpdateManifest;
-    const platforms = manifest.platforms ?? {};
-    const entries = Object.entries(platforms);
-
-    let match;
-
-    if (platform === "mac") {
-      match = entries.find(([key]) => key.toLowerCase().includes("darwin"));
-    } else {
-      // For Windows, try to match the specific format (exe/nsis or msi)
-      if (format === "msi") {
-        match = entries.find(([key]) => key.toLowerCase().includes("msi"));
-      } else if (format === "exe") {
-        match = entries.find(([key]) => key.toLowerCase().includes("nsis"));
-      }
-
-      // Fallback to any windows platform if specific format not found
-      if (!match) {
-        match = entries.find(([key]) => key.toLowerCase().includes("windows"));
-      }
-    }
-
-    const url = match?.[1]?.url;
-    if (!url)
-      throw new Error(`No ${platform} download found in latest manifest`);
-    window.open(url, "_blank", "noopener,noreferrer");
-  } catch (error) {
-    console.error("[download] Unable to open latest desktop download:", error);
-    window.open(BACKEND_UPDATES_MANIFEST_URL, "_blank", "noopener,noreferrer");
+    res = await fetch(BACKEND_UPDATES_MANIFEST_URL, { cache: "no-store" });
+  } catch (err) {
+    alert("Network error: could not reach the update server. Please try again.");
+    console.error("[download] fetch failed:", err);
+    return;
   }
+
+  if (!res.ok) {
+    alert(`Download server returned an error (${res.status}). Please try again later.`);
+    return;
+  }
+
+  const manifest = (await res.json()) as UpdateManifest;
+  const platforms = manifest.platforms ?? {};
+  const entries = Object.entries(platforms);
+
+  let match: [string, { url: string; signature?: string }] | undefined;
+
+  if (platform === "mac") {
+    // Keys look like "darwin-x86_64", "darwin-aarch64", etc.
+    match = entries.find(([key]) => key.startsWith("darwin"));
+  } else if (platform === "windows") {
+    if (format === "msi") {
+      match = entries.find(([key]) => key === "windows-x86_64-msi");
+    } else if (format === "exe") {
+      match = entries.find(([key]) => key === "windows-x86_64-nsis");
+    }
+    // Generic fallback for Windows (e.g. "windows-x86_64")
+    if (!match) {
+      match = entries.find(([key]) => key.startsWith("windows"));
+    }
+  } else if (platform === "linux") {
+    if (format === "appimage") {
+      match = entries.find(([key]) => key === "linux-x86_64-appimage");
+    } else if (format === "deb") {
+      match = entries.find(([key]) => key === "linux-x86_64-deb");
+    } else if (format === "rpm") {
+      match = entries.find(([key]) => key === "linux-x86_64-rpm");
+    }
+    // Generic fallback
+    if (!match) {
+      match = entries.find(([key]) => key.startsWith("linux"));
+    }
+  }
+
+  const url = match?.[1]?.url;
+
+  if (!url) {
+    // ← KEY FIX: never redirect to the manifest JSON on failure
+    alert(
+      `No ${platform}${format ? ` (${format.toUpperCase()})` : ""} download is available yet. Please check back soon.`,
+    );
+    console.error(
+      `[download] No matching URL for platform="${platform}" format="${format}". Available keys:`,
+      Object.keys(platforms),
+    );
+    return;
+  }
+
+  window.open(url, "_blank", "noopener,noreferrer");
 }
 
 export function DownloadApp() {
@@ -74,6 +105,7 @@ export function DownloadApp() {
         </div>
 
         <div className="flex flex-col sm:flex-row items-center gap-4 w-full lg:w-auto shrink-0 justify-center">
+          {/* ── Mac ── */}
           <Button
             size="lg"
             type="button"
@@ -84,6 +116,7 @@ export function DownloadApp() {
             Download for Mac
           </Button>
 
+          {/* ── Windows ── */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
@@ -105,7 +138,7 @@ export function DownloadApp() {
                 onClick={() => void openLatestDesktopDownload("windows", "exe")}
                 className="group cursor-pointer rounded-xl py-3 px-4 flex flex-col items-start gap-1 transition-all outline-none border-none hover:bg-white/10 focus:bg-white/10 data-[highlighted]:bg-white/10 [&_*]:!text-white"
               >
-                <span className="font-bold text-sm">Windows (AMD/EXE)</span>
+                <span className="font-bold text-sm">Windows (EXE / NSIS)</span>
                 <span className="text-xs text-zinc-400">
                   Standard installer for most users
                 </span>
@@ -114,9 +147,57 @@ export function DownloadApp() {
                 onClick={() => void openLatestDesktopDownload("windows", "msi")}
                 className="group cursor-pointer rounded-xl py-3 px-4 flex flex-col items-start gap-1 transition-all outline-none border-none hover:bg-white/10 focus:bg-white/10 data-[highlighted]:bg-white/10 [&_*]:!text-white"
               >
-                <span className="font-bold text-sm">Windows (Intel/MSI)</span>
+                <span className="font-bold text-sm">Windows (MSI)</span>
                 <span className="text-xs text-zinc-400">
-                  Ideal for enterprise/corporate installs
+                  Ideal for enterprise / corporate installs
+                </span>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+
+          {/* ── Linux (NEW) ── */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                size="lg"
+                type="button"
+                className="w-full sm:w-auto h-14 px-8 bg-zinc-900 hover:bg-zinc-800 text-white border border-zinc-800 group rounded-xl transition-all font-semibold shadow-lg flex items-center justify-center"
+              >
+                <LinuxIcon className="w-5 h-5 mr-3 transition-transform group-hover:-translate-y-0.5 text-yellow-400" />
+                Download for Linux
+                <ChevronDown className="ml-3 h-4 w-4 opacity-70 group-hover:translate-y-0.5 transition-transform" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="end"
+              sideOffset={8}
+              className="w-64 bg-zinc-950 border-white/10 text-white rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] p-1.5 backdrop-blur-xl"
+            >
+              <DropdownMenuItem
+                onClick={() => void openLatestDesktopDownload("linux", "appimage")}
+                className="group cursor-pointer rounded-xl py-3 px-4 flex flex-col items-start gap-1 transition-all outline-none border-none hover:bg-white/10 focus:bg-white/10 data-[highlighted]:bg-white/10 [&_*]:!text-white"
+              >
+                <span className="font-bold text-sm">AppImage (Universal)</span>
+                <span className="text-xs text-zinc-400">
+                  Works on most distros, no install needed
+                </span>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={() => void openLatestDesktopDownload("linux", "deb")}
+                className="group cursor-pointer rounded-xl py-3 px-4 flex flex-col items-start gap-1 transition-all outline-none border-none hover:bg-white/10 focus:bg-white/10 data-[highlighted]:bg-white/10 [&_*]:!text-white"
+              >
+                <span className="font-bold text-sm">.deb (Ubuntu / Debian)</span>
+                <span className="text-xs text-zinc-400">
+                  For apt-based distributions
+                </span>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={() => void openLatestDesktopDownload("linux", "rpm")}
+                className="group cursor-pointer rounded-xl py-3 px-4 flex flex-col items-start gap-1 transition-all outline-none border-none hover:bg-white/10 focus:bg-white/10 data-[highlighted]:bg-white/10 [&_*]:!text-white"
+              >
+                <span className="font-bold text-sm">.rpm (Fedora / RHEL)</span>
+                <span className="text-xs text-zinc-400">
+                  For dnf/yum-based distributions
                 </span>
               </DropdownMenuItem>
             </DropdownMenuContent>
@@ -126,6 +207,8 @@ export function DownloadApp() {
     </div>
   );
 }
+
+// ── Icons ────────────────────────────────────────────────────────────────────
 
 function AppleIcon(props: React.SVGProps<SVGSVGElement>) {
   return (
@@ -139,6 +222,14 @@ function WindowsIcon(props: React.SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 448 512" fill="currentColor" {...props}>
       <path d="M0 93.7l183.6-25.3v177.4H0V93.7zm0 324.6l183.6 25.3V268.4H0v149.9zm203.8 28L448 480V268.4H203.8v177.9zm0-380.6v180.1H448V32L203.8 65.7z" />
+    </svg>
+  );
+}
+
+function LinuxIcon(props: React.SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 448 512" fill="currentColor" {...props}>
+      <path d="M220.8 123.3c1 .5 1.8 1.7 3 1.7 1.1 0 2.8-.4 2.9-1.5.2-1.4-1.9-2.3-3.2-2.9-1.7-.7-3.9-1-5.5-.1-.4.2-.8.7-.6 1.1.3 1.3 2.3 1.1 3.4 1.7zm-21.9 1.7c1.2 0 2-1.2 3-1.7 1.1-.6 3.1-.4 3.5-1.6.2-.4-.2-.9-.6-1.1-1.6-.9-3.8-.6-5.5.1-1.3.6-3.4 1.5-3.2 2.9.1 1 1.8 1.5 2.8 1.4zM420 403.8c-3.6-4-5.3-11.6-7.2-19.7-1.8-8.1-3.9-16.8-10.5-22.4-1.3-1.1-2.6-2.1-4-2.9-1.3-.8-2.7-1.5-4.1-2 9.2-27.3 5.6-54.5-3.7-79.1-11.4-30.1-31.3-56.4-46.5-74.4-17.1-21.5-33.7-41.9-33.4-72C311.1 85.4 315.7 .1 234.8 0 132.4-.2 158 103.4 156.9 135.2c-1.7 23.4-6.4 43.8-22.5 64.7-18.1 23.6-39.7 45.6-54.2 73.4-22.4 41.8-18.7 88.3-4.6 123.8-1.3.6-2.6 1.3-3.9 2.1-1.4.8-2.7 1.8-4 2.9-6.6 5.6-8.7 14.3-10.5 22.4-1.9 8.1-3.6 15.7-7.2 19.7-6.6 7.2-15.5 9.1-14.5 26.9 1.1 17.8 15.8 20.1 22.8 20.9 7 .8 13.9 1.6 19.6 4.3 5.8 2.7 13.2 8.4 20.4 8.4 7.2 0 14.1-4.2 19.2-5.4 5.1-1.2 9.5-.5 13.3 2.3 3.7 2.8 7.1 6.7 12.1 9.3 4.9 2.6 10.6 4.4 16.4 4.4 5.8 0 11.5-1.7 15.3-4.1 5.1-3.3 8.6-7.8 11.8-9.8 3.2-2 5.6-2.5 10.9-1.1 5.3 1.4 11.5 5.2 18.1 5.2s12.8-3.8 18.1-5.2c5.3-1.4 7.7-.9 10.9 1.1 3.2 2 6.7 6.5 11.8 9.8 3.8 2.4 9.5 4.1 15.3 4.1 5.8 0 11.5-1.8 16.4-4.4 5-2.6 8.4-6.5 12.1-9.3 3.8-2.8 8.2-3.5 13.3-2.3 5.1 1.2 12 5.4 19.2 5.4 7.2 0 14.6-5.7 20.4-8.4 5.7-2.7 12.6-3.5 19.6-4.3 7-.8 21.7-3.1 22.8-20.9 1.1-17.8-7.8-19.7-14.4-26.9zM148.9 359.6c-4.2-9.7-7-20.3-8.4-31.4-1.9-14.5-1.1-28.5 2.3-41 7.1 1.5 14.2 2.9 21.4 3.2-5.8 11.1-8.6 24.4-8.3 39.4.2 7.6 1.6 15.6 4.2 24-.9 1.6-3 3.8-11.2 5.8zm13.9-104.7c-4.7-6.1-9.4-12.2-13.5-18.6 2.2-3.1 4.5-6.2 6.8-9.4 5.6-7.9 12.3-16.7 18.7-26 8.4-12.7 17.1-26.9 22.5-42.3 1.6.7 3.1 1.7 4.6 2.9 9.6 8.2 14.4 21.9 18.8 35.4 4.3 13.3 8.1 27.2 18.7 36.5-1.2 3.4-2.4 6.8-3.5 10.3-12.4-6.1-26.8-8.1-42.3-5.2-9.9 1.8-20.4 6.5-30.8 16.4zm63.9 124.8c-1.8.3-4.4 1.2-6.9 2.5-3.4 1.8-7.2 4.6-10.6 4.6-3.5 0-7.2-2.9-10.6-4.6-3.2-1.7-6.5-2.6-9.5-2.5 2.2-11.1 4.7-22.1 7.3-33 2.5-10.5 4.9-20.8 6.6-30.2 1.8.3 3.8.6 5.5.8 1.6.2 3.2.4 4.7.5l5.7.3c2 0 3.9-.1 5.7-.2 1.2-.1 2.4-.2 3.6-.4 2.2 12.2 5.2 24.5 8 36.2 2.5 10.4 5 20.8 6.8 30.5-1.9-.5-4.1-1.3-6.3-1z" />
     </svg>
   );
 }

@@ -17,6 +17,7 @@ import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { useAIChat } from "@/hooks/useAIChat";
+import { detectIntent, isFillerPhrase } from "@/lib/intent-detector";
 import { useFreeSessionTimer } from "@/hooks/useFreeSessionTimer";
 import { useSessionHeartbeat } from "@/hooks/useSessionHeartbeat";
 import { useSessionEvents } from "@/hooks/useSessionEvents";
@@ -32,6 +33,8 @@ import {
   setIsTranscriptExpanded,
   setCurrentResponseIndex,
   endSessionThunk,
+  isValidModel,
+  getValidModel,
   type SessionInitData,
   type TranscriptMessage,
 } from "@/features/session/slices/floatingSessionSlice";
@@ -164,7 +167,17 @@ function resolveQuestionFromContext(
 ): { question: string; source: string } | null {
   // Priority 1: Live interim text from system audio
   if (liveInterimText?.trim()) {
-    return { question: liveInterimText.trim(), source: "live_interim" };
+    // Apply intent detection to clean up speech recognition artifacts
+    const intent = detectIntent(liveInterimText.trim());
+    console.log(
+      "[resolveQuestionFromContext] Intent detection applied to live_interim:",
+      {
+        original: intent.originalTranscript,
+        cleaned: intent.cleanedQuestion,
+        confidence: intent.confidence,
+      },
+    );
+    return { question: intent.cleanedQuestion, source: "live_interim" };
   }
 
   // Priority 1.5: Scenario-based context preservation using new semantic engine
@@ -192,8 +205,10 @@ function resolveQuestionFromContext(
             windowConfig.timeWindowMs,
             "ms",
           );
+          // Apply intent detection to clean up the scenario context
+          const intent = detectIntent(deduplicatePhrases(scenarioContext));
           return {
-            question: deduplicatePhrases(scenarioContext),
+            question: intent.cleanedQuestion,
             source: "scenario_context",
           };
         }
@@ -223,8 +238,18 @@ function resolveQuestionFromContext(
     .map((m) => m.text.trim());
 
   if (recentInterviewer.length > 0) {
+    const joined = recentInterviewer.join(" ");
+    const intent = detectIntent(joined);
+    console.log(
+      "[resolveQuestionFromContext] Intent detection applied to transcript_history:",
+      {
+        original: intent.originalTranscript,
+        cleaned: intent.cleanedQuestion,
+        confidence: intent.confidence,
+      },
+    );
     return {
-      question: recentInterviewer.join(" "),
+      question: intent.cleanedQuestion,
       source: "transcript_history",
     };
   }
@@ -235,10 +260,25 @@ function resolveQuestionFromContext(
     .map((m) => m.text.trim());
 
   if (recentUser.length > 0) {
-    return {
-      question: recentUser.join(" "),
-      source: "user_transcript",
-    };
+    const joined = recentUser.join(" ");
+    // Check if the joined text is primarily filler/noise
+    if (isFillerPhrase(joined)) {
+      console.log("[resolveQuestionFromContext] User transcript is filler, skipping:", joined);
+    } else {
+      const intent = detectIntent(joined);
+      console.log(
+        "[resolveQuestionFromContext] Intent detection applied to user_transcript:",
+        {
+          original: intent.originalTranscript,
+          cleaned: intent.cleanedQuestion,
+          confidence: intent.confidence,
+        },
+      );
+      return {
+        question: intent.cleanedQuestion,
+        source: "user_transcript",
+      };
+    }
   }
 
   // Priority 4 fallback: cutoff-filtered sources are empty (e.g. the user
@@ -250,10 +290,24 @@ function resolveQuestionFromContext(
     // Apply deduplication to the joined fallback text to prevent duplicate loops
     const joinedText = recentFallback.map((m) => m.text.trim()).join(" ");
     const dedupedText = deduplicatePhrases(joinedText);
-    return {
-      question: dedupedText,
-      source: "transcript_fallback",
-    };
+    // Check if the deduped text is primarily filler/noise
+    if (!isFillerPhrase(dedupedText)) {
+      const intent = detectIntent(dedupedText);
+      console.log(
+        "[resolveQuestionFromContext] Intent detection applied to transcript_fallback:",
+        {
+          original: intent.originalTranscript,
+          cleaned: intent.cleanedQuestion,
+          confidence: intent.confidence,
+        },
+      );
+      return {
+        question: intent.cleanedQuestion,
+        source: "transcript_fallback",
+      };
+    } else {
+      console.log("[resolveQuestionFromContext] Fallback transcript is filler, skipping:", dedupedText);
+    }
   }
 
   return null;
@@ -317,6 +371,19 @@ export function useFloatingSession() {
   sessionInfoRef.current = sessionInfo;
   messagesRef.current = messages;
   selectedModelRef.current = selectedModel;
+
+  // Ensure selected model is always valid
+  useEffect(() => {
+    if (!isValidModel(selectedModel)) {
+      console.warn("[useFloatingSession] Invalid model selected, auto-correcting to default:", selectedModel);
+      dispatch(setSelectedModel(getValidModel(selectedModel)));
+    }
+  }, [selectedModel, dispatch]);
+
+  // Keep ref in sync with validated model
+  useEffect(() => {
+    selectedModelRef.current = selectedModel;
+  }, [selectedModel]);
 
   // ── Hardware / ephemeral local state (NOT in Redux) ─────────────────────────
   const [isMicActive, setIsMicActive] = useState(false);
@@ -745,6 +812,16 @@ export function useFloatingSession() {
 
   const handleAiAnswerClick = useCallback(async () => {
     console.log("[useFloatingSession] handleAiAnswerClick clicked.");
+
+    // Validation: Ensure a valid model is selected
+    const currentModel = selectedModelRef.current;
+    if (!isValidModel(currentModel)) {
+      console.error("[useFloatingSession] Invalid model selected:", currentModel);
+      toast.error("Please select a valid AI model before continuing");
+      dispatch(setSelectedModel(getValidModel(currentModel)));
+      return;
+    }
+
     if (isEmittingRef.current) {
       console.log("[useFloatingSession] handleAiAnswerClick: Suppressed click (isEmittingRef is true).");
       return;
@@ -755,34 +832,43 @@ export function useFloatingSession() {
       return;
     }
 
-    const msgs = messagesRef.current;
-    const liveInterviewerText = tabInterimTranscript.trim();
+    // Create an immutable transcript snapshot at the moment AI Answer is triggered.
+    // This prevents race conditions where new transcript chunks arrive during
+    // context extraction and contaminate the AI request context.
+    const snapshotTimestamp = Date.now();
+    const msgsSnapshot = [...messagesRef.current];
+    const liveInterviewerTextSnapshot = tabInterimTranscript.trim();
 
-    // Try to resolve question from multiple sources.
+    console.log("[useFloatingSession] Creating transcript snapshot at timestamp:", snapshotTimestamp);
+    console.log("[useFloatingSession] Snapshot contains", msgsSnapshot.length, "messages");
+
+    // Try to resolve question from multiple sources using the immutable snapshot.
     // Pass lastAnswerTimestampRef so only messages AFTER the last answered
     // question are included — prevents merging already-answered questions.
     const resolved = resolveQuestionFromContext(
-      liveInterviewerText,
-      msgs,
+      liveInterviewerTextSnapshot,
+      msgsSnapshot,
       lastMessage,
       lastAnswerTimestampRef.current,
     );
 
     if (!resolved) {
-      const interviewerCount = msgs.filter((m) => m.sender === "Interviewer").length;
-      const userCount = msgs.filter((m) => m.sender === "User").length;
+      const interviewerCount = msgsSnapshot.filter((m) => m.sender === "Interviewer").length;
+      const userCount = msgsSnapshot.filter((m) => m.sender === "User").length;
       console.log("[useFloatingSession] handleAiAnswerClick: No question found from any source. Aborting.", {
-        liveInterimText: liveInterviewerText,
+        liveInterimText: liveInterviewerTextSnapshot,
         interviewerMessagesCount: interviewerCount,
         userMessagesCount: userCount,
-        totalMessages: msgs.length,
+        totalMessages: msgsSnapshot.length,
         lastMessageSender: lastMessage?.sender,
+        snapshotTimestamp,
       });
       return;
     }
 
     const { question, source } = resolved;
     console.log("[useFloatingSession] handleAiAnswerClick: Resolved question from", source, ":", question);
+    console.log("[useFloatingSession] handleAiAnswerClick: Snapshot timestamp:", snapshotTimestamp);
 
     // Removed rapid re-answer blocking - user wants to be able to click multiple times
     // even for the same question to get different answers
@@ -794,6 +880,7 @@ export function useFloatingSession() {
       question,
       source,
       model: selectedModelRef.current,
+      snapshotTimestamp,
     });
 
     isEmittingRef.current = true;
@@ -824,14 +911,23 @@ export function useFloatingSession() {
   }, [handleAiAnswer, tabInterimTranscript, lastMessage]);
 
   const handleAnalyzeScreenClick = useCallback(
-    async (screenshotBlob: Blob) => {
+    async (screenshotBlob?: Blob) => {
       console.log("[useFloatingSession] handleAnalyzeScreenClick triggered.");
-      // isAnalyzeEmittingRef is the source of truth — avoids stale isAnalyzing
-      // closure values that could block legitimate calls after the first one.
+
+      // Validation: Ensure a valid model is selected
+      const currentModel = selectedModelRef.current;
+      if (!isValidModel(currentModel)) {
+        console.error("[useFloatingSession] Invalid model selected:", currentModel);
+        toast.error("Please select a valid AI model before continuing");
+        dispatch(setSelectedModel(getValidModel(currentModel)));
+        return;
+      }
+
       if (isAnalyzeEmittingRef.current) {
         console.log("[useFloatingSession] handleAnalyzeScreenClick: Suppressed click (isAnalyzeEmittingRef is true).");
         return;
       }
+
       const info = sessionInfoRef.current;
       if (!info) {
         console.log("[useFloatingSession] handleAnalyzeScreenClick: Suppressed click (no sessionInfo available).");
@@ -846,7 +942,7 @@ export function useFloatingSession() {
 
       console.log("[useFloatingSession] handleAnalyzeScreenClick: Initiating handleAnalyzeScreen with:", {
         sessionId: info.sessionId,
-        screenshotSize: screenshotBlob.size,
+        screenshotSize: screenshotBlob?.size,
         contextQuestion,
         model: selectedModelRef.current,
       });
@@ -854,7 +950,7 @@ export function useFloatingSession() {
       isAnalyzeEmittingRef.current = true;
       setIsCapturing(true);
       try {
-        await handleAnalyzeScreen(info.sessionId, screenshotBlob, selectedModelRef.current);
+        await handleAnalyzeScreen(info.sessionId, screenshotBlob || null, selectedModelRef.current);
       } finally {
         isAnalyzeEmittingRef.current = false;
         setIsCapturing(false);

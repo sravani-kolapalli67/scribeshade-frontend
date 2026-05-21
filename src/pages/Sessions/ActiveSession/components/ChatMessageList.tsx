@@ -1,3 +1,4 @@
+import { useRef, useEffect, useCallback } from "react";
 import { Sparkles } from "lucide-react";
 import { Message } from "../Transcript";
 import { ChatMessage } from "./ChatMessage";
@@ -16,6 +17,46 @@ export const ChatMessageList = ({
   isFullscreen = false,
   onRegenerate,
 }: ChatMessageListProps) => {
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const lastMessageCountRef = useRef(0);
+
+  // Scroll to bottom using bottom anchor element
+  const scrollToBottom = useCallback((smooth = true) => {
+    bottomRef.current?.scrollIntoView({
+      behavior: smooth ? "smooth" : "auto",
+      block: "end",
+    });
+  }, []);
+
+  // Auto-scroll when messages change (new message added)
+  useEffect(() => {
+    const messageCount = messages.length;
+    
+    // Always scroll when messages are added
+    if (messageCount > lastMessageCountRef.current) {
+      requestAnimationFrame(() => {
+        scrollToBottom(true);
+      });
+    }
+    
+    lastMessageCountRef.current = messageCount;
+  }, [messages.length, scrollToBottom]);
+
+  // Auto-scroll during streaming updates
+  useEffect(() => {
+    if (isStreaming) {
+      // Use requestAnimationFrame to prevent rapid scroll updates during streaming
+      // Use instant scroll (auto behavior) to prevent flickering
+      const rafId = requestAnimationFrame(() => {
+        scrollToBottom(false);
+      });
+      
+      return () => {
+        cancelAnimationFrame(rafId);
+      };
+    }
+  }, [isStreaming, scrollToBottom]);
+
   return (
     <div className="flex-1 overflow-y-auto p-8 relative no-scrollbar">
       {messages.length === 0 ? (
@@ -37,17 +78,21 @@ export const ChatMessageList = ({
           </p>
         </div>
       ) : (
-        messages.map((chat) => (
-          <ChatMessage
-            key={chat.id}
-            message={chat}
-            isFullscreen={isFullscreen}
-            isStreaming={
-              isStreaming && chat.id === messages[messages.length - 1].id
-            }
-            onRegenerate={onRegenerate ? () => onRegenerate(chat.id) : undefined}
-          />
-        ))
+        <>
+          {messages.map((chat) => (
+            <ChatMessage
+              key={chat.id}
+              message={chat}
+              isFullscreen={isFullscreen}
+              isStreaming={
+                isStreaming && chat.id === messages[messages.length - 1].id
+              }
+              onRegenerate={onRegenerate ? () => onRegenerate(chat.id) : undefined}
+            />
+          ))}
+          {/* Bottom anchor element for reliable scrolling */}
+          <div ref={bottomRef} className="h-0" />
+        </>
       )}
     </div>
   );

@@ -58,9 +58,35 @@ export interface FloatingSessionState {
   currentResponseIndex: number;
 }
 
+const DEFAULT_MODEL = "anthropic/claude-haiku-4-5";
+
+// Available models - should match ModelSelector.AI_MODELS
+const AVAILABLE_MODELS = [
+  "anthropic/claude-haiku-4-5",
+  "anthropic/claude-sonnet-4-5",
+  "google/gemini-3.1-flash-lite-preview",
+  "openai/gpt-5",
+];
+
+/**
+ * Validates if a model ID is in the available models list
+ */
+function isValidModel(modelId: string | null | undefined): boolean {
+  if (!modelId) return false;
+  return AVAILABLE_MODELS.includes(modelId);
+}
+
+/**
+ * Returns a valid model ID, falling back to default if invalid
+ */
+function getValidModel(modelId: string | null | undefined): string {
+  if (isValidModel(modelId)) return modelId!;
+  return DEFAULT_MODEL;
+}
+
 const initialState: FloatingSessionState = {
   sessionInfo: null,
-  selectedModel: "anthropic/claude-haiku-4-5",
+  selectedModel: DEFAULT_MODEL,
   messages: [],
   creditWarning: null,
   isEnding: false,
@@ -248,5 +274,8 @@ export const {
   triggerCreditWarning,
   resetFloatingSession,
 } = floatingSessionSlice.actions;
+
+// Export validation functions separately (not part of slice actions)
+export { isValidModel, getValidModel };
 
 export default floatingSessionSlice.reducer;

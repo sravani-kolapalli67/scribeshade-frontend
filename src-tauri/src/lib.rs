@@ -606,7 +606,7 @@ async fn start_audio_stream(device_name: Option<String>) -> Result<u16, String> 
     let channels = config.channels() as u32;
 
     // Broadcast channel — new WS clients subscribe, cpal thread publishes
-    let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(64);
+    let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(256);
     let tx_arc = Arc::new(tx);
     let tx_capture = tx_arc.clone();
 
@@ -825,6 +825,10 @@ async fn start_display_audio_stream() -> Result<u16, String> {
         let content = match SCShareableContent::get() {
             Ok(c) => c,
             Err(e) => {
+                match e {
+                    SCError::NoShareableContent(_) => {}
+                    _ => {}
+                }
                 DISPLAY_AUDIO_RUNNING.store(false, Ordering::SeqCst);
                 let _ = init_tx.send(Err(format!(
                     "Screen Recording permission denied or SCKit unavailable: {e:?}. \
@@ -1096,7 +1100,7 @@ async fn start_audio_stream(device_name: Option<String>) -> Result<u16, String> 
     let sample_rate = config.sample_rate().0;
     let channels = config.channels() as u32;
 
-    let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(64);
+    let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(256);
     let tx_arc = Arc::new(tx);
     let tx_capture = tx_arc.clone();
 
@@ -1548,6 +1552,9 @@ async fn start_system_audio_transcription(
             my_gen,
         )
         .await;
+        if SYSTEM_STT_GENERATION.load(Ordering::SeqCst) == my_gen {
+            SYSTEM_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+        }
     });
 
     Ok(())
@@ -1596,7 +1603,7 @@ async fn start_mic_transcription(
     let ch = config.channels() as usize;
 
     let (init_tx, init_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
-    let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(64);
+    let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(256);
     let tx_arc = Arc::new(tx);
     let tx_capture = tx_arc.clone();
     let my_gen = MIC_STT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1692,6 +1699,9 @@ async fn start_mic_transcription(
             my_gen,
         )
         .await;
+        if MIC_STT_GENERATION.load(Ordering::SeqCst) == my_gen {
+            MIC_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+        }
     });
 
     Ok(())
@@ -1836,6 +1846,9 @@ async fn start_system_audio_transcription(
             my_gen,
         )
         .await;
+        if SYSTEM_STT_GENERATION.load(Ordering::SeqCst) == my_gen {
+            SYSTEM_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+        }
     });
 
     Ok(())
@@ -1884,7 +1897,7 @@ async fn start_mic_transcription(
     let ch = config.channels() as usize;
 
     let (init_tx, init_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
-    let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(64);
+    let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(256);
     let tx_arc = Arc::new(tx);
     let tx_capture = tx_arc.clone();
     let my_gen = MIC_STT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1980,6 +1993,9 @@ async fn start_mic_transcription(
             my_gen,
         )
         .await;
+        if MIC_STT_GENERATION.load(Ordering::SeqCst) == my_gen {
+            MIC_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+        }
     });
 
     Ok(())
@@ -2449,9 +2465,29 @@ fn get_cursor_position(app: AppHandle) -> Result<(f64, f64), String> {
 /// click-through; when `false`, it captures clicks normally.
 #[tauri::command]
 fn set_cursor_passthrough(window: Window, passthrough: bool) -> Result<(), String> {
-    window
-        .set_ignore_cursor_events(passthrough)
-        .map_err(|e| e.to_string())
+    #[cfg(target_os = "macos")]
+    {
+        let win_for_thread = window.clone();
+        window
+            .run_on_main_thread(move || {
+            unsafe {
+                if let Ok(ns_win) = win_for_thread.ns_window() {
+                    let ptr = ns_win as *mut objc2::runtime::AnyObject;
+                    let _: () = objc2::msg_send![ptr, setIgnoresMouseEvents: passthrough];
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        window
+            .set_ignore_cursor_events(passthrough)
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
 }
 // ─────────────────────────────────────────────────────────────────────────────
 

@@ -8,6 +8,13 @@ interface UseDeepgramProps {
   inputStream?: MediaStream | null;
 }
 
+interface AudioDeviceInfo {
+  deviceId: string;
+  label: string;
+  kind: string;
+  groupId?: string;
+}
+
 export const useDeepgram = ({
   apiKey,
   model = "nova-3",
@@ -20,6 +27,9 @@ export const useDeepgram = ({
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [audioDevices, setAudioDevices] = useState<AudioDeviceInfo[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>("");
+  const [currentDeviceLabel, setCurrentDeviceLabel] = useState<string>("");
 
   const socketRef = useRef<WebSocket | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -44,8 +54,119 @@ export const useDeepgram = ({
   const retryCountRef = useRef(0);
   const MAX_RETRIES = 5;
 
+  // Device enumeration and selection logic
+  const enumerateAudioDevices = useCallback(async (): Promise<AudioDeviceInfo[]> => {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioInputs = devices
+        .filter((device) => device.kind === "audioinput")
+        .map((device) => ({
+          deviceId: device.deviceId,
+          label: device.label || "Unknown Microphone",
+          kind: device.kind,
+          groupId: device.groupId,
+        }));
+      
+      console.log("[useDeepgram] Enumerated audio devices:", audioInputs.length);
+      audioInputs.forEach((device) => {
+        console.log("[useDeepgram] - Device:", device.label, "ID:", device.deviceId);
+      });
+      
+      return audioInputs;
+    } catch (err) {
+      console.error("[useDeepgram] Error enumerating devices:", err);
+      return [];
+    }
+  }, []);
+
+  // Select preferred microphone based on priority
+  const selectPreferredDevice = useCallback((devices: AudioDeviceInfo[]): string => {
+    if (devices.length === 0) return "";
+
+    // Check if previously selected device still exists
+    const savedDeviceId = localStorage.getItem("scribeshade_preferred_mic");
+    if (savedDeviceId) {
+      const savedDevice = devices.find((d) => d.deviceId === savedDeviceId);
+      if (savedDevice) {
+        console.log("[useDeepgram] Restoring saved device:", savedDevice.label);
+        return savedDevice.deviceId;
+      }
+    }
+
+    // Priority 1: Bluetooth headsets / AirPods (detect by label keywords)
+    const bluetoothDevice = devices.find((d) =>
+      /bluetooth|airpods|headset|earbuds|earphones/i.test(d.label)
+    );
+    if (bluetoothDevice) {
+      console.log("[useDeepgram] Selected Bluetooth/headset device:", bluetoothDevice.label);
+      return bluetoothDevice.deviceId;
+    }
+
+    // Priority 2: USB microphones (detect by label keywords)
+    const usbDevice = devices.find((d) => /usb|external/i.test(d.label));
+    if (usbDevice) {
+      console.log("[useDeepgram] Selected USB device:", usbDevice.label);
+      return usbDevice.deviceId;
+    }
+
+    // Priority 3: Default device (browser's default)
+    const defaultDevice = devices.find((d) => d.deviceId === "default");
+    if (defaultDevice) {
+      console.log("[useDeepgram] Selected default device:", defaultDevice.label);
+      return defaultDevice.deviceId;
+    }
+
+    // Priority 4: First available device (built-in)
+    console.log("[useDeepgram] Selected first available device:", devices[0].label);
+    return devices[0].deviceId;
+  }, []);
+
+  // Load and enumerate devices on mount
+  useEffect(() => {
+    const loadDevices = async () => {
+      const devices = await enumerateAudioDevices();
+      setAudioDevices(devices);
+      
+      const preferredId = selectPreferredDevice(devices);
+      if (preferredId) {
+        setSelectedDeviceId(preferredId);
+        const device = devices.find((d) => d.deviceId === preferredId);
+        if (device) {
+          setCurrentDeviceLabel(device.label);
+        }
+      }
+    };
+
+    loadDevices();
+
+    // Listen for device changes
+    const handleDeviceChange = async () => {
+      console.log("[useDeepgram] Device change detected");
+      const devices = await enumerateAudioDevices();
+      setAudioDevices(devices);
+      
+      const preferredId = selectPreferredDevice(devices);
+      if (preferredId && preferredId !== selectedDeviceIdRef.current) {
+        console.log("[useDeepgram] Preferred device changed, will use on next start");
+        setSelectedDeviceId(preferredId);
+        const device = devices.find((d) => d.deviceId === preferredId);
+        if (device) {
+          setCurrentDeviceLabel(device.label);
+        }
+      }
+    };
+
+    navigator.mediaDevices.addEventListener("devicechange", handleDeviceChange);
+    return () => {
+      navigator.mediaDevices.removeEventListener("devicechange", handleDeviceChange);
+    };
+  }, [enumerateAudioDevices, selectPreferredDevice]);
+
   // Keep the ref in sync with React state so closures always read current value.
   isTranscribingRef.current = isTranscribing;
+
+  const selectedDeviceIdRef = useRef(selectedDeviceId);
+  useEffect(() => { selectedDeviceIdRef.current = selectedDeviceId; }, [selectedDeviceId]);
 
   const startTranscription = useCallback(async () => {
     // Use the ref (not the closure-captured state) so retries always get the
@@ -102,8 +223,10 @@ export const useDeepgram = ({
         if (isCachedLive) {
           stream = cached!;
         } else {
+          const preferredDeviceId = selectedDeviceIdRef.current;
           stream = await navigator.mediaDevices.getUserMedia({
             audio: {
+              ...(preferredDeviceId ? { deviceId: { ideal: preferredDeviceId } } : {}),
               echoCancellation: true,
               noiseSuppression: true,
               autoGainControl: true,
@@ -162,8 +285,8 @@ export const useDeepgram = ({
             socket.send(event.data);
           }
         };
-        // Send audio chunks every 50ms for near real-time streaming
-        mediaRecorder.start(50);
+        // Send moderately sized chunks to avoid WebSocket/backpressure stalls while staying low-latency.
+        mediaRecorder.start(250);
 
         // Successfully connected — reset retry counter so next failure gets
         // the full back-off budget again.
@@ -378,5 +501,8 @@ export const useDeepgram = ({
     startTranscription,
     stopTranscription,
     clearTranscript,
+    audioDevices,
+    selectedDeviceId,
+    currentDeviceLabel,
   };
 };

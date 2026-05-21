@@ -299,6 +299,92 @@ function normalizeBulletParagraphs(text: string): string {
     .join("\n\n");
 }
 
+function isProjectQuestion(question: string): boolean {
+  return /\b(projects?|portfolio|what have you built|work(?:ed)? on|tell me about your work)\b/i.test(
+    question || "",
+  );
+}
+
+function normalizeProjectAnswerMarkdown(question: string, answer: string): string {
+  if (!answer?.trim() || !isProjectQuestion(question)) return answer;
+  if (/^\s*-\s+\*\*[^*\n]+\*\*\s*(?:—|-|:)/m.test(answer)) return answer;
+
+  const inlineNumberedBoundary = /\s+(?=\d{1,2}\.\s+[A-Z])/g;
+  const inlineNumberedParts = answer
+    .replace(/\s*•\s*/g, " • ")
+    .split(inlineNumberedBoundary)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  if (inlineNumberedParts.length > 1) {
+    const output: string[] = [];
+    for (const part of inlineNumberedParts) {
+      const projectMatch = part.match(/^(\d{1,2})\.\s+([\s\S]*)$/);
+      if (!projectMatch) {
+        output.push(part.replace(/:\s*$/, ":"));
+        continue;
+      }
+
+      const chunks = projectMatch[2]
+        .split(/\s+•\s+/)
+        .map((chunk) => chunk.trim())
+        .filter(Boolean);
+      if (chunks.length === 0) continue;
+
+      const [title, ...details] = chunks;
+      output.push(`- **${title.replace(/\*\*/g, "").trim()}**`);
+      for (const detail of details) {
+        output.push(`  - ${detail}`);
+      }
+    }
+    return output.join("\n");
+  }
+
+  const paragraphs = answer
+    .split(/\n{2,}/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  const projectStart =
+    /^(?:\*\*)?((?!I(?:'ve| have)\s+worked\b)[A-Z][^:\n]{2,90}?(?:Project|Clone|App|Platform|Frontend|Backend|Dashboard|System|Portal|Wallet|Analysis|Internship|Communication)[^:\n]*?)(?:\*\*)?\s+(.*)$/i;
+
+  const output: string[] = [];
+  for (const paragraph of paragraphs) {
+    const match = paragraph.match(projectStart);
+    if (!match) {
+      output.push(paragraph);
+      continue;
+    }
+
+    const [, title, body] = match;
+    const cleanTitle = title.trim();
+    const looksLikeSentence =
+      /[.!?]/.test(cleanTitle) ||
+      /^(sure|actually|mainly|before that|after that|then|over time|at that point|i also|i worked|i built|my recent|most of my)\b/i.test(
+        cleanTitle,
+      );
+
+    if (looksLikeSentence) {
+      output.push(paragraph);
+      continue;
+    }
+
+    const cleanBody = body.trim();
+    const sentences =
+      cleanBody.match(/[^.!?]+[.!?]+(?:\s|$)/g)?.map((s) => s.trim()) ??
+      (cleanBody ? [cleanBody] : []);
+    const summary = sentences.shift() || cleanBody;
+    const details = sentences.slice(0, 4);
+
+    output.push(`- **${cleanTitle}** — ${summary}`);
+    for (const detail of details) {
+      output.push(`  - ${detail}`);
+    }
+  }
+
+  return output.join("\n");
+}
+
 // Answer Area
 const AnswerArea: React.FC<{
   responses: AIDisplayResponse[];
@@ -325,16 +411,21 @@ const AnswerArea: React.FC<{
         const parsed = parseAIResponse(displayText);
 
         // The question comes from the message's `.question` field (set by
-        // parseAnswerContent during streaming) — NOT from re-parsing the
-        // `.text` body, which already has the QUESTION: label stripped.
-        const finalQuestion = resp.question?.trim() || parsed.question || "";
+        // parseAnswerContent during streaming) — this is the backend-extracted
+        // cleaned question and should be the source of truth. Fallback to
+        // re-parsing only if the message field is not set.
+        const finalQuestion = parsed.question || resp.question?.trim() || "";
+        const answerMarkdown = normalizeProjectAnswerMarkdown(
+          finalQuestion,
+          parsed.answer,
+        );
 
         // Universal "Copy All" payload — always includes the question (when
         // present) followed by the answer, so users can paste a self-contained
         // Q&A snippet into notes / Slack / docs in one click.
         const copyAllPayload = finalQuestion
-          ? `Question:\n${finalQuestion}\n\nAnswer:\n${parsed.answer}`
-          : parsed.answer;
+          ? `Question:\n${finalQuestion}\n\nAnswer:\n${answerMarkdown}`
+          : answerMarkdown;
 
         return (
           <div
@@ -373,7 +464,7 @@ const AnswerArea: React.FC<{
               <span className="text-[13.5px] font-bold text-white">
                 Answer:
               </span>
-              {!resp.isStreaming && parsed.answer && (
+              {!resp.isStreaming && answerMarkdown && (
                 <InlineCopyButton text={copyAllPayload} label="COPY ALL" />
               )}
             </div>
@@ -480,7 +571,7 @@ const AnswerArea: React.FC<{
                       },
                     }}
                   >
-                    {parsed.answer}
+                    {answerMarkdown}
                   </ReactMarkdown>
                   {resp.isStreaming && (
                     <span className="ml-1 inline-block h-3.5 w-0.5 bg-blue-400 animate-pulse align-middle" />

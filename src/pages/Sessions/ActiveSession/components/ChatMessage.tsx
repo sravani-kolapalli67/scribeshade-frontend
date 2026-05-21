@@ -166,9 +166,9 @@ export const ChatMessage = ({
     message.question,
   );
 
-  // Prefer the message's stored question (set by handleAiAnswerSingle at card
-  // creation time); fall back to what parseAnswerContent extracted from the text.
-  const displayQuestion = message.question?.trim() || parsedQuestion;
+  // Prefer the cleanly extracted question from the AI response (set by parseAnswerContent);
+  // fall back to the message's stored question (set by handleAiAnswerSingle at card creation time).
+  const displayQuestion = parsedQuestion || message.question?.trim();
 
   // The answer is what parseAnswerContent returned — already stripped of labels.
   // Apply the markdown sanitizer to clean up stray asterisks / bullet chars.

@@ -1,6 +1,5 @@
 import { useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { tauriOverlay } from "@/services/tauriOverlay";
 
 interface UseCursorPassthroughOptions {
   isDraggingRef: React.MutableRefObject<boolean>;
@@ -29,10 +28,27 @@ export function useCursorPassthrough({
       if (p === lastPassthrough) return;
       lastPassthrough = p;
       try {
-        await invoke("set_cursor_passthrough", { passthrough: p });
+        await tauriOverlay.setIgnoreCursorEvents(p);
       } catch (e) {
         console.error("[passthrough]", e);
       }
+    }
+
+    function isPointInInteractiveRegion(localX: number, localY: number) {
+      const nodes =
+        document.querySelectorAll<HTMLElement>("[data-interactive]");
+      for (let i = 0; i < nodes.length; i++) {
+        const r = nodes[i].getBoundingClientRect();
+        if (
+          localX >= r.left &&
+          localX <= r.right &&
+          localY >= r.top &&
+          localY <= r.bottom
+        ) {
+          return true;
+        }
+      }
+      return false;
     }
 
     async function tick() {
@@ -50,74 +66,27 @@ export function useCursorPassthrough({
         const now = performance.now();
         if (now - lastCacheUpdate > 250) {
           lastCacheUpdate = now;
-          const win = getCurrentWindow();
           const [pos, scale] = await Promise.all([
-            win.outerPosition(),
-            win.scaleFactor(),
+            tauriOverlay.getOuterPosition(),
+            tauriOverlay.getScaleFactor(),
           ]);
           cachedWinPos = { x: pos.x, y: pos.y };
           cachedScale = scale;
         }
 
-        const [gx, gy] = await invoke<[number, number]>("get_cursor_position");
-        // Convert global physical px → window-local CSS px
-        const localX = (gx - cachedWinPos.x) / cachedScale;
-        const localY = (gy - cachedWinPos.y) / cachedScale;
+        const [gx, gy] = await tauriOverlay.getCursorPosition();
+        // Tauri/macOS can report global cursor coordinates in logical points
+        // while window APIs may report physical pixels. Test both conversions
+        // against explicit [data-interactive] regions so transparent shell
+        // elements never keep the whole fullscreen overlay clickable.
+        const localPhysicalX = (gx - cachedWinPos.x) / cachedScale;
+        const localPhysicalY = (gy - cachedWinPos.y) / cachedScale;
+        const localLogicalX = gx - cachedWinPos.x;
+        const localLogicalY = gy - cachedWinPos.y;
 
-        let over = false;
-        const nodes =
-          document.querySelectorAll<HTMLElement>("[data-interactive]");
-        for (let i = 0; i < nodes.length; i++) {
-          const r = nodes[i].getBoundingClientRect();
-          if (
-            localX >= r.left &&
-            localX <= r.right &&
-            localY >= r.top &&
-            localY <= r.bottom
-          ) {
-            over = true;
-            break;
-          }
-        }
-
-        // Fallback: also check portal elements (menus, dropdowns) that render
-        // via createPortal and lack [data-interactive].  elementsFromPoint
-        // returns elements in z-order; if the topmost visible element has
-        // pointer-events !== "none" there is clickable content at this position.
-        //
-        // IMPORTANT: skip known fullscreen "shell" containers (launcher-root,
-        // mini-app-root, overlay-portal-root, [data-overlay-root], [data-layer]).
-        // These are full-window divs that exist purely to host portals/layers;
-        // they must NOT count as interactive even if a stylesheet accidentally
-        // gives them `pointer-events: auto`. Otherwise empty areas would never
-        // pass through to the OS.
-        if (!over) {
-          const SHELL_IDS = new Set([
-            "launcher-root",
-            "mini-app-root",
-            "overlay-portal-root",
-            "floating-portal-root",
-            "root",
-          ]);
-          const isShell = (el: Element): boolean => {
-            if (el.id && SHELL_IDS.has(el.id)) return true;
-            if (el instanceof HTMLElement) {
-              if (el.dataset.overlayRoot !== undefined) return true;
-              if (el.dataset.layer !== undefined) return true;
-            }
-            return false;
-          };
-          const hits = document.elementsFromPoint(localX, localY);
-          for (const el of hits) {
-            if (el === document.documentElement || el === document.body) break;
-            if (isShell(el)) continue;
-            const pe = window.getComputedStyle(el).pointerEvents;
-            if (pe !== "none") {
-              over = true;
-              break;
-            }
-          }
-        }
+        const over =
+          isPointInInteractiveRegion(localPhysicalX, localPhysicalY) ||
+          isPointInInteractiveRegion(localLogicalX, localLogicalY);
 
         await setPassthrough(!over);
       } catch (e) {
@@ -130,14 +99,23 @@ export function useCursorPassthrough({
       });
     }
 
+    const handleContextMenu = (event: MouseEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (!target.closest("[data-interactive]")) {
+        event.preventDefault();
+        void setPassthrough(true);
+      }
+    };
+
+    document.addEventListener("contextmenu", handleContextMenu, true);
     raf = requestAnimationFrame(() => void tick());
 
     return () => {
       cancelled = true;
       cancelAnimationFrame(raf);
-      invoke("set_cursor_passthrough", { passthrough: false }).catch(
-        console.error,
-      );
+      document.removeEventListener("contextmenu", handleContextMenu, true);
+      tauriOverlay.setIgnoreCursorEvents(false).catch(console.error);
     };
   }, [isDraggingRef]);
 }

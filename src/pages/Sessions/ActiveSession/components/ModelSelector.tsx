@@ -13,6 +13,24 @@ const AI_MODELS = [
   { id: "openai/gpt-5",                          name: "GPT-5",                 badge: undefined   },
 ];
 
+const DEFAULT_MODEL = AI_MODELS[0].id;
+
+/**
+ * Validates if a model ID is in the available models list
+ */
+export function isValidModel(modelId: string | null | undefined): boolean {
+  if (!modelId) return false;
+  return AI_MODELS.some((m) => m.id === modelId);
+}
+
+/**
+ * Returns a valid model ID, falling back to default if invalid
+ */
+export function getValidModel(modelId: string | null | undefined): string {
+  if (isValidModel(modelId)) return modelId!;
+  return DEFAULT_MODEL;
+}
+
 interface ModelSelectorProps {
   value: string;
   onChange: (value: string) => void;
@@ -26,10 +44,17 @@ export function ModelSelector({
   isFullscreen,
   className,
 }: ModelSelectorProps) {
-  const selected = AI_MODELS.find((m) => m.id === value);
+  // Ensure value is always valid, fallback to default if not
+  const validValue = getValidModel(value);
+  const selected = AI_MODELS.find((m) => m.id === validValue);
+
+  // Sync with parent if value was invalid
+  const handleChange = (newValue: string) => {
+    onChange(newValue);
+  };
 
   return (
-    <Select value={value} onValueChange={onChange}>
+    <Select value={validValue} onValueChange={handleChange}>
       {/* Custom trigger — renders name + badge inline so SelectValue never
           clips the badge. Width is sized to fit the longest option. */}
       <SelectTrigger

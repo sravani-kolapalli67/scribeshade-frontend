@@ -27,6 +27,7 @@ interface TranscriptProps {
   onMinimize?: () => void;
   onChangeTab?: () => void;
   onOpenOverlay?: () => void;
+  currentMicDevice?: string;
 }
 
 export const Transcript = ({
@@ -43,6 +44,7 @@ export const Transcript = ({
   onMinimize,
   onChangeTab,
   onOpenOverlay,
+  currentMicDevice,
 }: TranscriptProps) => {
   const [autoScroll, setAutoScroll] = useState(true);
 
@@ -57,6 +59,7 @@ export const Transcript = ({
         isConnecting={isConnecting}
         isTabTranscribing={isTabTranscribing}
         isMicTranscribing={isMicTranscribing}
+        currentMicDevice={currentMicDevice}
         error={error}
         onToggleMic={onToggleMic}
         onClear={onClear}

@@ -194,18 +194,14 @@ export function ConnectDialog({
         <div className="px-7 pb-7 pt-3 space-y-5">
           {/* Context Summary */}
           <p className="text-sm text-muted-foreground leading-relaxed">
-            This is an Interview Session for a position{" "}
-            <span className="font-bold text-foreground">
-              &quot;{jobTitle || "Software Developer"}&quot;
-            </span>{" "}
-            at{" "}
+            This is an Interview Session at{" "}
             <span className="font-bold text-foreground">
               &quot;{companyName || "Company"}&quot;
             </span>
             {extraContext && (
               <>
                 {" "}
-                and{" "}
+                with{" "}
                 <span
                   className="text-primary font-semibold underline underline-offset-2 cursor-pointer"
                   title={extraContext}
@@ -349,6 +345,11 @@ export function ConnectDialog({
                 ? parseFloat(maxBracket.creditsFull)
                 : null;
               const lowBalance = maxCost !== null && available < maxCost;
+              
+              // Convert per-minute to hourly
+              const creditsPerMinute = maxBracket ? parseFloat(maxBracket.creditsPerMinute) : 0;
+              const creditsPerHour = creditsPerMinute * 60;
+              
               return (
                 <div
                   className={`flex items-center justify-between px-3 py-2.5 rounded-xl border text-xs font-medium ${lowBalance ? "bg-amber-50/60 border-amber-300/60" : "bg-muted/30 border-border/50"}`}
@@ -359,7 +360,7 @@ export function ConnectDialog({
                     />
                     <span className="text-muted-foreground">
                       {maxBracket
-                        ? `${maxBracket.creditsPerMinute} cr/min · first ${maxBracket.graceZoneMinutes} min free`
+                        ? `${creditsPerHour} cr/hour · first ${maxBracket.graceZoneMinutes} min free`
                         : "Free session"}
                     </span>
                   </div>

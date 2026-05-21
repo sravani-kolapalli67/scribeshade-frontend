@@ -15,6 +15,10 @@ const QUESTION_MARKER = /(?:\*\*\s*)?QUESTION\s*:/i;
 // Backend sentinel: the model returns this single line when the input block
 // contains no genuine new interview question. We must not render a card for it.
 const NO_QUESTION_MARKER = /={3,}\s*NO_NEW_QUESTION\s*={3,}/i;
+const NO_QUESTION_MESSAGE =
+  "No question found on this screen. If you have a question, let me know.";
+const NO_QUESTION_HEURISTIC =
+  /(no interview questions?\s+(?:are|were)?\s*visible|no clear question|please provide|share the actual interview|clarify|not clearly visible)/i;
 
 // ── Transcript normalization ────────────────────────────────────────────────
 // Common speech-to-text substitution errors and their corrections.
@@ -320,8 +324,15 @@ export function parseAnswerContent(rawText: string, fallbackQuestion?: string): 
   );
   if (orphanQMatch) {
     // Partial: QUESTION content is streaming but ANSWER hasn't arrived.
-    // Return empty answer to show loading state, not garbled question text.
-    return { question: fallbackQuestion?.trim() ?? "", answer: "" };
+    // Stream the AI-generated/cleaned question into the UI while the answer
+    // is still being generated.
+    const partialQuestion = orphanQMatch[1]
+      .replace(/\*{0,2}\s*ANSWER\s*:?\s*\*{0,2}[\s\S]*$/i, "")
+      .trim();
+    return {
+      question: partialQuestion || fallbackQuestion?.trim() || "",
+      answer: "",
+    };
   }
 
   return { question: fallbackQuestion?.trim() ?? "", answer: text };
@@ -359,6 +370,9 @@ async function consumeSegmentedStream(
     if (signal?.aborted) {
       return;
     }
+    if (NO_QUESTION_MARKER.test(buffer)) {
+      return;
+    }
     setAiChat((prev) => {
       const next = [...prev];
       for (let i = 0; i < segmentIds.length; i++) {
@@ -381,13 +395,13 @@ async function consumeSegmentedStream(
 
         const idx = next.findIndex((m) => m.id === sid);
         if (idx >= 0) {
-          // Preserve existing question if already set (e.g. from handleAiAnswerSingle);
-          // use the newly extracted one if the existing message has none.
-          const existingQuestion = next[idx].question?.trim() || "";
+          // Always use the backend-extracted question as the source of truth.
+          // The backend AI response contains the properly interpreted/cleaned question,
+          // which should override any initial raw transcript question.
           next[idx] = {
             ...next[idx],
             text: displayText,
-            question: existingQuestion || extractedQuestion,
+            question: extractedQuestion,
             ...(snapshotId ? { snapshotId } : {}),
           };
         } else {
@@ -468,6 +482,10 @@ async function consumeSegmentedStream(
   if (signal?.aborted) {
     await safelyCancelReader(reader);
     return { activeIds: [], sentinelOnly: false };
+  }
+
+  if (NO_QUESTION_MARKER.test(buffer)) {
+    return { activeIds: [], sentinelOnly: true };
   }
 
   // Final flush — also catches the case where the stream ended WITHOUT any
@@ -665,9 +683,14 @@ export const useAIChat = () => {
         );
 
         if (analyzeSentinel) {
-          // Screen had no detectable interview question — remove placeholder silently.
-          console.log(`[useAIChat] handleAnalyzeScreen: Sentinel-only response. Removing placeholder card ${messageId}.`);
-          setAiChat((prev) => prev.filter((m) => m.id !== messageId));
+          console.log(`[useAIChat] handleAnalyzeScreen: Sentinel-only response. Showing no-question message on card ${messageId}.`);
+          setAiChat((prev) =>
+            prev.map((msg) =>
+              msg.id === messageId
+                ? { ...msg, text: NO_QUESTION_MESSAGE, question: "" }
+                : msg,
+            ),
+          );
           return;
         }
 
@@ -677,6 +700,18 @@ export const useAIChat = () => {
         }
 
         console.log("[useAIChat] handleAnalyzeScreen: Stream consumption completed. Rendered IDs:", renderedIds);
+
+        // Guardrail: if the model ignored sentinel rules and returned a
+        // clarification blob, normalize it to one soft no-question message.
+        setAiChat((prev) =>
+          prev.map((msg) => {
+            if (!renderedIds.includes(msg.id)) return msg;
+            const raw = msg.text?.trim() || "";
+            if (!raw) return msg;
+            if (!NO_QUESTION_HEURISTIC.test(raw)) return msg;
+            return { ...msg, text: NO_QUESTION_MESSAGE, question: "" };
+          }),
+        );
 
         // Fallback: if the stream produced no renderable cards, show a helpful message
         setAiChat((prev) => {
@@ -698,7 +733,7 @@ export const useAIChat = () => {
               {
                 id: messageId,
                 sender: "AI" as const,
-                text: "I couldn't detect a clear question from the screen. Try capturing again or ask a direct query.",
+                text: NO_QUESTION_MESSAGE,
                 time: baseTime,
               },
             ];
@@ -706,7 +741,7 @@ export const useAIChat = () => {
 
           return prev.map((msg) =>
             msg.id === emptyCardId
-              ? { ...msg, text: "I couldn't detect a clear question from the screen. Try capturing again or ask a direct query." }
+              ? { ...msg, text: NO_QUESTION_MESSAGE, question: "" }
               : msg,
           );
         });
@@ -845,7 +880,7 @@ export const useAIChat = () => {
         sender: "AI",
         text: "",
         time: baseTime,
-        question,
+        question: "",
       };
 
       console.log(`[useAIChat] handleAiAnswer: Spawning temporary card messageId: ${messageId}`);

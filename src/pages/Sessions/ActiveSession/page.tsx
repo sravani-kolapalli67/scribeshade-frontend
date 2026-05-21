@@ -13,6 +13,7 @@ import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "@/lib/utils";
+import { detectIntent, isFillerPhrase } from "@/lib/intent-detector";
 import {
   createTranscriptStabilizer,
   prepareGeneration,
@@ -154,13 +155,29 @@ export default function ActiveSession() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const PREFERRED_MODEL_KEY = "scribeshade_preferred_model";
+  const DEFAULT_MODEL = "anthropic/claude-haiku-4-5";
+  
+  // Available models - should match ModelSelector.AI_MODELS
+  const AVAILABLE_MODELS = [
+    "anthropic/claude-haiku-4-5",
+    "anthropic/claude-sonnet-4-5",
+    "google/gemini-3.1-flash-lite-preview",
+    "openai/gpt-5",
+  ];
+  
   const [selectedModel, setSelectedModel] = useState(() => {
-    // Priority: 1. Navigation state, 2. Stored preference, 3. Default
-    return (
-      location.state?.connectData?.aiModel ||
-      localStorage.getItem(PREFERRED_MODEL_KEY) ||
-      "anthropic/claude-haiku-4-5"
-    );
+    // Priority: 1. Navigation state, 2. Stored preference (if valid), 3. Default
+    const navModel = location.state?.connectData?.aiModel;
+    const storedModel = localStorage.getItem(PREFERRED_MODEL_KEY);
+    
+    // Validate and return a valid model
+    if (navModel && AVAILABLE_MODELS.includes(navModel)) {
+      return navModel;
+    }
+    if (storedModel && AVAILABLE_MODELS.includes(storedModel)) {
+      return storedModel;
+    }
+    return DEFAULT_MODEL;
   });
 
   const [selectedLanguage, setSelectedLanguage] = useState(
@@ -546,10 +563,15 @@ export default function ActiveSession() {
         console.log(`[Transcript Final Input] ${sender}: ${text}`);
         setMessages((prev) => {
           let cleanText = deduplicatePhrases(text);
-          // Look for overlap with the last message from the same sender
-          const lastSameSenderMsg = [...prev].reverse().find((m) => m.sender === sender);
-          if (lastSameSenderMsg) {
-            cleanText = removeOverlap(lastSameSenderMsg.text, cleanText);
+          // removeOverlap is only meaningful for the Interviewer (tab/system audio)
+          // path where Deepgram streams overlapping context windows. Applying it
+          // to User (mic) transcription strips valid words that happen to match
+          // the end of the previous message, silently dropping mic utterances.
+          if (sender === "Interviewer") {
+            const lastSameSenderMsg = [...prev].reverse().find((m) => m.sender === sender);
+            if (lastSameSenderMsg) {
+              cleanText = removeOverlap(lastSameSenderMsg.text, cleanText);
+            }
           }
           cleanText = cleanText.trim();
           if (!cleanText) {
@@ -684,6 +706,8 @@ export default function ActiveSession() {
     language: getLanguageCode(selectedLanguage),
     onTranscript: onUserTranscript,
   });
+
+  const currentMicDevice = micTranscription.currentDeviceLabel;
 
   // Display audio transcription: SCKit (Rust) ─► localhost WS ─► Deepgram WS
   // Captures the primary display's system audio directly via ScreenCaptureKit,
@@ -1125,31 +1149,121 @@ export default function ActiveSession() {
   const onAiAnswer = useCallback(() => {
     if (isExecutingRef.current || !id) return;
 
-    // Resolve the SPECIFIC question to answer.
+    // Create an immutable transcript snapshot at the moment AI Answer is triggered.
+    // This prevents race conditions where new transcript chunks arrive during
+    // context extraction and contaminate the AI request context.
+    const snapshotTimestamp = Date.now();
+    const messagesSnapshot = [...messages];
+    const micInterimSnapshot = activeMicInterimTranscript;
+    const tabInterimSnapshot = mergedTabInterimTranscript;
+
+    console.log("[AI Answer] Creating transcript snapshot at timestamp:", snapshotTimestamp);
+    console.log("[AI Answer] Snapshot contains", messagesSnapshot.length, "messages");
+
+    // Resolve the SPECIFIC question to answer from the immutable snapshot.
     // Priority: live interim Interviewer text → last final Interviewer message.
     // Sending only the specific question (not the whole transcript blob) ensures
     // the AI answers THIS question instead of fixating on whatever was last in a
     // 50-message concatenated dump.  The backend fetches full session history from
     // DB for context, so nothing is lost.
-    const interimText =
-      activeMicInterimTranscript || mergedTabInterimTranscript;
+    const interimText = micInterimSnapshot || tabInterimSnapshot;
 
     const interviewerInterim =
-      !activeMicInterimTranscript && mergedTabInterimTranscript
-        ? mergedTabInterimTranscript
+      !micInterimSnapshot && tabInterimSnapshot
+        ? tabInterimSnapshot
         : null;
 
-    // Prefer the live (not-yet-final) interviewer speech; fall back to the last
-    // finalised Interviewer message in the transcript; fall back to the last
-    // finalised message of any sender; fall back to any live interim text.
-    const question =
-      interviewerInterim ||
-      [...messages].reverse().find((m) => m.sender === "Interviewer")?.text ||
-      [...messages].reverse().find((m) => m.text)?.text ||
-      interimText ||
-      "";
+    let question = "";
+    let questionSource = "";
+    const CONTEXT_WINDOW_MS = 60000; // 60 second window for recent context
 
-    if (!question) return;
+    if (isTauri()) {
+      // Prefer the live (not-yet-final) interviewer speech; fall back to the last
+      // finalised Interviewer message in the transcript; fall back to the last
+      // finalised message of any sender; fall back to any live interim text.
+      question =
+        interviewerInterim ||
+        messagesSnapshot.reverse().find((m) => m.sender === "Interviewer")?.text ||
+        messagesSnapshot.reverse().find((m) => m.text)?.text ||
+        interimText ||
+        "";
+      questionSource = interviewerInterim ? "interviewer_interim" : 
+                       messagesSnapshot.reverse().find((m) => m.sender === "Interviewer")?.text ? "last_interviewer" :
+                       "fallback";
+    } else {
+      // For web/browser context, both the user voice input and processed transcript/context
+      // should be included together so the AI can correctly understand and answer the intended question.
+      
+      // Get user voice input from mic or recent messages (with strict timestamp window)
+      const now = snapshotTimestamp;
+      
+      let userVoiceInput = micInterimSnapshot.trim() ||
+        messagesSnapshot
+          .filter((m) => m.sender === "User" && m.timestamp && now - m.timestamp < CONTEXT_WINDOW_MS)
+          .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))[0]?.text ||
+        "";
+      
+      questionSource = userVoiceInput ? "user_interim" : "";
+
+      // If the user voice input is just filler/noise, look for a more meaningful recent User message
+      if (userVoiceInput && isFillerPhrase(userVoiceInput)) {
+        console.log("[AI Answer] Detected filler phrase in user voice input:", userVoiceInput);
+        // Look for a more meaningful User message within the context window
+        const meaningfulUserMsg = messagesSnapshot
+          .filter((m) => 
+            m.sender === "User" && 
+            m.timestamp && 
+            now - m.timestamp < CONTEXT_WINDOW_MS &&
+            !isFillerPhrase(m.text) &&
+            m.text.trim().length > 5 // Require at least 5 characters
+          )
+          .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))[0];
+        
+        if (meaningfulUserMsg) {
+          console.log("[AI Answer] Using meaningful user message instead:", meaningfulUserMsg.text);
+          userVoiceInput = meaningfulUserMsg.text;
+          questionSource = "meaningful_user";
+        } else {
+          // If no meaningful user message found, clear the filler input
+          console.log("[AI Answer] No meaningful user message found in context window, clearing filler input");
+          userVoiceInput = "";
+          questionSource = "";
+        }
+      }
+
+      // Get interviewer context with strict timestamp window
+      const interviewerContext =
+        interviewerInterim ||
+        messagesSnapshot
+          .filter((m) => m.sender === "Interviewer" && m.timestamp && now - m.timestamp < CONTEXT_WINDOW_MS)
+          .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))[0]?.text ||
+        "";
+      
+      if (!questionSource && interviewerContext) {
+        questionSource = "interviewer_context";
+      }
+
+      if (userVoiceInput && interviewerContext) {
+        // Apply intent detection to clean up the user input
+        const intentResult = detectIntent(userVoiceInput);
+        const cleanedUserInput = intentResult.cleanedQuestion || userVoiceInput;
+        question = `Context: ${interviewerContext}\nQuestion: ${cleanedUserInput}`;
+      } else {
+        question = userVoiceInput || interviewerContext || interimText || "";
+        if (!questionSource && question) {
+          questionSource = "fallback_interim";
+        }
+      }
+    }
+
+    if (!question) {
+      console.log("[AI Answer] No question could be extracted from transcript snapshot");
+      return;
+    }
+
+    console.log("[AI Answer] Question extracted from source:", questionSource);
+    console.log("[AI Answer] Question content:", question.slice(0, 100));
+    console.log("[AI Answer] Context window:", CONTEXT_WINDOW_MS, "ms");
 
     isExecutingRef.current = true;
     try {
@@ -1434,6 +1548,7 @@ export default function ActiveSession() {
     onMinimize: toggleFullscreen,
     onChangeTab: startShare,
     onOpenOverlay: handleOpenOverlay,
+    currentMicDevice,
   };
 
   const chatPanelProps = {
