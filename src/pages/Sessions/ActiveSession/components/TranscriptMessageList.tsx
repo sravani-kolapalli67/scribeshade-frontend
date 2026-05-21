@@ -9,6 +9,7 @@ interface TranscriptMessageListProps {
   micInterim?: string;
   tabInterim?: string;
   isFullscreen?: boolean;
+  onPatchMessage?: (messageId: string, patchedText: string) => void;
 }
 
 export const TranscriptMessageList = ({
@@ -16,6 +17,7 @@ export const TranscriptMessageList = ({
   micInterim,
   tabInterim,
   isFullscreen = false,
+  onPatchMessage,
 }: TranscriptMessageListProps) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
@@ -62,7 +64,12 @@ export const TranscriptMessageList = ({
     >
       <div className="flex flex-col gap-5">
         {messages.map((m) => (
-          <TranscriptMessage key={m.id} message={m} isFullscreen={isFullscreen} />
+          <TranscriptMessage
+            key={m.id}
+            message={m}
+            isFullscreen={isFullscreen}
+            onPatchMessage={onPatchMessage}
+          />
         ))}
 
         {/* Interim Transcripts */}

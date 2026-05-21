@@ -8,6 +8,7 @@ export interface SessionInitPayload {
   companyName: string;
   startedAt: string | null;
   maxAllowedMinutes: number | null;
+  saveTranscript?: boolean;
 }
 
 export interface InspectAuthPayload {

@@ -17,18 +17,24 @@ export interface TranscriptMessage {
   sender: "User" | "Interviewer";
   text: string;
   timestamp: number;
+  originalText?: string;
+  patchedText?: string;
+  patchedAt?: number;
+  patchedByUser?: boolean;
 }
 
 export interface SessionTranscriptProps {
   messages: TranscriptMessage[];
   micInterim?: string;
   tabInterim?: string;
+  onPatchMessage?: (messageId: string, patchedText: string) => void;
 }
 
 export const SessionTranscript: React.FC<SessionTranscriptProps> = ({
   messages,
   micInterim = "",
   tabInterim = "",
+  onPatchMessage,
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const interimText = micInterim || tabInterim;
@@ -55,9 +61,12 @@ export const SessionTranscript: React.FC<SessionTranscriptProps> = ({
           {messages.map((m) => (
             <TranscriptBubble
               key={m.id}
+              id={m.id}
               sender={m.sender}
-              text={m.text}
+              text={m.patchedText || m.text}
+              patchedByUser={m.patchedByUser}
               isInterim={false}
+              onPatch={onPatchMessage}
             />
           ))}
 

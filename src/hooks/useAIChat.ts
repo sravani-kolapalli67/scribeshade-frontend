@@ -1,5 +1,12 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { Message } from "@/pages/Sessions/ActiveSession/Transcript";
+import {
+  type AIAnswerRequestPayload,
+  extractCodeBlocks,
+  sanitizeAIAnswerPayload,
+  resolveQueryFromAIAnswerPayload,
+} from "@/types/ai-answer";
+import { isTauri } from "@/lib/utils";
 import { 
   prepareGeneration, 
   shouldTriggerGeneration, 
@@ -56,6 +63,8 @@ const STT_CORRECTIONS: [RegExp, string][] = [
   [/\bgcp\b/gi, "GCP"],
   [/\bazure\b/gi, "Azure"],
 ];
+
+type AIAnswerRequestInput = string | AIAnswerRequestPayload;
 
 /**
  * Normalizes speech-to-text transcript errors before sending to the AI.
@@ -528,7 +537,11 @@ export const useAIChat = () => {
   // Stable ref so handleAiAnswer can call handleAiAnswerSingle without a
   // forward-reference ordering issue (handleAiAnswerSingle is defined after).
   const handleAiAnswerSingleRef = useRef<
-    (sessionId: string, question: string, aiModel: string) => Promise<void>
+    (
+      sessionId: string,
+      payload: AIAnswerRequestPayload,
+      aiModel: string,
+    ) => Promise<void>
   >(() => Promise.resolve());
 
   const startNewRequest = useCallback(() => {
@@ -793,9 +806,25 @@ export const useAIChat = () => {
   );
 
   const handleAiAnswer = useCallback(
-    async (sessionId: string, question: string, aiModel: string) => {
-      // Normalize STT transcript errors and deduplicate duplicates before anything else
-      const normalizedQuestion = deduplicateQuestionsInText(normalizeSttTranscript(question));
+    async (
+      sessionId: string,
+      request: AIAnswerRequestInput,
+      aiModel: string,
+    ) => {
+      const basePayload = sanitizeAIAnswerPayload(
+        typeof request === "string"
+          ? { transcript: request, currentQuestion: request }
+          : request,
+      );
+      const resolvedFromPayload = resolveQueryFromAIAnswerPayload(basePayload);
+      const normalizedQuestion = deduplicateQuestionsInText(
+        normalizeSttTranscript(resolvedFromPayload),
+      );
+      if (import.meta.env.DEV) {
+        console.log("[AI Answer Debug][FE] Raw input request:", request);
+        console.log("[AI Answer Debug][FE] Base sanitized payload:", basePayload);
+        console.log("[AI Answer Debug][FE] Resolved query before normalization:", resolvedFromPayload);
+      }
       console.log(`[useAIChat] handleAiAnswer triggered. sessionId: ${sessionId}, question: "${normalizedQuestion.slice(0, 100)}...", model: ${aiModel}`);
       if (!normalizedQuestion.trim()) {
         console.log("[useAIChat] handleAiAnswer: Question is empty. Aborting.");
@@ -812,18 +841,53 @@ export const useAIChat = () => {
       }
       recentQuestionsRef.current = [...recent, { q: dedupeKey, t: now }].slice(-10);
 
+      const normalizedPayload = sanitizeAIAnswerPayload({
+        ...basePayload,
+        currentQuestion: normalizedQuestion,
+      });
+      if (import.meta.env.DEV) {
+        console.log("[AI Answer Debug][FE] Final normalized payload before routing:", normalizedPayload);
+      }
+
+      // patchedTranscript is an explicit edited query signal.
+      // It must bypass segmentation and be sent as-is in a single request.
+      if (normalizedPayload.patchedTranscript?.trim()) {
+        if (import.meta.env.DEV) {
+          console.log("[AI Answer Debug][FE] patchedTranscript detected; bypassing segmentation.");
+        }
+        await handleAiAnswerSingleRef.current(
+          sessionId,
+          normalizedPayload,
+          aiModel,
+        );
+        previousContextRef.current = {
+          transcript: normalizedQuestion,
+          timestamp: Date.now(),
+        };
+        return;
+      }
+
       // Route through the unified generation pipeline
       // Use 'button' mode for manual clicks to bypass noise classification
-      const decision = prepareGeneration({ 
-        transcript: normalizedQuestion, 
-        mode: 'button', 
-        sessionId, 
-        aiModel 
-      }, previousContextRef.current?.transcript);
+      const decision = prepareGeneration(
+        {
+          transcript: normalizedQuestion,
+          mode: "button",
+          sessionId,
+          aiModel,
+        },
+        previousContextRef.current?.transcript,
+      );
 
       if (decision.shouldGenerate === false) {
+        if (import.meta.env.DEV) {
+          console.log("[AI Answer Debug][FE] Generation blocked by pipeline:", decision);
+        }
         console.log(`[useAIChat] handleAiAnswer: Pipeline blocked generation. Reason: ${decision.reason}`);
         return;
+      }
+      if (import.meta.env.DEV) {
+        console.log("[AI Answer Debug][FE] Generation decision:", decision);
       }
 
       const segmentId = generateSegmentId(decision.groupedTranscript);
@@ -836,10 +900,27 @@ export const useAIChat = () => {
 
       try {
         if (decision.segmentCount === 1) {
-          await handleAiAnswerSingleRef.current(sessionId, decision.groupedTranscript, aiModel);
+          await handleAiAnswerSingleRef.current(
+            sessionId,
+            sanitizeAIAnswerPayload({
+              ...normalizedPayload,
+              currentQuestion: decision.groupedTranscript,
+            }),
+            aiModel,
+          );
         } else {
           for (let i = 0; i < decision.segments.length; i++) {
-            await handleAiAnswerSingleRef.current(sessionId, decision.segments[i], aiModel);
+            // Intentional segmentation mode: each call targets one split question.
+            await handleAiAnswerSingleRef.current(
+              sessionId,
+              sanitizeAIAnswerPayload({
+                ...normalizedPayload,
+                transcript: decision.segments[i],
+                currentQuestion: decision.segments[i],
+                patchedTranscript: undefined,
+              }),
+              aiModel,
+            );
             if (i < decision.segments.length - 1) {
               await new Promise(r => setTimeout(r, 500));
             }
@@ -857,8 +938,13 @@ export const useAIChat = () => {
 
   // Inner single-question implementation — called by handleAiAnswer via ref after splitting.
   const handleAiAnswerSingle = useCallback(
-    async (sessionId: string, question: string, aiModel: string) => {
-      if (!question.trim()) return;
+    async (
+      sessionId: string,
+      payload: AIAnswerRequestPayload,
+      aiModel: string,
+    ) => {
+      const resolvedQuestion = resolveQueryFromAIAnswerPayload(payload);
+      if (!resolvedQuestion.trim()) return;
 
       const { controller, reqId } = startNewRequest();
       console.log(`[useAIChat] handleAiAnswerSingle: Assigned request ID: ${reqId}`);
@@ -888,7 +974,11 @@ export const useAIChat = () => {
 
       try {
         const targetUrl = `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionId}/ai-answer`;
-        console.log(`[useAIChat] handleAiAnswer: Dispatching POST to ${targetUrl} with body:`, { transcript: question, aiModel });
+        const requestBody = { ...payload, aiModel };
+        if (import.meta.env.DEV) {
+          console.log("[AI Answer Debug][FE] POST /ai-answer body:", requestBody);
+        }
+        console.log(`[useAIChat] handleAiAnswer: Dispatching POST to ${targetUrl} with body:`, requestBody);
         const response = await fetch(
           targetUrl,
           {
@@ -896,7 +986,7 @@ export const useAIChat = () => {
             headers: {
               "Content-Type": "application/json",
             },
-            body: JSON.stringify({ transcript: question, aiModel }),
+            body: JSON.stringify(requestBody),
             signal: controller.signal,
           },
         );
@@ -987,6 +1077,10 @@ export const useAIChat = () => {
     async (sessionId: string, query: string, aiModel: string) => {
       const normalizedQuery = normalizeSttTranscript(query);
       console.log(`[useAIChat] handleCustomQuery triggered. sessionId: ${sessionId}, query: "${normalizedQuery}", model: ${aiModel}`);
+      if (import.meta.env.DEV) {
+        console.log("[AI Answer Debug][FE][Manual] Raw manual query:", query);
+        console.log("[AI Answer Debug][FE][Manual] Normalized manual query:", normalizedQuery);
+      }
       if (!normalizedQuery.trim()) {
         console.log("[useAIChat] handleCustomQuery: Query is empty. Aborting.");
         return;
@@ -1077,6 +1171,14 @@ export const useAIChat = () => {
       const enrichedQuery = contextPreamble
         ? `${contextPreamble}\n\n[New question / follow-up]\n${normalizedQuery}`
         : normalizedQuery;
+      const previousAiAnswer =
+        recentAiAnswers.length > 0
+          ? recentAiAnswers[recentAiAnswers.length - 1].text?.trim() || ""
+          : "";
+      const previousCodeBlocks = previousAiAnswer
+        ? extractCodeBlocks(previousAiAnswer)
+        : [];
+      const runtimePlatform: "web" | "tauri" = isTauri() ? "tauri" : "web";
 
       console.log("[useAIChat] handleCustomQuery: Context preamble built. Enriched query content:", enrichedQuery);
 
@@ -1109,10 +1211,35 @@ export const useAIChat = () => {
             headers: {
               "Content-Type": "application/json",
             },
-            body: JSON.stringify({ transcript: enrichedQuery, isCustomQuery: true, aiModel }),
+            body: JSON.stringify({
+              ...sanitizeAIAnswerPayload({
+                transcript: enrichedQuery,
+                currentQuestion: normalizedQuery,
+                previousAiAnswer: previousAiAnswer || undefined,
+                previousCodeBlocks,
+                sourcePlatform: runtimePlatform,
+                answerMode: "auto",
+              }),
+              isCustomQuery: true,
+              aiModel,
+            }),
             signal: controller.signal,
           },
         );
+        if (import.meta.env.DEV) {
+          console.log("[AI Answer Debug][FE][Manual] POST /ai-answer body:", {
+              ...sanitizeAIAnswerPayload({
+                transcript: enrichedQuery,
+                currentQuestion: normalizedQuery,
+                previousAiAnswer: previousAiAnswer || undefined,
+                previousCodeBlocks,
+                sourcePlatform: runtimePlatform,
+                answerMode: "auto",
+              }),
+              isCustomQuery: true,
+              aiModel,
+            });
+        }
 
         if (!response.ok) {
           console.error(`[useAIChat] handleCustomQuery: Server returned status ${response.status}`);

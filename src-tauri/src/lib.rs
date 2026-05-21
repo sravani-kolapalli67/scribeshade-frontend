@@ -2473,7 +2473,7 @@ fn set_cursor_passthrough(window: Window, passthrough: bool) -> Result<(), Strin
             unsafe {
                 if let Ok(ns_win) = win_for_thread.ns_window() {
                     let ptr = ns_win as *mut objc2::runtime::AnyObject;
-                    let _: () = objc2::msg_send![ptr, setIgnoresMouseEvents: passthrough];
+                    let _: () = objc2::msg_send![ptr, setIgnoresMouseEvents: false];
                 }
             }
         })

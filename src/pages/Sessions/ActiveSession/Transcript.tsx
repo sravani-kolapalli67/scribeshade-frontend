@@ -11,6 +11,10 @@ export interface Message {
   timestamp?: number;
   question?: string;
   snapshotId?: string;
+  originalText?: string;
+  patchedText?: string;
+  patchedAt?: number;
+  patchedByUser?: boolean;
 }
 
 interface TranscriptProps {
@@ -28,6 +32,7 @@ interface TranscriptProps {
   onChangeTab?: () => void;
   onOpenOverlay?: () => void;
   currentMicDevice?: string;
+  onPatchMessage?: (messageId: string, patchedText: string) => void;
 }
 
 export const Transcript = ({
@@ -45,6 +50,7 @@ export const Transcript = ({
   onChangeTab,
   onOpenOverlay,
   currentMicDevice,
+  onPatchMessage,
 }: TranscriptProps) => {
   const [autoScroll, setAutoScroll] = useState(true);
 
@@ -76,6 +82,7 @@ export const Transcript = ({
         micInterim={micInterimTranscript}
         tabInterim={tabInterimTranscript}
         isFullscreen={isFullscreen}
+        onPatchMessage={onPatchMessage}
       />
     </div>
   );

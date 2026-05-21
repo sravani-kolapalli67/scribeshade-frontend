@@ -1,14 +1,21 @@
 import { User, Headset } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Message } from "../Transcript";
+import { InlineEditableTranscriptText } from "@/features/session/components/InlineEditableTranscriptText";
 
 interface TranscriptMessageProps {
   message: Message;
   isFullscreen?: boolean;
+  onPatchMessage?: (messageId: string, patchedText: string) => void;
 }
 
-export const TranscriptMessage = ({ message, isFullscreen = false }: TranscriptMessageProps) => {
+export const TranscriptMessage = ({
+  message,
+  isFullscreen = false,
+  onPatchMessage,
+}: TranscriptMessageProps) => {
   const isUser = message.sender === "User";
+  const displayText = message.patchedText || message.text;
 
   return (
     <div
@@ -58,12 +65,16 @@ export const TranscriptMessage = ({ message, isFullscreen = false }: TranscriptM
               ? isFullscreen
                 ? "bg-white/10 text-white rounded-tr-none border border-white/10 backdrop-blur-md"
                 : "bg-white text-slate-700 rounded-tr-none border border-slate-100"
-              : isFullscreen 
+              : isFullscreen
                 ? "bg-white/10 text-white rounded-tl-none border border-white/10 backdrop-blur-md"
                 : "bg-white text-slate-700 rounded-tl-none border border-slate-100",
           )}
         >
-          {message.text}
+          <InlineEditableTranscriptText
+            value={displayText}
+            patchedByUser={message.patchedByUser}
+            onPatch={(next) => onPatchMessage?.(message.id, next)}
+          />
         </div>
       </div>
     </div>

@@ -24,6 +24,7 @@ export interface SessionInitData {
   companyName: string;
   startedAt: string | null;
   maxAllowedMinutes: number | null;
+  saveTranscript?: boolean;
 }
 
 export interface TranscriptMessage {
@@ -31,6 +32,10 @@ export interface TranscriptMessage {
   sender: "User" | "Interviewer";
   text: string;
   timestamp: number;
+  originalText?: string;
+  patchedText?: string;
+  patchedAt?: number;
+  patchedByUser?: boolean;
 }
 
 export interface AddMessagePayload {
@@ -208,6 +213,25 @@ const floatingSessionSlice = createSlice({
       state.messages.push(action.payload);
     },
 
+    patchMessage(
+      state,
+      action: PayloadAction<{
+        id: string;
+        patchedText: string;
+        patchedAt?: number;
+      }>,
+    ) {
+      const msg = state.messages.find((m) => m.id === action.payload.id);
+      if (!msg) return;
+      const nextText = action.payload.patchedText.trim();
+      if (!nextText) return;
+      msg.originalText = msg.originalText ?? msg.text;
+      msg.patchedText = nextText;
+      msg.text = nextText;
+      msg.patchedAt = action.payload.patchedAt ?? Date.now();
+      msg.patchedByUser = true;
+    },
+
     clearMessages(state) {
       state.messages = [];
     },
@@ -265,6 +289,7 @@ export const {
   initSession,
   setSelectedModel,
   addMessage,
+  patchMessage,
   clearMessages,
   setCreditWarning,
   setIsWindowCollapsed,

@@ -10,18 +10,25 @@
  */
 import React from "react";
 import { cn } from "@/lib/utils";
+import { InlineEditableTranscriptText } from "./InlineEditableTranscriptText";
 
 export interface TranscriptBubbleProps {
+  id?: string;
   sender: "User" | "Interviewer";
   text: string;
   /** When true the bubble renders with italic text + reduced opacity (interim / streaming) */
   isInterim?: boolean;
+  patchedByUser?: boolean;
+  onPatch?: (messageId: string, patchedText: string) => void;
 }
 
 export const TranscriptBubble: React.FC<TranscriptBubbleProps> = ({
+  id,
   sender,
   text,
   isInterim = false,
+  patchedByUser = false,
+  onPatch,
 }) => {
   const isYou = sender === "User";
 
@@ -65,7 +72,16 @@ export const TranscriptBubble: React.FC<TranscriptBubbleProps> = ({
               : "bg-purple-500/15 text-purple-50 rounded-tl-sm",
           )}
         >
-          {text}
+          {isInterim || !id ? (
+            text
+          ) : (
+            <InlineEditableTranscriptText
+              value={text}
+              patchedByUser={patchedByUser}
+              onPatch={(nextText) => onPatch?.(id, nextText)}
+              className="text-[12.5px] leading-snug"
+            />
+          )}
         </span>
       </div>
     </div>

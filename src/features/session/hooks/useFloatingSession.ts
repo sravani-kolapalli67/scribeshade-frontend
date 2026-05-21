@@ -26,6 +26,7 @@ import {
   initSession,
   setSelectedModel,
   addMessage,
+  patchMessage,
   clearMessages,
   setCreditWarning,
   setIsWindowCollapsed,
@@ -53,6 +54,11 @@ import {
   selectTimerParams,
 } from "@/features/session/selectors/floatingSessionSelectors";
 import { isScenarioBased, extractContextFromMessages, buildDynamicTranscriptWindow } from "@/semantic";
+import {
+  type AIAnswerRequestPayload,
+  extractCodeBlocks,
+  normalizeSpeakerType,
+} from "@/types/ai-answer";
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "";
 
@@ -158,6 +164,147 @@ const REGENERATE_CONTEXT_LOOKBACK_MS = 15000;
  * Returns { question, source } or null if there are no messages at all.
  */
 const FALLBACK_MSG_COUNT = 12;
+const NEAR_DUPLICATE_GAP_MS = 2500;
+const MIN_INCLUDE_DUPLICATE_LEN = 20;
+type TranscriptInsertSource =
+  | "stt:user"
+  | "stt:interviewer"
+  | "overlay"
+  | "restore"
+  | "save-response"
+  | "patch";
+
+function normalizeLoose(text: string): string {
+  return (text || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function areNearDuplicateTexts(a: string, b: string): boolean {
+  const na = normalizeLoose(a);
+  const nb = normalizeLoose(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+
+  const shorter = na.length <= nb.length ? na : nb;
+  const longer = na.length > nb.length ? na : nb;
+
+  if (shorter.length >= MIN_INCLUDE_DUPLICATE_LEN) {
+    return longer.includes(shorter);
+  }
+  return false;
+}
+
+function endsWithConnector(text: string): boolean {
+  const t = (text || "").trim().toLowerCase();
+  return /\b(the|that|this|in|on|of|with|for|to|and|or|because|if|when|while)$/.test(
+    t,
+  );
+}
+
+function dedupeAndMergeConsecutiveChunks(
+  entries: { text: string; timestamp: number }[],
+): string[] {
+  if (!entries.length) return [];
+
+  const ordered = [...entries]
+    .filter((e) => e.text?.trim())
+    .sort((a, b) => a.timestamp - b.timestamp);
+
+  const deduped: { text: string; timestamp: number }[] = [];
+  for (const cur of ordered) {
+    const prev = deduped[deduped.length - 1];
+    if (
+      prev &&
+      cur.timestamp - prev.timestamp <= NEAR_DUPLICATE_GAP_MS &&
+      areNearDuplicateTexts(prev.text, cur.text)
+    ) {
+      if (cur.text.trim().length > prev.text.trim().length) {
+        deduped[deduped.length - 1] = cur;
+      }
+      continue;
+    }
+    deduped.push(cur);
+  }
+
+  const merged: string[] = [];
+  for (const cur of deduped) {
+    const text = cur.text.trim();
+    const prev = merged[merged.length - 1];
+    if (!prev) {
+      merged.push(text);
+      continue;
+    }
+    if (endsWithConnector(prev)) {
+      merged[merged.length - 1] = `${prev} ${text}`.replace(/\s+/g, " ").trim();
+      continue;
+    }
+    merged.push(text);
+  }
+
+  return merged;
+}
+
+function isQuestionLikeText(text: string): boolean {
+  const t = (text || "").trim();
+  if (!t) return false;
+  if (t.includes("?")) return true;
+  return /^(what|why|how|when|where|which|who|can|could|would|should|is|are|do|does|did|explain|show|give|write|debug|optimi[sz]e|refactor)\b/i.test(
+    t,
+  );
+}
+
+function dedupeAndMergeTranscriptEntries(
+  entries: { sender: "User" | "Interviewer"; text: string; timestamp: number }[],
+): { sender: "User" | "Interviewer"; text: string; timestamp: number }[] {
+  if (!entries.length) return [];
+
+  const ordered = [...entries]
+    .filter((e) => e.text?.trim())
+    .sort((a, b) => a.timestamp - b.timestamp);
+
+  const deduped: { sender: "User" | "Interviewer"; text: string; timestamp: number }[] = [];
+  for (const cur of ordered) {
+    const prev = deduped[deduped.length - 1];
+    if (
+      prev &&
+      prev.sender === cur.sender &&
+      cur.timestamp - prev.timestamp <= NEAR_DUPLICATE_GAP_MS &&
+      areNearDuplicateTexts(prev.text, cur.text)
+    ) {
+      if (cur.text.trim().length > prev.text.trim().length) {
+        deduped[deduped.length - 1] = cur;
+      }
+      continue;
+    }
+    deduped.push(cur);
+  }
+
+  const merged: { sender: "User" | "Interviewer"; text: string; timestamp: number }[] = [];
+  for (const cur of deduped) {
+    const text = cur.text.trim();
+    const prev = merged[merged.length - 1];
+    if (!prev) {
+      merged.push({ ...cur, text });
+      continue;
+    }
+
+    if (prev.sender === cur.sender && endsWithConnector(prev.text)) {
+      merged[merged.length - 1] = {
+        ...prev,
+        text: `${prev.text} ${text}`.replace(/\s+/g, " ").trim(),
+        timestamp: cur.timestamp,
+      };
+      continue;
+    }
+
+    merged.push({ ...cur, text });
+  }
+
+  return merged;
+}
 
 function resolveQuestionFromContext(
   liveInterimText: string,
@@ -235,10 +382,11 @@ function resolveQuestionFromContext(
   // full question block without leaking previously-answered content.
   const recentInterviewer = allMessages
     .filter((m) => m.sender === "Interviewer" && m.timestamp > cutoff && m.text?.trim())
-    .map((m) => m.text.trim());
+    .map((m) => ({ text: m.text.trim(), timestamp: m.timestamp }));
+  const mergedInterviewer = dedupeAndMergeConsecutiveChunks(recentInterviewer);
 
-  if (recentInterviewer.length > 0) {
-    const joined = recentInterviewer.join(" ");
+  if (mergedInterviewer.length > 0) {
+    const joined = mergedInterviewer.join(" ");
     const intent = detectIntent(joined);
     console.log(
       "[resolveQuestionFromContext] Intent detection applied to transcript_history:",
@@ -257,10 +405,11 @@ function resolveQuestionFromContext(
   // Priority 3: Join all User messages that arrived after the cutoff.
   const recentUser = allMessages
     .filter((m) => m.sender === "User" && m.timestamp > cutoff && m.text?.trim())
-    .map((m) => m.text.trim());
+    .map((m) => ({ text: m.text.trim(), timestamp: m.timestamp }));
+  const mergedUser = dedupeAndMergeConsecutiveChunks(recentUser);
 
-  if (recentUser.length > 0) {
-    const joined = recentUser.join(" ");
+  if (mergedUser.length > 0) {
+    const joined = mergedUser.join(" ");
     // Check if the joined text is primarily filler/noise
     if (isFillerPhrase(joined)) {
       console.log("[resolveQuestionFromContext] User transcript is filler, skipping:", joined);
@@ -288,7 +437,25 @@ function resolveQuestionFromContext(
   // always has context to send.
   if (recentFallback.length > 0) {
     // Apply deduplication to the joined fallback text to prevent duplicate loops
-    const joinedText = recentFallback.map((m) => m.text.trim()).join(" ");
+    const fallbackChunks = dedupeAndMergeConsecutiveChunks(
+      recentFallback.map((m) => ({ text: m.text.trim(), timestamp: m.timestamp })),
+    );
+    const latestMeaningfulQuestion = [...fallbackChunks]
+      .reverse()
+      .find((chunk) => !isFillerPhrase(chunk) && isQuestionLikeText(chunk));
+    if (latestMeaningfulQuestion) {
+      const intent = detectIntent(latestMeaningfulQuestion);
+      console.log(
+        "[resolveQuestionFromContext] Using latest meaningful fallback question:",
+        latestMeaningfulQuestion,
+      );
+      return {
+        question: intent.cleanedQuestion,
+        source: "transcript_fallback",
+      };
+    }
+
+    const joinedText = fallbackChunks.join(" ");
     const dedupedText = deduplicatePhrases(joinedText);
     // Check if the deduped text is primarily filler/noise
     if (!isFillerPhrase(dedupedText)) {
@@ -395,6 +562,17 @@ export function useFloatingSession() {
   const [captureArmed, setCaptureArmed] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
   const [inputValue, setInputValue] = useState("");
+  const patchPersistTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const recentInsertionsRef = useRef<
+    { sender: "User" | "Interviewer"; normalized: string; timestamp: number }[]
+  >([]);
+
+  useEffect(() => {
+    return () => {
+      Object.values(patchPersistTimersRef.current).forEach((timer) => clearTimeout(timer));
+      patchPersistTimersRef.current = {};
+    };
+  }, []);
 
   // ── Mutual exclusion refs for AI operations ─────────────────────────────────
   const isEmittingRef = useRef(false);
@@ -418,21 +596,84 @@ export function useFloatingSession() {
 
   const isDupeMessage = useCallback(
     (sender: "User" | "Interviewer", text: string, timestamp: number): boolean => {
-      const normalized = text.toLowerCase().trim().replace(/[^a-z0-9\s]/gi, "");
+      const normalized = normalizeLoose(text);
       // Check against recent messages from the same sender (last 20)
-      // Remove timestamp constraint to prevent accumulation of duplicate questions
+      // with short timestamp window to suppress burst duplicates only.
       const recentMessages = messagesRef.current.slice(-20);
       return recentMessages.some((m) => {
         if (m.sender !== sender) return false;
-        const existing = m.text.toLowerCase().trim().replace(/[^a-z0-9\s]/gi, "");
-        return (
-          existing === normalized ||
-          existing.includes(normalized) ||
-          normalized.includes(existing)
-        );
+        if (typeof m.timestamp !== "number") return false;
+        if (Math.abs(timestamp - m.timestamp) > NEAR_DUPLICATE_GAP_MS) return false;
+        const existing = normalizeLoose(m.text);
+        return areNearDuplicateTexts(existing, normalized);
       });
     },
     [],
+  );
+
+  const CROSS_SENDER_GAP_MS = 800;
+  const shouldSuppressInsertion = useCallback(
+    (sender: "User" | "Interviewer", text: string, timestamp: number): boolean => {
+      const normalized = normalizeLoose(text);
+      if (!normalized) return true;
+
+      // 1) Check recent in-memory insertions first (covers bursts before Redux settles).
+      recentInsertionsRef.current = recentInsertionsRef.current.filter(
+        (entry) => timestamp - entry.timestamp <= NEAR_DUPLICATE_GAP_MS,
+      );
+      const dupFromRecentInsertions = recentInsertionsRef.current.some((entry) => {
+        const gap = Math.abs(timestamp - entry.timestamp);
+        if (!areNearDuplicateTexts(entry.normalized, normalized)) return false;
+        // Same sender: suppress within normal near-duplicate window.
+        if (entry.sender === sender) return gap <= NEAR_DUPLICATE_GAP_MS;
+        // Cross sender: suppress only in very short overlap bursts.
+        return gap <= CROSS_SENDER_GAP_MS;
+      });
+      if (dupFromRecentInsertions) return true;
+
+      // 2) Check current state messages with the same sender-aware windows.
+      const recentMessages = messagesRef.current.slice(-30);
+      const dupFromState = recentMessages.some((m) => {
+        if (typeof m.timestamp !== "number") return false;
+        const gap = Math.abs(timestamp - m.timestamp);
+        if (!areNearDuplicateTexts(normalizeLoose(m.text), normalized)) return false;
+        if (m.sender === sender) return gap <= NEAR_DUPLICATE_GAP_MS;
+        return gap <= CROSS_SENDER_GAP_MS;
+      });
+      return dupFromState;
+    },
+    [],
+  );
+
+  const replaceNearDuplicateIfRicher = useCallback(
+    (sender: "User" | "Interviewer", text: string, timestamp: number): boolean => {
+      const normalized = normalizeLoose(text);
+      const candidates = [...messagesRef.current]
+        .filter((m) => m.sender === sender && typeof m.timestamp === "number")
+        .slice(-20);
+      const match = [...candidates]
+        .reverse()
+        .find(
+          (m) =>
+            Math.abs(timestamp - m.timestamp) <= NEAR_DUPLICATE_GAP_MS &&
+            areNearDuplicateTexts(normalized, normalizeLoose(m.text)),
+        );
+      if (!match) return false;
+      if (text.trim().length <= match.text.trim().length) return true;
+      dispatch(
+        patchMessage({
+          id: match.id,
+          patchedText: text.trim(),
+          patchedAt: timestamp,
+        }),
+      );
+      recentInsertionsRef.current = [
+        ...recentInsertionsRef.current,
+        { sender: sender as "User" | "Interviewer", normalized, timestamp },
+      ].slice(-40);
+      return true;
+    },
+    [dispatch],
   );
 
   // ── Transcript message handlers ─────────────────────────────────────────────
@@ -452,13 +693,16 @@ export function useFloatingSession() {
       const sid = sessionInfoRef.current?.sessionId;
       const now = Date.now();
 
-      if (isDupeMessage("User", cleanText, now)) return;
+      if (replaceNearDuplicateIfRicher("User", cleanText, now)) return;
+      if (shouldSuppressInsertion("User", cleanText, now)) return;
 
+      const generatedId = Math.random().toString(36).slice(7);
       if (sid) {
         fetch(`${BACKEND_URL}/api/session/${sid}/save-message`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            messageId: generatedId,
             role: "USER",
             question: cleanText,
             answer: "",
@@ -466,17 +710,24 @@ export function useFloatingSession() {
           }),
         }).catch(console.error);
       }
-
       dispatch(
         addMessage({
-          id: Math.random().toString(36).slice(7),
+          id: generatedId,
           sender: "User",
           text: cleanText,
           timestamp: now,
         }),
       );
+      recentInsertionsRef.current = [
+        ...recentInsertionsRef.current,
+        {
+          sender: "User" as "User" | "Interviewer",
+          normalized: normalizeLoose(cleanText),
+          timestamp: now,
+        },
+      ].slice(-40);
     },
-    [dispatch, isDupeMessage],
+    [dispatch, replaceNearDuplicateIfRicher, shouldSuppressInsertion],
   );
 
   const handleInterviewerTranscript = useCallback(
@@ -494,13 +745,16 @@ export function useFloatingSession() {
       const sid = sessionInfoRef.current?.sessionId;
       const now = Date.now();
 
-      if (isDupeMessage("Interviewer", cleanText, now)) return;
+      if (replaceNearDuplicateIfRicher("Interviewer", cleanText, now)) return;
+      if (shouldSuppressInsertion("Interviewer", cleanText, now)) return;
 
+      const generatedId = Math.random().toString(36).slice(7);
       if (sid) {
         fetch(`${BACKEND_URL}/api/session/${sid}/save-message`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            messageId: generatedId,
             role: "INTERVIEWER",
             question: cleanText,
             answer: "",
@@ -508,17 +762,24 @@ export function useFloatingSession() {
           }),
         }).catch(console.error);
       }
-
       dispatch(
         addMessage({
-          id: Math.random().toString(36).slice(7),
+          id: generatedId,
           sender: "Interviewer",
           text: cleanText,
           timestamp: now,
         }),
       );
+      recentInsertionsRef.current = [
+        ...recentInsertionsRef.current,
+        {
+          sender: "Interviewer" as "User" | "Interviewer",
+          normalized: normalizeLoose(cleanText),
+          timestamp: now,
+        },
+      ].slice(-40);
     },
-    [dispatch, isDupeMessage],
+    [dispatch, replaceNearDuplicateIfRicher, shouldSuppressInsertion],
   );
 
   // Keep stable refs for Tauri event listeners
@@ -752,6 +1013,9 @@ export function useFloatingSession() {
     listen<{ sender: "User" | "Interviewer"; text: string; timestamp: number }>(
       "overlay-transcript",
       (event) => {
+        // Mini window already receives direct STT events; ignore relay events
+        // while a live floating session is active to prevent double appends.
+        if (sessionInfoRef.current?.sessionId) return;
         const { sender, text, timestamp } = event.payload;
         if (!text.trim()) return;
         if (isDupeMessage(sender, text, timestamp)) return;
@@ -883,9 +1147,51 @@ export function useFloatingSession() {
       snapshotTimestamp,
     });
 
+    const recentMessages = msgsSnapshot
+      .filter(
+        (m) =>
+          (m.sender === "User" || m.sender === "Interviewer") &&
+          !!m.text?.trim() &&
+          typeof m.timestamp === "number",
+      )
+      .slice(-30)
+      .map((m) => ({
+        sender: m.sender as "User" | "Interviewer",
+        text: m.text.trim(),
+        timestamp: m.timestamp,
+      }));
+    const dedupedPayloadEntries = dedupeAndMergeTranscriptEntries(recentMessages).slice(-15);
+    const recentTranscriptWindow = dedupedPayloadEntries.map(
+      (m) => `[${m.sender}]: ${m.text.trim()}`,
+    );
+    const speakerSeparatedTranscript = dedupedPayloadEntries.map((m) => ({
+      speakerType: normalizeSpeakerType(m.sender),
+      content: m.text.trim(),
+      ...(typeof m.timestamp === "number" ? { timestamp: m.timestamp } : {}),
+    }));
+    const latestAiAnswer = [...aiChat]
+      .reverse()
+      .find((m) => m.sender === "AI" && m.text?.trim())?.text
+      ?.trim();
+    const payload: AIAnswerRequestPayload = {
+      transcript:
+        recentTranscriptWindow.length > 0
+          ? recentTranscriptWindow.join("\n")
+          : question,
+      currentQuestion: question,
+      recentTranscriptWindow,
+      speakerSeparatedTranscript,
+      ...(latestAiAnswer ? { previousAiAnswer: latestAiAnswer } : {}),
+      ...(latestAiAnswer
+        ? { previousCodeBlocks: extractCodeBlocks(latestAiAnswer) }
+        : {}),
+      answerMode: "auto",
+      sourcePlatform: "tauri",
+    };
+
     isEmittingRef.current = true;
     try {
-      await handleAiAnswer(info.sessionId, question, selectedModelRef.current);
+      await handleAiAnswer(info.sessionId, payload, selectedModelRef.current);
 
       // Save pre-advance cutoff so regenerate can widen the window back to
       // include any transcript that arrived after an early accidental click.
@@ -908,7 +1214,7 @@ export function useFloatingSession() {
     } finally {
       isEmittingRef.current = false;
     }
-  }, [handleAiAnswer, tabInterimTranscript, lastMessage]);
+  }, [handleAiAnswer, tabInterimTranscript, lastMessage, aiChat]);
 
   const handleAnalyzeScreenClick = useCallback(
     async (screenshotBlob?: Blob) => {
@@ -1031,6 +1337,57 @@ export function useFloatingSession() {
     dispatch(clearMessages());
   }, [dispatch]);
 
+  const persistPatchedTranscript = useCallback(
+    (messageId: string, sender: "User" | "Interviewer", originalText: string, patchedText: string, timestamp?: number) => {
+      const sid = sessionInfoRef.current?.sessionId;
+      if (!sid || sessionInfoRef.current?.saveTranscript === false) return;
+      fetch(`${BACKEND_URL}/api/session/${sid}/transcript/${messageId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          patchedText,
+          originalText,
+          patchedAt: new Date().toISOString(),
+          patchedByUser: true,
+          sender,
+          timestamp,
+        }),
+      }).catch((err) => console.error("[useFloatingSession] Failed to patch transcript:", err));
+    },
+    [],
+  );
+
+  const handlePatchTranscriptMessage = useCallback(
+    (messageId: string, patchedText: string) => {
+      const trimmed = patchedText.trim();
+      if (!trimmed) return;
+      const current = messagesRef.current.find((m) => m.id === messageId);
+      if (!current) return;
+      dispatch(
+        patchMessage({
+          id: messageId,
+          patchedText: trimmed,
+          patchedAt: Date.now(),
+        }),
+      );
+      if (sessionInfoRef.current?.saveTranscript === false) return;
+      if (patchPersistTimersRef.current[messageId]) {
+        clearTimeout(patchPersistTimersRef.current[messageId]);
+      }
+      patchPersistTimersRef.current[messageId] = setTimeout(() => {
+        persistPatchedTranscript(
+          messageId,
+          current.sender,
+          current.originalText || current.text,
+          trimmed,
+          current.timestamp,
+        );
+        delete patchPersistTimersRef.current[messageId];
+      }, 800);
+    },
+    [dispatch, persistPatchedTranscript],
+  );
+
   // ── Redux action dispatchers (stable, no closure deps) ──────────────────────
 
   const collapseWindow = useCallback(() => {
@@ -1121,6 +1478,7 @@ export function useFloatingSession() {
     handleSend,
     handleToggleMic,
     handleClearTranscript,
+    handlePatchTranscriptMessage,
     startSystemAudio,
     collapseWindow,
     expandWindow,

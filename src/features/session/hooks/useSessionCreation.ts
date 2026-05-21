@@ -170,6 +170,7 @@ export function useSessionCreation(): UseSessionCreationReturn {
       companyName: sessionInfo.companyName,
       startedAt: activateData.startedAt ?? null,
       maxAllowedMinutes: activateData.maxAllowedMinutes ?? null,
+      saveTranscript: sessionInfo.saveTranscript,
     });
 
     // 5. Hide launcher

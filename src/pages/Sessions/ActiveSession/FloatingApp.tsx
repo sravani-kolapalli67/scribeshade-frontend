@@ -1118,6 +1118,7 @@ const FloatingApp: React.FC = () => {
             messages={session.messages}
             micInterim={session.micInterimTranscript}
             tabInterim={session.tabInterimTranscript}
+            onPatchMessage={session.handlePatchTranscriptMessage}
           />
         )}
 

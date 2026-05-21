@@ -40,6 +40,12 @@ import {
 import { BuyCreditsDialog } from "@/components/Billing/BuyCreditsDialog";
 import { useCreditsBalance } from "@/hooks/useCreditsBalance";
 import { useCreditBrackets } from "@/hooks/useCreditBrackets";
+import {
+  type AIAnswerRequestPayload,
+  AI_ANSWER_LIMITS,
+  extractCodeBlocks,
+  normalizeSpeakerType,
+} from "@/types/ai-answer";
 
 /**
  * Segments a single transcript chunk into individual interview questions.
@@ -87,6 +93,37 @@ function segmentQuestions(text: string): string[] {
   if (questionParts.length >= 1) return questionParts;
 
   return [];
+}
+
+function normalizeLineForDedup(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const NEAR_DUPLICATE_GAP_MS = 2500;
+const MIN_INCLUDE_DUPLICATE_LEN = 20;
+
+function areNearDuplicateTexts(a: string, b: string): boolean {
+  const na = normalizeLineForDedup(a);
+  const nb = normalizeLineForDedup(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  const shorter = na.length <= nb.length ? na : nb;
+  const longer = na.length > nb.length ? na : nb;
+  if (shorter.length < MIN_INCLUDE_DUPLICATE_LEN) return false;
+  return longer.includes(shorter);
+}
+
+function isQuestionLike(text: string): boolean {
+  const t = (text || "").trim();
+  if (!t) return false;
+  if (t.includes("?")) return true;
+  return /^(what|why|how|when|where|which|who|can|could|would|should|is|are|do|does|did)\b/i.test(
+    t,
+  );
 }
 
 /**
@@ -195,7 +232,7 @@ export default function ActiveSession() {
   // Stable ref to handleAiAnswer — set after useAIChat() is called below.
   // Using a ref allows handleTranscript (defined before useAIChat) to call
   // handleAiAnswer without creating a forward-reference ordering problem.
-  const handleAiAnswerRef = useRef<((sessionId: string, question: string, aiModel: string) => void) | null>(null);
+  const handleAiAnswerRef = useRef<((sessionId: string, payload: AIAnswerRequestPayload, aiModel: string) => void) | null>(null);
 
   const getLanguageCode = (lang: string) => {
     const mapping: Record<string, string> = {
@@ -215,6 +252,7 @@ export default function ActiveSession() {
   const [isConnectDialogOpen, setIsConnectDialogOpen] = useState(
     !!location.state?.showConnect,
   );
+  const patchPersistTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const connectData = location.state?.connectData || {};
   // Ephemeral mode flag — false means nothing persists after the session ends.
   // Defaults to true to match backend (saveTranscription defaults to true).
@@ -553,6 +591,10 @@ export default function ActiveSession() {
         clearTimeout(debounceTimerRef.current);
         debounceTimerRef.current = null;
       }
+      Object.values(patchPersistTimersRef.current).forEach((timer) =>
+        clearTimeout(timer),
+      );
+      patchPersistTimersRef.current = {};
     };
   }, []);
 
@@ -579,7 +621,7 @@ export default function ActiveSession() {
             return prev;
           }
 
-          const normalizedNew = cleanText.toLowerCase().trim().replace(/[^a-z0-9\s]/gi, "");
+          const normalizedNew = normalizeLineForDedup(cleanText);
           const ownKey = `${sender}::${normalizedNew}`;
 
           // ── Pass 1: same-source replay/duplicate within 5s ────────────
@@ -588,16 +630,32 @@ export default function ActiveSession() {
           // React StrictMode double-renders from suppressing valid new messages.
           // StrictMode renders the component twice in dev; the second render with
           // the same input should add the message, not suppress it.
-          const isAlreadyInState = prev.some((m) => {
-            if (m.sender !== sender) return false;
-            const normExisting = m.text
-              .toLowerCase()
-              .trim()
-              .replace(/[^a-z0-9\s]/gi, "");
-            return normExisting === normalizedNew;
-          });
+          let sameSenderNearIdx = -1;
+          for (let i = prev.length - 1; i >= 0; i--) {
+            const m = prev[i];
+            if (m.sender !== sender) continue;
+            if (!m.timestamp || now - m.timestamp > NEAR_DUPLICATE_GAP_MS) continue;
+            if (areNearDuplicateTexts(m.text, cleanText)) {
+              sameSenderNearIdx = i;
+              break;
+            }
+          }
 
-          if (isAlreadyInState) {
+          if (sameSenderNearIdx >= 0) {
+            const prevMsg = prev[sameSenderNearIdx];
+            if (cleanText.length > prevMsg.text.length) {
+              const next = [...prev];
+              next[sameSenderNearIdx] = {
+                ...prevMsg,
+                text: cleanText,
+                time: new Date().toLocaleTimeString([], {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                }),
+                timestamp: now,
+              };
+              return next;
+            }
             console.log(`[Dedup-self] Suppressed replay from ${sender}: "${cleanText}"`);
             return prev;
           }
@@ -609,16 +667,9 @@ export default function ActiveSession() {
 
           // ── Pass 2: cross-source echo within 2s (mic ↔ tab audio) ─────
           const isEcho = prev.some((m) => {
-            if (!m.timestamp || now - m.timestamp > 2000) return false;
-            const normalizedExisting = m.text
-              .toLowerCase()
-              .trim()
-              .replace(/[^a-z0-9\s]/gi, "");
-            return (
-              normalizedExisting === normalizedNew ||
-              normalizedExisting.includes(normalizedNew) ||
-              normalizedNew.includes(normalizedExisting)
-            );
+            if (m.sender === sender) return false;
+            if (!m.timestamp || now - m.timestamp > NEAR_DUPLICATE_GAP_MS) return false;
+            return areNearDuplicateTexts(m.text, cleanText);
           });
 
           if (isEcho) {
@@ -652,6 +703,7 @@ export default function ActiveSession() {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
+                  messageId: newMsg.id,
                   role: sender === "User" ? "USER" : "INTERVIEWER",
                   question: cleanText,
                   answer: "",
@@ -684,6 +736,56 @@ export default function ActiveSession() {
       }
     },
     [id, autoGenerateResponse, saveTranscriptEnabled],
+  );
+
+  const persistPatchedTranscript = useCallback(
+    (message: Message, patchedText: string) => {
+      if (!id || !saveTranscriptEnabled) return;
+      fetch(`${import.meta.env.VITE_BACKEND_URL}/api/session/${id}/transcript/${message.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          patchedText,
+          originalText: message.originalText || message.text,
+          patchedAt: new Date().toISOString(),
+          patchedByUser: true,
+          sender: message.sender,
+          timestamp: message.timestamp,
+        }),
+      }).catch((err) => console.error("Failed to patch transcript segment:", err));
+    },
+    [id, saveTranscriptEnabled],
+  );
+
+  const onPatchMessage = useCallback(
+    (messageId: string, patchedText: string) => {
+      const trimmed = patchedText.trim();
+      if (!trimmed) return;
+      let targetMessage: Message | undefined;
+      setMessages((prev) =>
+        prev.map((m) => {
+          if (m.id !== messageId) return m;
+          targetMessage = m;
+          return {
+            ...m,
+            originalText: m.originalText ?? m.text,
+            patchedText: trimmed,
+            patchedAt: Date.now(),
+            patchedByUser: true,
+            text: trimmed,
+          };
+        }),
+      );
+      if (!saveTranscriptEnabled || !targetMessage) return;
+      if (patchPersistTimersRef.current[messageId]) {
+        clearTimeout(patchPersistTimersRef.current[messageId]);
+      }
+      patchPersistTimersRef.current[messageId] = setTimeout(() => {
+        persistPatchedTranscript(targetMessage as Message, trimmed);
+        delete patchPersistTimersRef.current[messageId];
+      }, 800);
+    },
+    [persistPatchedTranscript, saveTranscriptEnabled],
   );
 
   const onUserTranscript = useCallback(
@@ -974,13 +1076,31 @@ export default function ActiveSession() {
     // Route based on classification
     if (classification.shouldGroup) {
       // Grouped scenario: ONE call with full transcript
-      handleAiAnswer(id, stableTranscript, selectedModel);
+      handleAiAnswer(
+        id,
+        {
+          transcript: stableTranscript,
+          currentQuestion: stableTranscript,
+          sourcePlatform: "web",
+          answerMode: "auto",
+        },
+        selectedModel,
+      );
     } else {
       // Independent questions: call for each segment with stagger
       const segments = classification.segments;
       segments.forEach((segment, index) => {
         setTimeout(() => {
-          handleAiAnswer(id, segment, selectedModel);
+          handleAiAnswer(
+            id,
+            {
+              transcript: segment,
+              currentQuestion: segment,
+              sourcePlatform: "web",
+              answerMode: "auto",
+            },
+            selectedModel,
+          );
         }, index * 500);
       });
     }
@@ -1081,9 +1201,19 @@ export default function ActiveSession() {
           } else {
             // USER or INTERVIEWER transcript line
             const sender = m.role === "USER" ? "User" : "Interviewer";
-            const text = m.question || "";
+            const text = m.patchedText || m.question || "";
             if (text) {
-              transcriptMsgs.push({ id: `hist-${i}`, sender, text, time, timestamp: m.timestamp ? new Date(m.timestamp).getTime() : undefined });
+              transcriptMsgs.push({
+                id: m.messageId || `hist-${i}`,
+                sender,
+                text,
+                time,
+                timestamp: m.timestamp ? new Date(m.timestamp).getTime() : undefined,
+                originalText: m.originalText || undefined,
+                patchedText: m.patchedText || undefined,
+                patchedAt: m.patchedAt ? new Date(m.patchedAt).getTime() : undefined,
+                patchedByUser: m.patchedByUser === true,
+              });
             }
           }
         });
@@ -1247,7 +1377,7 @@ export default function ActiveSession() {
         // Apply intent detection to clean up the user input
         const intentResult = detectIntent(userVoiceInput);
         const cleanedUserInput = intentResult.cleanedQuestion || userVoiceInput;
-        question = `Context: ${interviewerContext}\nQuestion: ${cleanedUserInput}`;
+        question = cleanedUserInput;
       } else {
         question = userVoiceInput || interviewerContext || interimText || "";
         if (!questionSource && question) {
@@ -1265,10 +1395,81 @@ export default function ActiveSession() {
     console.log("[AI Answer] Question content:", question.slice(0, 100));
     console.log("[AI Answer] Context window:", CONTEXT_WINDOW_MS, "ms");
 
+    const recentMessages = messagesSnapshot
+      .filter((m) => m.text?.trim())
+      .slice(-AI_ANSWER_LIMITS.recentTranscriptWindowMax * 2);
+
+    // Build deterministic deduped recent window, preserving latest occurrence order.
+    const dedupMap = new Map<
+      string,
+      {
+        sender: string;
+        text: string;
+        timestamp?: number;
+      }
+    >();
+    for (const m of recentMessages) {
+      const text = m.text.trim();
+      if (!text || isFillerPhrase(text)) continue;
+      const norm = normalizeLineForDedup(text);
+      if (!norm) continue;
+      dedupMap.set(norm, { sender: m.sender, text, timestamp: m.timestamp });
+    }
+    const dedupedEntries = Array.from(dedupMap.values()).slice(
+      -AI_ANSWER_LIMITS.recentTranscriptWindowMax,
+    );
+    const recentTranscriptWindow = dedupedEntries.map(
+      (m) => `[${m.sender}]: ${m.text}`,
+    );
+    const speakerSeparatedTranscript = dedupedEntries.map((m) => ({
+      speakerType: normalizeSpeakerType(m.sender),
+      content: m.text,
+      ...(typeof m.timestamp === "number" ? { timestamp: m.timestamp } : {}),
+    }));
+
+    // Prefer newest meaningful question-like text from live/interim only when present.
+    // Else derive from latest interviewer/candidate deduped entry, then fallback.
+    const newestWindowQuestion =
+      [...dedupedEntries]
+        .reverse()
+        .find(
+          (m) =>
+            (m.sender === "Interviewer" || m.sender === "User") &&
+            isQuestionLike(m.text),
+        )?.text || "";
+    const meaningfulInterim = [
+      tabInterimSnapshot?.trim() || "",
+      micInterimSnapshot?.trim() || "",
+    ].find((txt) => txt && !isFillerPhrase(txt) && isQuestionLike(txt));
+    const bestCurrentQuestion =
+      meaningfulInterim ||
+      newestWindowQuestion ||
+      question;
+    const transcriptText =
+      recentTranscriptWindow.length > 0
+        ? recentTranscriptWindow.join("\n")
+        : bestCurrentQuestion;
+    const latestAiAnswer = [...aiChat]
+      .reverse()
+      .find((m) => m.sender === "AI" && m.text?.trim())?.text
+      ?.trim();
+    const payload: AIAnswerRequestPayload = {
+      transcript: transcriptText,
+      currentQuestion: bestCurrentQuestion,
+      recentTranscriptWindow,
+      speakerSeparatedTranscript,
+      ...(latestAiAnswer ? { previousAiAnswer: latestAiAnswer } : {}),
+      ...(latestAiAnswer
+        ? { previousCodeBlocks: extractCodeBlocks(latestAiAnswer) }
+        : {}),
+      answerMode: "auto",
+      sourcePlatform: "web",
+    };
+
     isExecutingRef.current = true;
     try {
       console.log("[Trigger] AI Answer initiated for question:", question.slice(0, 80));
-      handleAiAnswer(id, question, selectedModel);
+      handleAiAnswer(id, payload, selectedModel);
     } finally {
       setTimeout(() => {
         isExecutingRef.current = false;
@@ -1277,6 +1478,7 @@ export default function ActiveSession() {
   }, [
     id,
     messages,
+    aiChat,
     handleAiAnswer,
     activeMicInterimTranscript,
     mergedTabInterimTranscript,
@@ -1549,6 +1751,7 @@ export default function ActiveSession() {
     onChangeTab: startShare,
     onOpenOverlay: handleOpenOverlay,
     currentMicDevice,
+    onPatchMessage,
   };
 
   const chatPanelProps = {
