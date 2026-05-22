@@ -1866,8 +1866,9 @@ async fn start_system_audio_transcription(
                         let v = (mono * i16::MAX as f32) as i16;
                         v.to_le_bytes()
                     }).collect();
+                    let has_pcm = !pcm.is_empty();
                     let _ = tx.send(Arc::new(pcm));
-                    if !pcm.is_empty() {
+                    if has_pcm {
                         let prev = SYSTEM_PCM_FRAMES_SENT.fetch_add(1, Ordering::SeqCst);
                         SYSTEM_LAST_PCM_AT.store(now_epoch_millis_u64(), Ordering::SeqCst);
                         if prev == 0 {
@@ -1890,8 +1891,9 @@ async fn start_system_audio_transcription(
                             .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
                         mono.to_le_bytes()
                     }).collect();
+                    let has_pcm = !pcm.is_empty();
                     let _ = tx.send(Arc::new(pcm));
-                    if !pcm.is_empty() {
+                    if has_pcm {
                         let prev = SYSTEM_PCM_FRAMES_SENT.fetch_add(1, Ordering::SeqCst);
                         SYSTEM_LAST_PCM_AT.store(now_epoch_millis_u64(), Ordering::SeqCst);
                         if prev == 0 {
