@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import { Message } from "@/pages/Sessions/ActiveSession/Transcript";
 import {
   type AIAnswerRequestPayload,
+  AI_ANSWER_LIMITS,
   extractCodeBlocks,
   sanitizeAIAnswerPayload,
   resolveQueryFromAIAnswerPayload,
@@ -65,6 +66,72 @@ const STT_CORRECTIONS: [RegExp, string][] = [
 ];
 
 type AIAnswerRequestInput = string | AIAnswerRequestPayload;
+type OriginalGenerationContext = NonNullable<Message["originalGenerationContext"]>;
+const REGENERATE_DEFAULT_INSTRUCTION =
+  "Regenerate the same answer with more depth and clearer structure. Do not say previous context is unavailable.";
+
+function buildOriginalGenerationContextFromPayload(
+  payload: AIAnswerRequestPayload,
+  fallbackSourcePlatform: "web" | "tauri",
+): OriginalGenerationContext {
+  const transcript = (payload.transcript || "").slice(0, 8_000);
+  const currentQuestion = (payload.currentQuestion || "").slice(0, 1_000);
+  const recentTranscriptWindow = (payload.recentTranscriptWindow || [])
+    .slice(-AI_ANSWER_LIMITS.recentTranscriptWindowMax)
+    .map((item) => item.slice(0, 600));
+  const speakerSeparatedTranscript = (payload.speakerSeparatedTranscript || [])
+    .slice(-AI_ANSWER_LIMITS.recentTranscriptWindowMax)
+    .map((entry) => ({
+      speakerType: entry.speakerType,
+      content: (entry.content || "").slice(0, 600),
+      ...(typeof entry.timestamp === "number" ? { timestamp: entry.timestamp } : {}),
+    }));
+  return {
+    originalQuestion: (currentQuestion || transcript).slice(0, 1000),
+    originalTranscript: transcript,
+    currentQuestion: currentQuestion || undefined,
+    ...(recentTranscriptWindow.length > 0 ? { recentTranscriptWindow } : {}),
+    ...(speakerSeparatedTranscript.length > 0 ? { speakerSeparatedTranscript } : {}),
+    ...(payload.selectedAnswerId ? { selectedAnswerId: payload.selectedAnswerId } : {}),
+    ...(payload.selectedAnswerQuestion
+      ? {
+          selectedAnswerQuestion: payload.selectedAnswerQuestion.slice(
+            0,
+            AI_ANSWER_LIMITS.selectedAnswerQuestionMaxChars,
+          ),
+        }
+      : {}),
+    ...(payload.selectedAnswerText
+      ? {
+          selectedAnswerText: payload.selectedAnswerText.slice(
+            0,
+            AI_ANSWER_LIMITS.selectedAnswerTextMaxChars,
+          ),
+        }
+      : {}),
+    ...(payload.selectedAnswerCodeBlocks?.length
+      ? {
+          selectedAnswerCodeBlocks: payload.selectedAnswerCodeBlocks
+            .slice(0, AI_ANSWER_LIMITS.previousCodeBlocksMax)
+            .map((block) =>
+              block.slice(0, AI_ANSWER_LIMITS.previousCodeBlockMaxChars),
+            ),
+        }
+      : {}),
+    ...(payload.selectedAnswerTopic
+      ? {
+          selectedAnswerTopic: payload.selectedAnswerTopic.slice(
+            0,
+            AI_ANSWER_LIMITS.selectedAnswerTopicMaxChars,
+          ),
+        }
+      : {}),
+    answerMode: payload.answerMode || "auto",
+    sourcePlatform: payload.sourcePlatform || fallbackSourcePlatform,
+    generatedAnswerText: "",
+    generatedCodeBlocks: [],
+  };
+}
 
 /**
  * Normalizes speech-to-text transcript errors before sending to the AI.
@@ -364,6 +431,7 @@ async function consumeSegmentedStream(
   setAiChat: React.Dispatch<React.SetStateAction<Message[]>>,
   baseTime: string,
   signal?: AbortSignal,
+  requestContext?: OriginalGenerationContext,
 ): Promise<ConsumeStreamResult> {
   const decoder = new TextDecoder();
   let buffer = "";
@@ -412,6 +480,19 @@ async function consumeSegmentedStream(
             text: displayText,
             question: extractedQuestion,
             ...(snapshotId ? { snapshotId } : {}),
+            ...(requestContext
+              ? {
+                  originalGenerationContext: {
+                    ...(next[idx].originalGenerationContext || requestContext),
+                    generatedAnswerText: displayText.slice(0, 3_000),
+                    generatedCodeBlocks: extractCodeBlocks(displayText)
+                      .slice(0, AI_ANSWER_LIMITS.previousCodeBlocksMax)
+                      .map((block) =>
+                        block.slice(0, AI_ANSWER_LIMITS.previousCodeBlockMaxChars),
+                      ),
+                  },
+                }
+              : {}),
           };
         } else {
           next.push({
@@ -421,6 +502,19 @@ async function consumeSegmentedStream(
             time: baseTime,
             question: extractedQuestion,
             ...(snapshotId ? { snapshotId } : {}),
+            ...(requestContext
+              ? {
+                  originalGenerationContext: {
+                    ...requestContext,
+                    generatedAnswerText: displayText.slice(0, 3_000),
+                    generatedCodeBlocks: extractCodeBlocks(displayText)
+                      .slice(0, AI_ANSWER_LIMITS.previousCodeBlocksMax)
+                      .map((block) =>
+                        block.slice(0, AI_ANSWER_LIMITS.previousCodeBlockMaxChars),
+                      ),
+                  },
+                }
+              : {}),
           });
         }
       }
@@ -967,6 +1061,10 @@ export const useAIChat = () => {
         text: "",
         time: baseTime,
         question: "",
+        originalGenerationContext: buildOriginalGenerationContextFromPayload(
+          payload,
+          isTauri() ? "tauri" : "web",
+        ),
       };
 
       console.log(`[useAIChat] handleAiAnswer: Spawning temporary card messageId: ${messageId}`);
@@ -1006,6 +1104,7 @@ export const useAIChat = () => {
           setAiChat,
           baseTime,
           controller.signal,
+          newAiMessage.originalGenerationContext,
         );
 
         if (controller.signal.aborted) {
@@ -1296,7 +1395,7 @@ export const useAIChat = () => {
   );
 
   const handleRegenerate = useCallback(
-    async (sessionId: string, messageId: string, aiModel: string, questionOverride?: string) => {
+    async (sessionId: string, messageId: string, aiModel: string) => {
       console.log(`[useAIChat] handleRegenerate triggered. sessionId: ${sessionId}, messageId: ${messageId}, model: ${aiModel}`);
       const targetMessage = aiChatRef.current.find((m) => m.id === messageId);
       if (!targetMessage) {
@@ -1305,14 +1404,52 @@ export const useAIChat = () => {
       }
 
       const extractedQ = extractQuestionFromAiText(targetMessage.text ?? "");
-      const cachedQ = extractedQ || targetMessage.question?.trim() || "";
-      const question = questionOverride?.trim() || cachedQ;
+      const cachedContext = targetMessage.originalGenerationContext;
+      const question =
+        cachedContext?.originalQuestion?.trim() ||
+        cachedContext?.currentQuestion?.trim() ||
+        targetMessage.question?.trim() ||
+        extractedQ;
 
-      console.log(`[useAIChat] handleRegenerate: question source: ${questionOverride?.trim() ? "fresh_context" : "cached"}, question: "${question}"`);
       if (!question) {
         console.warn("[useAIChat] handleRegenerate: No question could be resolved for this message. Aborting.");
         return;
       }
+
+      const transcriptForReplay = cachedContext?.originalTranscript?.trim() || question;
+      const replayPayload = sanitizeAIAnswerPayload({
+        transcript: transcriptForReplay,
+        currentQuestion: question,
+        ...(cachedContext?.recentTranscriptWindow?.length
+          ? { recentTranscriptWindow: cachedContext.recentTranscriptWindow }
+          : {}),
+        ...(cachedContext?.speakerSeparatedTranscript?.length
+          ? { speakerSeparatedTranscript: cachedContext.speakerSeparatedTranscript }
+          : {}),
+        ...(cachedContext?.selectedAnswerId ? { selectedAnswerId: cachedContext.selectedAnswerId } : {}),
+        ...(cachedContext?.selectedAnswerQuestion ? { selectedAnswerQuestion: cachedContext.selectedAnswerQuestion } : {}),
+        ...(cachedContext?.selectedAnswerText ? { selectedAnswerText: cachedContext.selectedAnswerText } : {}),
+        ...(cachedContext?.selectedAnswerCodeBlocks?.length
+          ? { selectedAnswerCodeBlocks: cachedContext.selectedAnswerCodeBlocks }
+          : {}),
+        ...(cachedContext?.selectedAnswerTopic ? { selectedAnswerTopic: cachedContext.selectedAnswerTopic } : {}),
+        ...(cachedContext?.generatedAnswerText ? { previousAiAnswer: cachedContext.generatedAnswerText } : {}),
+        ...(cachedContext?.generatedCodeBlocks?.length ? { previousCodeBlocks: cachedContext.generatedCodeBlocks } : {}),
+        answerMode: cachedContext?.answerMode || "auto",
+        sourcePlatform: cachedContext?.sourcePlatform || (isTauri() ? "tauri" : "web"),
+        isRegenerate: true,
+        regenerateTargetAnswerId: messageId,
+        regenerateInstruction: REGENERATE_DEFAULT_INSTRUCTION,
+      });
+
+      console.log("[useAIChat] handleRegenerate: replay payload source=originalGenerationContext", {
+        hasOriginalGenerationContext: !!cachedContext,
+        hasOriginalTranscript: !!cachedContext?.originalTranscript,
+        hasSelectedAnswerId: !!cachedContext?.selectedAnswerId,
+        originalQuestion: question.slice(0, 140),
+        isRegenerate: true,
+        regenerateTargetAnswerId: messageId,
+      });
 
       const { controller, reqId } = startNewRequest();
       console.log(`[useAIChat] handleRegenerate: Assigned request ID: ${reqId}`);
@@ -1324,20 +1461,20 @@ export const useAIChat = () => {
         prev.map((msg) => (msg.id === messageId ? { ...msg, text: "" } : msg)),
       );
 
-      // Route through the unified generation pipeline
-      const decision = prepareGeneration({ 
-        transcript: question, 
-        mode: 'regenerate', 
-        sessionId, 
-        aiModel, 
-        snapshotId: targetMessage.snapshotId 
-      }, previousContextRef.current?.transcript);
+      const decision = prepareGeneration(
+        {
+          transcript: replayPayload.currentQuestion || question,
+          mode: "regenerate",
+          sessionId,
+          aiModel,
+          snapshotId: targetMessage.snapshotId,
+        },
+        previousContextRef.current?.transcript,
+      );
 
-      // Regenerate mode always passes through (the pipeline bypasses classification for regenerate)
-      // But still use guard
       const segmentId = generateSegmentId(decision.groupedTranscript);
       if (!generationGuardRef.current.canStartGeneration(segmentId, decision.groupedTranscript)) {
-        console.log(`[useAIChat] handleRegenerate: Generation guard blocked duplicate segment.`);
+        console.log("[useAIChat] handleRegenerate: Generation guard blocked duplicate segment.");
         return;
       }
 
@@ -1346,22 +1483,22 @@ export const useAIChat = () => {
       try {
         const targetUrl = `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionId}/ai-answer`;
         const requestBody = {
-          transcript: question,
+          ...replayPayload,
           isRegenerate: true,
           regenerate: true,
+          regenerateTargetAnswerId: messageId,
+          regenerateInstruction: REGENERATE_DEFAULT_INSTRUCTION,
           aiModel,
-          snapshotId: targetMessage.snapshotId
+          snapshotId: targetMessage.snapshotId,
         };
+        console.log("[useAIChat] handleRegenerate: requestBody keys", Object.keys(requestBody));
         console.log(`[useAIChat] handleRegenerate: Dispatching POST to ${targetUrl} with body:`, requestBody);
-        const response = await fetch(
-          targetUrl,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(requestBody),
-            signal: controller.signal,
-          },
-        );
+        const response = await fetch(targetUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(requestBody),
+          signal: controller.signal,
+        });
 
         if (!response.ok) {
           console.error(`[useAIChat] handleRegenerate: Server returned status ${response.status}`);
@@ -1378,9 +1515,18 @@ export const useAIChat = () => {
           setAiChat,
           targetMessage.time || new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
           controller.signal,
+          {
+            ...(cachedContext || {}),
+            originalQuestion: question.slice(0, 1000),
+            originalTranscript: transcriptForReplay.slice(0, 8000),
+            currentQuestion: question.slice(0, 1000),
+            answerMode: replayPayload.answerMode || "auto",
+            sourcePlatform: replayPayload.sourcePlatform || (isTauri() ? "tauri" : "web"),
+            generatedAnswerText: cachedContext?.generatedAnswerText || "",
+            generatedCodeBlocks: cachedContext?.generatedCodeBlocks || [],
+          },
         );
 
-        // Update previous context after successful generation
         previousContextRef.current = { transcript: question, timestamp: Date.now() };
       } catch (error: any) {
         if (error.name === "AbortError") {

@@ -369,20 +369,35 @@ pub async fn run_session(
                 Ok(WsMsg::Text(text)) => {
                     if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
                         if val["type"] == "Results" {
-                            if let Some(t) =
-                                val["channel"]["alternatives"][0]["transcript"].as_str()
-                            {
-                                if !t.is_empty() {
-                                    let _ = app_r.emit(
-                                        transcript_evt,
-                                        TranscriptPayload {
-                                            text: t.to_string(),
-                                            is_final: val["is_final"]
-                                                .as_bool()
-                                                .unwrap_or(false),
-                                        },
-                                    );
-                                }
+                            let is_final = val["is_final"].as_bool().unwrap_or(false);
+                            let transcript = val["channel"]["alternatives"][0]["transcript"]
+                                .as_str()
+                                .unwrap_or("")
+                                .to_string();
+                            let text_len = transcript.trim().len();
+                            if is_final {
+                                eprintln!(
+                                    "[{tag}] finalReceived sourcePlatform=tauri channel={} textLength={}",
+                                    tag, text_len
+                                );
+                            } else if text_len > 0 {
+                                eprintln!(
+                                    "[{tag}] interimReceived sourcePlatform=tauri channel={} textLength={}",
+                                    tag, text_len
+                                );
+                            }
+
+                            // Emit final boundaries even when transcript text is empty.
+                            // This allows frontend fallback logic to reconcile interim
+                            // text when Deepgram sends an empty/weak final frame.
+                            if is_final || text_len > 0 {
+                                let _ = app_r.emit(
+                                    transcript_evt,
+                                    TranscriptPayload {
+                                        text: transcript,
+                                        is_final,
+                                    },
+                                );
                             }
                         }
                     }

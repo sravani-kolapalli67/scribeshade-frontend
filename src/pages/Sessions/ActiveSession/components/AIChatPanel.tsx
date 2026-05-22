@@ -18,6 +18,7 @@ interface AIChatPanelProps {
   onExit: () => void;
   onSend?: () => void;
   onRegenerate?: (messageId: string) => void;
+  onMessageInteract?: (messageId: string) => void;
   isFullscreen?: boolean;
   isFreeSession?: boolean;
   isWarning?: boolean;
@@ -39,6 +40,7 @@ export const AIChatPanel = ({
   onExit,
   onSend,
   onRegenerate,
+  onMessageInteract,
   isFullscreen = false,
   isFreeSession = false,
   isWarning = false,
@@ -67,6 +69,7 @@ export const AIChatPanel = ({
           isStreaming={isAnalyzing || isAnswering}
           isFullscreen={isFullscreen}
           onRegenerate={onRegenerate}
+          onMessageInteract={onMessageInteract}
         />
       </div>
 

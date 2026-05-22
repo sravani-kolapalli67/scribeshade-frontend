@@ -8,6 +8,7 @@ import { useKeyboardShortcut } from "@/hooks/useKeyboardShortcut";
 import { useFreeSessionTimer } from "@/hooks/useFreeSessionTimer";
 import { useSessionHeartbeat } from "@/hooks/useSessionHeartbeat";
 import { useSessionEvents } from "@/hooks/useSessionEvents";
+import { createAudioSessionController } from "@/features/session/audio/audioSessionController";
 import { toast } from "sonner";
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -126,6 +127,16 @@ function isQuestionLike(text: string): boolean {
   );
 }
 
+function deriveAnswerTopicFromText(text: string): string {
+  const t = (text || "").toLowerCase();
+  if (/\b(sql|postgres|postgresql|query|join|table|index)\b/.test(t)) return "sql";
+  if (/\b(mongodb|mongo|aggregation|pipeline|nosql)\b/.test(t)) return "mongodb";
+  if (/\b(react|jsx|hooks|component)\b/.test(t)) return "react";
+  if (/\b(pyspark|spark|datalake|databricks)\b/.test(t)) return "pyspark";
+  if (/\b(node|express|api|backend)\b/.test(t)) return "backend";
+  return "general";
+}
+
 /**
  * Deduplicates repeated adjacent phrases within a single transcript string (up to 6 words).
  */
@@ -177,11 +188,22 @@ function removeOverlap(lastText: string, newText: string): string {
 }
 
 export default function ActiveSession() {
+  const stopWebMicRef = useRef<() => void>(() => {});
+  const stopWebSystemRef = useRef<() => void>(() => {});
+  const audioControllerRef = useRef(
+    createAudioSessionController({
+      source: "active-session",
+      stopWebMic: () => stopWebMicRef.current(),
+      stopWebSystem: () => stopWebSystemRef.current(),
+    }),
+  );
+
   useEffect(() => {
     if (!isTauri()) return;
     invoke("set_session_active", { active: true });
     return () => {
       invoke("set_session_active", { active: false });
+      void audioControllerRef.current.destroyAudioSession("active_session_unmount");
     };
   }, []);
 
@@ -385,19 +407,7 @@ export default function ActiveSession() {
     } finally {
       // Stop all transcription streams and screen share gracefully
       try {
-        // Stop mic transcription
-        if (!isTauri()) {
-          micTranscription.stopTranscription();
-        } else {
-          // For Tauri, invoke the stop command
-          await invoke("stop_mic_transcription").catch(() => {});
-        }
-        
-        // Stop tab transcription (browser only)
-        if (!isTauri()) {
-          tabTranscription.stopTranscription();
-          tabAudioTranscription.stopTranscription();
-        }
+        await audioControllerRef.current.destroyAudioSession("end_session");
         
         // Stop screen share stream
         if (stream) {
@@ -499,6 +509,7 @@ export default function ActiveSession() {
   // The parent only cleans up screen stream and internal refs.
   useEffect(() => {
     return () => {
+      void audioControllerRef.current.destroyAudioSession("component_unmount");
       // Stop screen share stream (not handled by hooks)
       try {
         if (stream) {
@@ -838,6 +849,14 @@ export default function ActiveSession() {
     inputStream: streamHasAudio ? stream : null,
   });
 
+  stopWebMicRef.current = () => {
+    micTranscription.stopTranscription();
+  };
+  stopWebSystemRef.current = () => {
+    tabTranscription.stopTranscription();
+    tabAudioTranscription.stopTranscription();
+  };
+
   // Auto-start / stop browser tab audio transcription based on stream audio
   useEffect(() => {
     if (isTauri()) return;
@@ -981,11 +1000,12 @@ export default function ActiveSession() {
   const toggleTauriOrBrowserMic = useCallback(async () => {
     if (isTauri()) {
       if (tauriMicActive || tauriMicConnecting) {
-        await invoke("stop_mic_transcription").catch(() => {});
+        await audioControllerRef.current.stopAudioSession("mic", "mic_toggle_off");
         setTauriMicActive(false);
         setTauriMicConnecting(false);
         setTauriMicInterim("");
       } else {
+        audioControllerRef.current.startAudioSession("mic", "mic_toggle_on");
         setTauriMicConnecting(true);
         try {
           await invoke("start_mic_transcription", {
@@ -999,8 +1019,9 @@ export default function ActiveSession() {
       }
     } else {
       if (micTranscription.isTranscribing) {
-        micTranscription.stopTranscription();
+        await audioControllerRef.current.stopAudioSession("mic", "mic_toggle_off");
       } else {
+        audioControllerRef.current.startAudioSession("mic", "mic_toggle_on");
         micTranscription.startTranscription();
       }
     }
@@ -1018,6 +1039,11 @@ export default function ActiveSession() {
     handleCustomQuery,
     handleRegenerate,
   } = useAIChat();
+  const lastInteractedAiMessageIdRef = useRef<string | null>(null);
+  const onAiMessageInteract = useCallback((messageId: string) => {
+    if (!messageId) return;
+    lastInteractedAiMessageIdRef.current = messageId;
+  }, []);
 
   // Wire handleAiAnswer into the stable ref so handleTranscript can call it.
   handleAiAnswerRef.current = handleAiAnswer;
@@ -1443,8 +1469,8 @@ export default function ActiveSession() {
     ].find((txt) => txt && !isFillerPhrase(txt) && isQuestionLike(txt));
     const bestCurrentQuestion =
       meaningfulInterim ||
-      newestWindowQuestion ||
-      question;
+      question ||
+      newestWindowQuestion;
     const transcriptText =
       recentTranscriptWindow.length > 0
         ? recentTranscriptWindow.join("\n")
@@ -1453,6 +1479,25 @@ export default function ActiveSession() {
       .reverse()
       .find((m) => m.sender === "AI" && m.text?.trim())?.text
       ?.trim();
+    const selectedAiMessage =
+      (lastInteractedAiMessageIdRef.current
+        ? aiChat.find(
+            (m) =>
+              m.id === lastInteractedAiMessageIdRef.current &&
+              m.sender === "AI" &&
+              m.text?.trim(),
+          )
+        : null) ||
+      [...aiChat].reverse().find((m) => m.sender === "AI" && m.text?.trim()) ||
+      null;
+    const selectedAnswerText = selectedAiMessage?.text?.trim() || "";
+    const selectedAnswerQuestion = selectedAiMessage?.question?.trim() || "";
+    const selectedAnswerCodeBlocks = selectedAnswerText
+      ? extractCodeBlocks(selectedAnswerText)
+      : [];
+    const selectedAnswerTopic = deriveAnswerTopicFromText(
+      `${selectedAnswerQuestion} ${selectedAnswerText}`,
+    );
     const payload: AIAnswerRequestPayload = {
       transcript: transcriptText,
       currentQuestion: bestCurrentQuestion,
@@ -1462,6 +1507,13 @@ export default function ActiveSession() {
       ...(latestAiAnswer
         ? { previousCodeBlocks: extractCodeBlocks(latestAiAnswer) }
         : {}),
+      ...(selectedAiMessage?.id ? { selectedAnswerId: selectedAiMessage.id } : {}),
+      ...(selectedAnswerQuestion ? { selectedAnswerQuestion } : {}),
+      ...(selectedAnswerText ? { selectedAnswerText } : {}),
+      ...(selectedAnswerCodeBlocks.length > 0
+        ? { selectedAnswerCodeBlocks }
+        : {}),
+      ...(selectedAnswerTopic ? { selectedAnswerTopic } : {}),
       answerMode: "auto",
       sourcePlatform: "web",
     };
@@ -1506,6 +1558,12 @@ export default function ActiveSession() {
     isOpeningOverlayRef.current = true;
 
     try {
+      if (import.meta.env.DEV) {
+        console.log("[audio-lifecycle] overlayTransitionAudioPreserved", {
+          reason: "open_overlay_hide_main",
+          sessionActive: true,
+        });
+      }
       await invoke("show_mini_top_center");
       await getCurrentWindow().hide();
     } catch (error) {
@@ -1691,6 +1749,12 @@ export default function ActiveSession() {
       });
       const u8 = await listen("overlay-hide-main", async () => {
         if (active) {
+          if (import.meta.env.DEV) {
+            console.log("[audio-lifecycle] overlayTransitionAudioPreserved", {
+              reason: "overlay_hide_main",
+              sessionActive: true,
+            });
+          }
           await getCurrentWindow().hide();
         }
       });
@@ -1770,6 +1834,7 @@ export default function ActiveSession() {
     onSend: () => id && handleCustomQuery(id, inputMessage, selectedModel),
     onExit: () => setIsEndSessionDialogOpen(true),
     onRegenerate,
+    onMessageInteract: onAiMessageInteract,
     isFreeSession,
     timerText: formattedTime,
     isWarning: creditWarning !== null,

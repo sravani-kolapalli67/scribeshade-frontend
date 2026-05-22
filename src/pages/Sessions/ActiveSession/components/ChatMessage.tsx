@@ -116,6 +116,7 @@ export const ChatMessage = ({
   isStreaming,
   isFullscreen = false,
   onRegenerate,
+  onInteract,
 }: ChatMessageProps) => {
   const isAI = message.sender !== "User";
 
@@ -185,7 +186,12 @@ export const ChatMessage = ({
   }
 
   return (
-    <div className="mb-8 animate-in fade-in slide-in-from-bottom-2">
+    <div
+      className="mb-8 animate-in fade-in slide-in-from-bottom-2"
+      onClick={() => onInteract?.(message.id)}
+      onFocusCapture={() => onInteract?.(message.id)}
+      tabIndex={-1}
+    >
       <div className="flex items-start gap-3">
         <div className="mt-1 shrink-0">
           <Star className="h-4.5 w-4.5 fill-amber-400 text-amber-400" />
@@ -217,6 +223,7 @@ export const ChatMessage = ({
                 <div className="flex items-center gap-2 opacity-0 group-hover/ques:opacity-100 transition-opacity">
                   <button
                     onClick={() => {
+                      onInteract?.(message.id);
                       navigator.clipboard.writeText(displayQuestion);
                     }}
                     className="px-3 py-1.5 text-xs font-medium rounded-md transition-all active:scale-95 bg-slate-100 hover:bg-slate-200 text-slate-600"
@@ -253,6 +260,7 @@ export const ChatMessage = ({
                     {displayAnswer && (
                       <button
                         onClick={() => {
+                          onInteract?.(message.id);
                           navigator.clipboard.writeText(displayAnswer);
                         }}
                         className="px-3 py-1.5 text-xs font-medium rounded-md transition-all active:scale-95 bg-slate-100 hover:bg-slate-200 text-slate-600"
@@ -263,6 +271,7 @@ export const ChatMessage = ({
                     {onRegenerate && !isStreaming && (
                       <button
                         onClick={onRegenerate}
+                        onMouseDown={() => onInteract?.(message.id)}
                         className={cn(
                           "flex items-center justify-center p-1.5 rounded-md transition-all active:scale-95",
                           isFullscreen
@@ -414,4 +423,5 @@ interface ChatMessageProps {
   isStreaming: boolean;
   isFullscreen?: boolean;
   onRegenerate?: () => void;
+  onInteract?: (messageId: string) => void;
 }

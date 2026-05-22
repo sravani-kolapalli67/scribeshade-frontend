@@ -156,20 +156,25 @@ const CodeBlock = ({
           )}
         </button>
       </div>
-      <div className="p-0 m-0 text-[12px] font-mono leading-relaxed overflow-hidden">
+      <div className="p-0 m-0 text-[13px] font-mono leading-relaxed overflow-x-auto overflow-y-hidden overscroll-x-contain [scrollbar-gutter:stable]">
         <SyntaxHighlighter
           language={language?.toLowerCase() || "javascript"}
           style={oneDark}
+          wrapLongLines={false}
           customStyle={{
             margin: 0,
             padding: "1rem",
             background: "transparent",
-            fontSize: "12px",
+            fontSize: "13px",
             lineHeight: "1.6",
+            overflowX: "auto",
+            whiteSpace: "pre",
+            wordBreak: "normal",
           }}
           codeTagProps={{
             style: {
               fontFamily: "inherit",
+              whiteSpace: "pre",
             },
           }}
         >
@@ -451,7 +456,7 @@ const AnswerArea: React.FC<{
                     <InlineCopyButton text={finalQuestion} />
                   </span>
                 </div>
-                <div className="text-[15px] leading-snug font-bold text-white wrap-break-word">
+                <div className="text-[16px] leading-snug font-bold text-white wrap-break-word">
                   {finalQuestion}
                 </div>
                 {/* Horizontal divider separating Question from Answer */}
@@ -461,7 +466,7 @@ const AnswerArea: React.FC<{
 
             <div className="flex items-center gap-2 mb-2">
               <Star className="h-4 w-4 fill-amber-400/20 text-amber-400 shrink-0" />
-              <span className="text-[13.5px] font-bold text-white">
+              <span className="text-[14.5px] font-bold text-white">
                 Answer:
               </span>
               {!resp.isStreaming && answerMarkdown && (
@@ -472,7 +477,7 @@ const AnswerArea: React.FC<{
             {/* Markdown Content */}
             <div
               className={[
-                "text-[13px] leading-relaxed font-medium text-white wrap-break-word",
+                "text-[15px] leading-relaxed font-medium text-white wrap-break-word",
                 "[&_p]:mb-3 [&_p:last-child]:mb-0",
                 "[&_ul]:pl-1 [&_ul]:mb-3 [&_ul]:space-y-2 [&_ul]:list-none",
                 "[&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:mb-3 [&_ol]:space-y-2",
@@ -480,7 +485,7 @@ const AnswerArea: React.FC<{
                 "[&_em]:text-amber-200 [&_em]:not-italic [&_em]:font-semibold",
                 "[&_a]:text-blue-300 [&_a]:underline",
                 "[&_blockquote]:border-l-2 [&_blockquote]:border-blue-400/50 [&_blockquote]:pl-3 [&_blockquote]:text-white/80 [&_blockquote]:italic",
-                "[&_table]:w-full [&_table]:my-3 [&_table]:text-[12px] [&_table]:border-collapse",
+                "[&_table]:w-full [&_table]:my-3 [&_table]:text-[13px] [&_table]:border-collapse",
                 "[&_th]:border [&_th]:border-white/10 [&_th]:bg-white/5 [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:font-bold",
                 "[&_td]:border [&_td]:border-white/10 [&_td]:px-2 [&_td]:py-1",
               ].join(" ")}
@@ -562,7 +567,7 @@ const AnswerArea: React.FC<{
                       code: ({ node, inline, children, ...props }: any) => {
                         if (inline) {
                           return (
-                            <code className="px-1.5 py-0.5 rounded text-[12px] font-mono font-medium bg-white/10 text-blue-200 mx-0.5">
+                            <code className="px-1.5 py-0.5 rounded text-[13px] font-mono font-medium bg-white/10 text-blue-200 mx-0.5">
                               {children}
                             </code>
                           );
@@ -964,7 +969,7 @@ const FloatingApp: React.FC = () => {
         </div>
 
         {/* Live Monitor Row */}
-        <div className="px-4 py-2 flex items-center justify-between bg-white/2 border-b border-white/5">
+        <div className="px-4 py-2.5 flex items-center justify-between bg-white/2 border-b border-white/5 gap-3">
           <div className="flex-1 flex items-center gap-2 overflow-hidden mr-3">
             <div className="flex gap-1 shrink-0">
               <div className={cn(
@@ -1043,7 +1048,19 @@ const FloatingApp: React.FC = () => {
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex items-center gap-2 shrink-0">
+            <div className={cn(
+              "px-2 py-1 rounded-lg border text-[10px] font-semibold tracking-wide",
+              session.captureStatus === "Live"
+                ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                : session.captureStatus === "Reconnecting"
+                  ? "bg-amber-500/15 text-amber-300 border-amber-500/30"
+                  : session.captureStatus === "Released"
+                    ? "bg-white/5 text-white/60 border-white/10"
+                    : "bg-rose-500/15 text-rose-300 border-rose-500/30",
+            )}>
+              {session.captureStatus}
+            </div>
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
@@ -1247,7 +1264,7 @@ const FloatingApp: React.FC = () => {
                 </div>
 
                 {session.isResponsesExpanded && session.aiResponses.length > 0 && (
-                  <div className="border-t border-white/10 max-h-120 overflow-y-auto overflow-x-hidden no-scrollbar">
+                  <div className="border-t border-white/10 max-h-120 overflow-y-auto overflow-x-auto no-scrollbar">
                     <AnswerArea
                       responses={[
                         {

@@ -15,6 +15,32 @@ export interface Message {
   patchedText?: string;
   patchedAt?: number;
   patchedByUser?: boolean;
+  originalGenerationContext?: {
+    originalQuestion?: string;
+    originalTranscript?: string;
+    currentQuestion?: string;
+    recentTranscriptWindow?: string[];
+    speakerSeparatedTranscript?: {
+      speakerType: "interviewer" | "candidate" | "assistant" | "system";
+      content: string;
+      timestamp?: number;
+    }[];
+    selectedAnswerId?: string;
+    selectedAnswerQuestion?: string;
+    selectedAnswerText?: string;
+    selectedAnswerCodeBlocks?: string[];
+    selectedAnswerTopic?: string;
+    answerMode?:
+      | "auto"
+      | "theory_only"
+      | "minimal_code"
+      | "code_required"
+      | "explain_existing_code"
+      | "system_design";
+    sourcePlatform?: "web" | "tauri";
+    generatedAnswerText?: string;
+    generatedCodeBlocks?: string[];
+  };
 }
 
 interface TranscriptProps {

@@ -95,12 +95,14 @@ export function useNativeTabTranscription({
       rustWsRef.current.onclose = null;
       rustWsRef.current.onerror = null;
       rustWsRef.current.close();
+      if (import.meta.env.DEV) console.log("[audio-lifecycle] websocketClosed", { source: "useNativeTabTranscription", target: "rust_ws" });
       rustWsRef.current = null;
     }
     if (dgWsRef.current) {
       dgWsRef.current.onclose = null;
       dgWsRef.current.onerror = null;
       dgWsRef.current.close();
+      if (import.meta.env.DEV) console.log("[audio-lifecycle] websocketClosed", { source: "useNativeTabTranscription", target: "deepgram_ws" });
       dgWsRef.current = null;
     }
     audioMetaRef.current = null;
@@ -210,11 +212,15 @@ export function useNativeTabTranscription({
   openDeepgramWsRef.current = openDeepgramWs;
 
   const stopTranscription = useCallback(async () => {
+    if (import.meta.env.DEV) console.log("[audio-lifecycle] audioSessionStopped", { source: "useNativeTabTranscription", mode: "system" });
     // teardownLocalConnections handles closing WS and resetting state
     teardownLocalConnections();
     // Explicitly stop the Rust capture stream when the session ends
     if (isTauri()) {
-      try { await invoke("stop_display_audio_stream"); } catch (_) { /* best-effort */ }
+      try {
+        await invoke("stop_display_audio_stream");
+        if (import.meta.env.DEV) console.log("[audio-lifecycle] nativeStopInvoked", { source: "useNativeTabTranscription", mode: "system" });
+      } catch (_) { /* best-effort */ }
     }
   }, [teardownLocalConnections]);
 

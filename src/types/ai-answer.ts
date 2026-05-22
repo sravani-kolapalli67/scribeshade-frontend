@@ -18,6 +18,11 @@ export interface AIAnswerRequestPayload {
   speakerSeparatedTranscript?: AIAnswerSpeakerEntry[];
   previousAiAnswer?: string;
   previousCodeBlocks?: string[];
+  selectedAnswerId?: string;
+  selectedAnswerQuestion?: string;
+  selectedAnswerText?: string;
+  selectedAnswerCodeBlocks?: string[];
+  selectedAnswerTopic?: string;
   answerMode?:
     | "auto"
     | "theory_only"
@@ -26,6 +31,9 @@ export interface AIAnswerRequestPayload {
     | "explain_existing_code"
     | "system_design";
   sourcePlatform?: "web" | "tauri";
+  isRegenerate?: boolean;
+  regenerateTargetAnswerId?: string;
+  regenerateInstruction?: string;
 }
 
 export const AI_ANSWER_LIMITS = {
@@ -33,6 +41,11 @@ export const AI_ANSWER_LIMITS = {
   previousAiAnswerMaxChars: 1000,
   previousCodeBlocksMax: 2,
   previousCodeBlockMaxChars: 1500,
+  selectedAnswerQuestionMaxChars: 500,
+  selectedAnswerTextMaxChars: 1000,
+  selectedAnswerTopicMaxChars: 80,
+  regenerateTargetAnswerIdMaxChars: 120,
+  regenerateInstructionMaxChars: 500,
 } as const;
 
 export function normalizeSpeakerType(input: string): AIAnswerSpeakerType {
@@ -62,6 +75,25 @@ export function sanitizeAIAnswerPayload(
     .slice(0, AI_ANSWER_LIMITS.previousCodeBlocksMax)
     .map((block) => block.slice(0, AI_ANSWER_LIMITS.previousCodeBlockMaxChars))
     .filter((block) => block.trim().length > 0);
+  const selectedAnswerQuestion = payload.selectedAnswerQuestion
+    ? payload.selectedAnswerQuestion.slice(0, AI_ANSWER_LIMITS.selectedAnswerQuestionMaxChars)
+    : undefined;
+  const selectedAnswerText = payload.selectedAnswerText
+    ? payload.selectedAnswerText.slice(0, AI_ANSWER_LIMITS.selectedAnswerTextMaxChars)
+    : undefined;
+  const selectedAnswerCodeBlocks = (payload.selectedAnswerCodeBlocks || [])
+    .slice(0, AI_ANSWER_LIMITS.previousCodeBlocksMax)
+    .map((block) => block.slice(0, AI_ANSWER_LIMITS.previousCodeBlockMaxChars))
+    .filter((block) => block.trim().length > 0);
+  const selectedAnswerTopic = payload.selectedAnswerTopic
+    ? payload.selectedAnswerTopic.slice(0, AI_ANSWER_LIMITS.selectedAnswerTopicMaxChars)
+    : undefined;
+  const regenerateTargetAnswerId = payload.regenerateTargetAnswerId
+    ? payload.regenerateTargetAnswerId.slice(0, AI_ANSWER_LIMITS.regenerateTargetAnswerIdMaxChars)
+    : undefined;
+  const regenerateInstruction = payload.regenerateInstruction
+    ? payload.regenerateInstruction.slice(0, AI_ANSWER_LIMITS.regenerateInstructionMaxChars)
+    : undefined;
   const recentTranscriptWindow = (payload.recentTranscriptWindow || [])
     .map((item) => item.trim())
     .filter(Boolean)
@@ -85,8 +117,16 @@ export function sanitizeAIAnswerPayload(
       : {}),
     ...(previousAiAnswer ? { previousAiAnswer } : {}),
     ...(previousCodeBlocks.length > 0 ? { previousCodeBlocks } : {}),
+    ...(payload.selectedAnswerId ? { selectedAnswerId: payload.selectedAnswerId } : {}),
+    ...(selectedAnswerQuestion ? { selectedAnswerQuestion } : {}),
+    ...(selectedAnswerText ? { selectedAnswerText } : {}),
+    ...(selectedAnswerCodeBlocks.length > 0 ? { selectedAnswerCodeBlocks } : {}),
+    ...(selectedAnswerTopic ? { selectedAnswerTopic } : {}),
     ...(payload.answerMode ? { answerMode: payload.answerMode } : {}),
     ...(payload.sourcePlatform ? { sourcePlatform: payload.sourcePlatform } : {}),
+    ...(payload.isRegenerate ? { isRegenerate: true } : {}),
+    ...(regenerateTargetAnswerId ? { regenerateTargetAnswerId } : {}),
+    ...(regenerateInstruction ? { regenerateInstruction } : {}),
   };
 }
 

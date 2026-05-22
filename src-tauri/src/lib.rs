@@ -2132,6 +2132,17 @@ fn open_microphone_settings(app: tauri::AppHandle) -> Result<(), String> {
 #[command]
 fn set_session_active(active: bool) {
     SESSION_ACTIVE.store(active, Ordering::SeqCst);
+    if !active {
+        stop_all_audio_transcription();
+    }
+}
+
+#[tauri::command]
+fn stop_all_audio_transcription() {
+    stop_mic_transcription();
+    stop_system_audio_transcription();
+    stop_display_audio_stream();
+    stop_audio_stream();
 }
 
 /// Toggle content protection (screen-capture block) at runtime across all
@@ -2917,6 +2928,7 @@ pub fn run() {
             start_display_audio_stream, stop_display_audio_stream,
             start_system_audio_transcription, stop_system_audio_transcription,
             start_mic_transcription, stop_mic_transcription,
+            stop_all_audio_transcription,
             open_screen_recording_settings, open_microphone_settings,
             ensure_microphone_permission,
             set_session_active, toggle_content_protection, handle_launcher_click,

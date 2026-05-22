@@ -21,6 +21,7 @@ import { detectIntent, isFillerPhrase } from "@/lib/intent-detector";
 import { useFreeSessionTimer } from "@/hooks/useFreeSessionTimer";
 import { useSessionHeartbeat } from "@/hooks/useSessionHeartbeat";
 import { useSessionEvents } from "@/hooks/useSessionEvents";
+import { createAudioSessionController } from "@/features/session/audio/audioSessionController";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
   initSession,
@@ -165,6 +166,7 @@ const REGENERATE_CONTEXT_LOOKBACK_MS = 15000;
  */
 const FALLBACK_MSG_COUNT = 12;
 const NEAR_DUPLICATE_GAP_MS = 2500;
+const STT_INTERIM_FALLBACK_MS = 1500;
 const MIN_INCLUDE_DUPLICATE_LEN = 20;
 type TranscriptInsertSource =
   | "stt:user"
@@ -173,6 +175,12 @@ type TranscriptInsertSource =
   | "restore"
   | "save-response"
   | "patch";
+type SttSourceKey = "mic" | "system";
+type CommitOutcome =
+  | { status: "inserted"; id: string }
+  | { status: "patched"; id: string; reason?: string }
+  | { status: "suppressed"; reason: string }
+  | { status: "empty"; reason: string };
 
 function normalizeLoose(text: string): string {
   return (text || "")
@@ -195,6 +203,16 @@ function areNearDuplicateTexts(a: string, b: string): boolean {
     return longer.includes(shorter);
   }
   return false;
+}
+
+function deriveAnswerTopicFromText(text: string): string {
+  const t = (text || "").toLowerCase();
+  if (/\b(sql|postgres|postgresql|query|join|table|index)\b/.test(t)) return "sql";
+  if (/\b(mongodb|mongo|aggregation|pipeline|nosql)\b/.test(t)) return "mongodb";
+  if (/\b(react|jsx|hooks|component)\b/.test(t)) return "react";
+  if (/\b(pyspark|spark|datalake|databricks)\b/.test(t)) return "pyspark";
+  if (/\b(node|express|api|backend)\b/.test(t)) return "backend";
+  return "general";
 }
 
 function endsWithConnector(text: string): boolean {
@@ -504,6 +522,12 @@ function isRecentlyAnswered(
 }
 
 export function useFloatingSession() {
+  const audioControllerRef = useRef(
+    createAudioSessionController({
+      source: "floating-session",
+    }),
+  );
+
   const dispatch = useAppDispatch();
 
   // ── Redux state ─────────────────────────────────────────────────────────────
@@ -566,11 +590,58 @@ export function useFloatingSession() {
   const recentInsertionsRef = useRef<
     { sender: "User" | "Interviewer"; normalized: string; timestamp: number }[]
   >([]);
+  const editingMessageIdsRef = useRef<Set<string>>(new Set());
+  const sttSourceStateRef = useRef<
+    Record<
+      SttSourceKey,
+      {
+        latestInterimText: string;
+        latestInterimAt: number;
+        fallbackMessageId: string | null;
+        fallbackCommittedAt: number | null;
+        timer: ReturnType<typeof setTimeout> | null;
+      }
+    >
+  >({
+    mic: {
+      latestInterimText: "",
+      latestInterimAt: 0,
+      fallbackMessageId: null,
+      fallbackCommittedAt: null,
+      timer: null,
+    },
+    system: {
+      latestInterimText: "",
+      latestInterimAt: 0,
+      fallbackMessageId: null,
+      fallbackCommittedAt: null,
+      timer: null,
+    },
+  });
 
   useEffect(() => {
     return () => {
       Object.values(patchPersistTimersRef.current).forEach((timer) => clearTimeout(timer));
       patchPersistTimersRef.current = {};
+      const st = sttSourceStateRef.current;
+      if (st.mic.timer) clearTimeout(st.mic.timer);
+      if (st.system.timer) clearTimeout(st.system.timer);
+      st.mic.timer = null;
+      st.system.timer = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const onEditingState = (evt: Event) => {
+      const custom = evt as CustomEvent<{ messageId?: string; isEditing?: boolean }>;
+      const messageId = custom.detail?.messageId;
+      if (!messageId) return;
+      if (custom.detail?.isEditing) editingMessageIdsRef.current.add(messageId);
+      else editingMessageIdsRef.current.delete(messageId);
+    };
+    window.addEventListener("scribeshade:transcript-editing", onEditingState as EventListener);
+    return () => {
+      window.removeEventListener("scribeshade:transcript-editing", onEditingState as EventListener);
     };
   }, []);
 
@@ -646,7 +717,7 @@ export function useFloatingSession() {
   );
 
   const replaceNearDuplicateIfRicher = useCallback(
-    (sender: "User" | "Interviewer", text: string, timestamp: number): boolean => {
+    (sender: "User" | "Interviewer", text: string, timestamp: number): { handled: boolean; patchedId?: string } => {
       const normalized = normalizeLoose(text);
       const candidates = [...messagesRef.current]
         .filter((m) => m.sender === sender && typeof m.timestamp === "number")
@@ -658,8 +729,8 @@ export function useFloatingSession() {
             Math.abs(timestamp - m.timestamp) <= NEAR_DUPLICATE_GAP_MS &&
             areNearDuplicateTexts(normalized, normalizeLoose(m.text)),
         );
-      if (!match) return false;
-      if (text.trim().length <= match.text.trim().length) return true;
+      if (!match) return { handled: false };
+      if (text.trim().length <= match.text.trim().length) return { handled: true };
       dispatch(
         patchMessage({
           id: match.id,
@@ -671,49 +742,99 @@ export function useFloatingSession() {
         ...recentInsertionsRef.current,
         { sender: sender as "User" | "Interviewer", normalized, timestamp },
       ].slice(-40);
-      return true;
+      return { handled: true, patchedId: match.id };
     },
     [dispatch],
   );
 
   // ── Transcript message handlers ─────────────────────────────────────────────
+  const clearSttSourceTimer = useCallback((source: SttSourceKey) => {
+    const sourceState = sttSourceStateRef.current[source];
+    if (sourceState.timer) {
+      clearTimeout(sourceState.timer);
+      sourceState.timer = null;
+    }
+  }, []);
 
-  const handleUserTranscript = useCallback(
-    (text: string, isFinal: boolean) => {
-      if (!isFinal || !text.trim()) return;
-      
-      let cleanText = deduplicatePhrases(text);
-      const lastSameSenderMsg = [...messagesRef.current].reverse().find((m) => m.sender === "User");
+  const senderForSource = useCallback(
+    (source: SttSourceKey): "User" | "Interviewer" =>
+      source === "mic" ? "User" : "Interviewer",
+    [],
+  );
+
+  const shouldPreferFinalOverInterim = useCallback((finalText: string, interimText: string): boolean => {
+    const finalNorm = normalizeLoose(finalText);
+    const interimNorm = normalizeLoose(interimText);
+    if (!finalNorm) return false;
+    if (!interimNorm) return true;
+    if (areNearDuplicateTexts(finalNorm, interimNorm)) {
+      return finalNorm.length >= interimNorm.length;
+    }
+    return finalNorm.length >= interimNorm.length;
+  }, []);
+
+  const persistAutoTranscriptUpgrade = useCallback(
+    (
+      messageId: string,
+      sender: "User" | "Interviewer",
+      originalText: string,
+      patchedText: string,
+      timestamp?: number,
+    ) => {
+      const sid = sessionInfoRef.current?.sessionId;
+      if (!sid || sessionInfoRef.current?.saveTranscript === false) return;
+      fetch(`${BACKEND_URL}/api/session/${sid}/transcript/${messageId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          patchedText,
+          originalText,
+          patchedAt: new Date().toISOString(),
+          patchedByUser: false,
+          sender,
+          timestamp,
+        }),
+      }).catch((err) => console.error("[useFloatingSession] auto transcript upgrade PATCH failed:", err));
+    },
+    [],
+  );
+
+  const commitTranscriptMessage = useCallback(
+    (
+      sender: "User" | "Interviewer",
+      rawText: string,
+      source: TranscriptInsertSource,
+      forcedTimestamp?: number,
+    ): CommitOutcome | void => {
+      if (!rawText.trim()) return { status: "empty", reason: "empty_input" };
+
+      let cleanText = deduplicatePhrases(rawText);
+      const lastSameSenderMsg = [...messagesRef.current].reverse().find((m) => m.sender === sender);
       if (lastSameSenderMsg) {
         cleanText = removeOverlap(lastSameSenderMsg.text, cleanText);
       }
       cleanText = cleanText.trim();
-      if (!cleanText) return;
+      if (!cleanText) return { status: "empty", reason: "empty_after_cleanup" };
 
       const sid = sessionInfoRef.current?.sessionId;
-      const now = Date.now();
+      const now = forcedTimestamp ?? Date.now();
 
-      if (replaceNearDuplicateIfRicher("User", cleanText, now)) return;
-      if (shouldSuppressInsertion("User", cleanText, now)) return;
+      const replaceResult = replaceNearDuplicateIfRicher(sender, cleanText, now);
+      if (replaceResult.handled) {
+        if (replaceResult.patchedId) {
+          return { status: "patched", id: replaceResult.patchedId, reason: "updated_fallback_row" };
+        }
+        return { status: "suppressed", reason: "weaker_than_existing" };
+      }
+      if (shouldSuppressInsertion(sender, cleanText, now)) {
+        return { status: "suppressed", reason: "suppressed_duplicate" };
+      }
 
       const generatedId = Math.random().toString(36).slice(7);
-      if (sid) {
-        fetch(`${BACKEND_URL}/api/session/${sid}/save-message`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            messageId: generatedId,
-            role: "USER",
-            question: cleanText,
-            answer: "",
-            time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-          }),
-        }).catch(console.error);
-      }
       dispatch(
         addMessage({
           id: generatedId,
-          sender: "User",
+          sender,
           text: cleanText,
           timestamp: now,
         }),
@@ -721,65 +842,159 @@ export function useFloatingSession() {
       recentInsertionsRef.current = [
         ...recentInsertionsRef.current,
         {
-          sender: "User" as "User" | "Interviewer",
+          sender,
           normalized: normalizeLoose(cleanText),
           timestamp: now,
         },
       ].slice(-40);
+
+      if (sid) {
+        fetch(`${BACKEND_URL}/api/session/${sid}/save-message`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            messageId: generatedId,
+            role: sender === "User" ? "USER" : "INTERVIEWER",
+            question: cleanText,
+            answer: "",
+            time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          }),
+        }).catch(console.error);
+      }
+
+      return { status: "inserted", id: generatedId };
     },
     [dispatch, replaceNearDuplicateIfRicher, shouldSuppressInsertion],
   );
 
-  const handleInterviewerTranscript = useCallback(
-    (text: string, isFinal: boolean) => {
-      if (!isFinal || !text.trim()) return;
-      
-      let cleanText = deduplicatePhrases(text);
-      const lastSameSenderMsg = [...messagesRef.current].reverse().find((m) => m.sender === "Interviewer");
-      if (lastSameSenderMsg) {
-        cleanText = removeOverlap(lastSameSenderMsg.text, cleanText);
-      }
-      cleanText = cleanText.trim();
-      if (!cleanText) return;
-
-      const sid = sessionInfoRef.current?.sessionId;
-      const now = Date.now();
-
-      if (replaceNearDuplicateIfRicher("Interviewer", cleanText, now)) return;
-      if (shouldSuppressInsertion("Interviewer", cleanText, now)) return;
-
-      const generatedId = Math.random().toString(36).slice(7);
-      if (sid) {
-        fetch(`${BACKEND_URL}/api/session/${sid}/save-message`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            messageId: generatedId,
-            role: "INTERVIEWER",
-            question: cleanText,
-            answer: "",
-            time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-          }),
-        }).catch(console.error);
-      }
-      dispatch(
-        addMessage({
-          id: generatedId,
-          sender: "Interviewer",
-          text: cleanText,
-          timestamp: now,
-        }),
-      );
-      recentInsertionsRef.current = [
-        ...recentInsertionsRef.current,
-        {
-          sender: "Interviewer" as "User" | "Interviewer",
-          normalized: normalizeLoose(cleanText),
-          timestamp: now,
-        },
-      ].slice(-40);
+  const scheduleFallbackCommit = useCallback(
+    (source: SttSourceKey) => {
+      clearSttSourceTimer(source);
+      const sourceState = sttSourceStateRef.current[source];
+      sourceState.timer = setTimeout(() => {
+        sourceState.timer = null;
+        const interim = sourceState.latestInterimText.trim();
+        if (!interim) return;
+        const sender = senderForSource(source);
+        const sourceLabel: TranscriptInsertSource =
+          source === "mic" ? "stt:user" : "stt:interviewer";
+        const outcome = commitTranscriptMessage(sender, interim, sourceLabel, Date.now());
+        if (outcome?.status === "inserted" || outcome?.status === "patched") {
+          sourceState.fallbackMessageId = outcome.id;
+          sourceState.fallbackCommittedAt = Date.now();
+          console.log("[stt-fallback] fallbackCommitted", {
+            source,
+            fallbackCommitted: true,
+            messageId: outcome.id,
+            textLength: interim.length,
+            sourcePlatform: "tauri",
+          });
+        }
+      }, STT_INTERIM_FALLBACK_MS);
     },
-    [dispatch, replaceNearDuplicateIfRicher, shouldSuppressInsertion],
+    [clearSttSourceTimer, commitTranscriptMessage, senderForSource],
+  );
+
+  const reconcileFinalForSource = useCallback(
+    (source: SttSourceKey, finalText: string) => {
+      const sourceState = sttSourceStateRef.current[source];
+      clearSttSourceTimer(source);
+      const interimText = sourceState.latestInterimText.trim();
+      const sender = senderForSource(source);
+      const sourceLabel: TranscriptInsertSource =
+        source === "mic" ? "stt:user" : "stt:interviewer";
+      const finalTrimmed = (finalText || "").trim();
+
+      if (sourceState.fallbackMessageId) {
+        const fallbackId = sourceState.fallbackMessageId;
+        const fallbackRow = messagesRef.current.find((m) => m.id === fallbackId);
+        if (fallbackRow) {
+          if (editingMessageIdsRef.current.has(fallbackId)) {
+            console.log("[stt-final] editingProtected", { source, messageId: fallbackId });
+          } else if (fallbackRow.patchedByUser) {
+            console.log("[stt-final] editingProtected", { source, messageId: fallbackId, patchedByUser: true });
+          } else if (!finalTrimmed) {
+            console.log("[stt-final] suppressedWeakerFinal", { source, droppedReason: "empty_final" });
+          } else if (!shouldPreferFinalOverInterim(finalTrimmed, fallbackRow.text)) {
+            console.log("[stt-final] suppressedWeakerFinal", { source, droppedReason: "weaker_than_existing" });
+          } else if (!areNearDuplicateTexts(finalTrimmed, fallbackRow.text) || finalTrimmed.length > fallbackRow.text.length) {
+            dispatch(
+              patchMessage({
+                id: fallbackId,
+                patchedText: finalTrimmed,
+                patchedAt: Date.now(),
+              }),
+            );
+            persistAutoTranscriptUpgrade(
+              fallbackId,
+              sender,
+              fallbackRow.originalText || fallbackRow.text,
+              finalTrimmed,
+              fallbackRow.timestamp,
+            );
+            console.log("[stt-final] updatedFallbackRow", { source, updatedFallbackRow: true, messageId: fallbackId });
+          } else {
+            console.log("[stt-final] suppressedWeakerFinal", { source, droppedReason: "suppressed_duplicate" });
+          }
+        }
+      } else {
+        const chosen =
+          finalTrimmed && shouldPreferFinalOverInterim(finalTrimmed, interimText)
+            ? finalTrimmed
+            : interimText || finalTrimmed;
+        if (chosen) {
+          if (chosen !== finalTrimmed) {
+            console.log("[stt-final] suppressedWeakerFinal", { source, droppedReason: "weaker_than_interim" });
+          }
+          commitTranscriptMessage(sender, chosen, sourceLabel, Date.now());
+        }
+      }
+
+      sourceState.latestInterimText = "";
+      sourceState.latestInterimAt = 0;
+      sourceState.fallbackMessageId = null;
+      sourceState.fallbackCommittedAt = null;
+    },
+    [
+      clearSttSourceTimer,
+      commitTranscriptMessage,
+      persistAutoTranscriptUpgrade,
+      senderForSource,
+      shouldPreferFinalOverInterim,
+      dispatch,
+    ],
+  );
+
+  const handleUserTranscript = useCallback(
+    (text: string, isFinal: boolean): CommitOutcome | void => {
+      const source: SttSourceKey = "mic";
+      const sourceState = sttSourceStateRef.current[source];
+      if (isFinal) {
+        return reconcileFinalForSource(source, text);
+      }
+      const interim = (text || "").trim();
+      if (!interim) return;
+      sourceState.latestInterimText = interim;
+      sourceState.latestInterimAt = Date.now();
+      scheduleFallbackCommit(source);
+    },
+    [reconcileFinalForSource, scheduleFallbackCommit],
+  );
+
+  const handleInterviewerTranscript = useCallback(
+    (text: string, isFinal: boolean): CommitOutcome | void => {
+      const source: SttSourceKey = "system";
+      const sourceState = sttSourceStateRef.current[source];
+      if (isFinal) {
+        return reconcileFinalForSource(source, text);
+      }
+      const interim = (text || "").trim();
+      if (!interim) return;
+      sourceState.latestInterimText = interim;
+      sourceState.latestInterimAt = Date.now();
+      scheduleFallbackCommit(source);
+    },
+    [reconcileFinalForSource, scheduleFallbackCommit],
   );
 
   // Keep stable refs for Tauri event listeners
@@ -849,6 +1064,7 @@ export function useFloatingSession() {
     const lang = getLanguageCode(sessionInfoRef.current.language ?? "English");
     setTabError(null);
     setTabStatus("connecting");
+    audioControllerRef.current.startAudioSession("system", "start_system_audio");
     try {
       await invoke("start_system_audio_transcription", { language: lang, model: "nova-3" });
     } catch (e: unknown) {
@@ -870,6 +1086,7 @@ export function useFloatingSession() {
         handleInterviewerTranscriptRef.current(text, true);
       } else {
         setTabInterimTranscript(text);
+        handleInterviewerTranscriptRef.current(text, false);
       }
     }).then((fn) => { unlistenTx = fn; }).catch(() => {});
 
@@ -894,7 +1111,7 @@ export function useFloatingSession() {
     if (!captureArmed || !sessionInfo) return;
     void startSystemAudio();
     return () => {
-      invoke("stop_system_audio_transcription").catch(() => {});
+      void audioControllerRef.current.stopAudioSession("system", "capture_disarmed_or_session_change");
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [captureArmed, sessionInfo?.sessionId]);
@@ -911,6 +1128,7 @@ export function useFloatingSession() {
         handleUserTranscriptRef.current(text, true);
       } else {
         setMicInterimTranscript(text);
+        handleUserTranscriptRef.current(text, false);
       }
     }).then((fn) => { unlistenTx = fn; }).catch(() => {});
 
@@ -1173,6 +1391,22 @@ export function useFloatingSession() {
       .reverse()
       .find((m) => m.sender === "AI" && m.text?.trim())?.text
       ?.trim();
+    const safeResponseIndex =
+      aiResponses.length > 0
+        ? Math.min(currentResponseIndex, aiResponses.length - 1)
+        : 0;
+    const selectedAiMessage =
+      aiResponses[safeResponseIndex] ||
+      [...aiChat].reverse().find((m) => m.sender === "AI" && m.text?.trim()) ||
+      null;
+    const selectedAnswerText = selectedAiMessage?.text?.trim() || "";
+    const selectedAnswerQuestion = selectedAiMessage?.question?.trim() || "";
+    const selectedAnswerCodeBlocks = selectedAnswerText
+      ? extractCodeBlocks(selectedAnswerText)
+      : [];
+    const selectedAnswerTopic = deriveAnswerTopicFromText(
+      `${selectedAnswerQuestion} ${selectedAnswerText}`,
+    );
     const payload: AIAnswerRequestPayload = {
       transcript:
         recentTranscriptWindow.length > 0
@@ -1185,6 +1419,13 @@ export function useFloatingSession() {
       ...(latestAiAnswer
         ? { previousCodeBlocks: extractCodeBlocks(latestAiAnswer) }
         : {}),
+      ...(selectedAiMessage?.id ? { selectedAnswerId: selectedAiMessage.id } : {}),
+      ...(selectedAnswerQuestion ? { selectedAnswerQuestion } : {}),
+      ...(selectedAnswerText ? { selectedAnswerText } : {}),
+      ...(selectedAnswerCodeBlocks.length > 0
+        ? { selectedAnswerCodeBlocks }
+        : {}),
+      ...(selectedAnswerTopic ? { selectedAnswerTopic } : {}),
       answerMode: "auto",
       sourcePlatform: "tauri",
     };
@@ -1214,7 +1455,14 @@ export function useFloatingSession() {
     } finally {
       isEmittingRef.current = false;
     }
-  }, [handleAiAnswer, tabInterimTranscript, lastMessage, aiChat]);
+  }, [
+    handleAiAnswer,
+    tabInterimTranscript,
+    lastMessage,
+    aiChat,
+    aiResponses,
+    currentResponseIndex,
+  ]);
 
   const handleAnalyzeScreenClick = useCallback(
     async (screenshotBlob?: Blob) => {
@@ -1276,48 +1524,23 @@ export function useFloatingSession() {
     async (messageId: string) => {
       const info = sessionInfoRef.current;
       if (!info || !messageId) return;
-
-      // Try to resolve fresher context using live interim text only.
-      // If live text is empty, let handleRegenerate use the cached question
-      // from the message itself - DO NOT use transcript_fallback which joins
-      // all messages and causes duplicate question loops.
-      const liveText = tabInterimTranscript.trim();
-      let questionOverride: string | undefined = undefined;
-
-      if (liveText) {
-        const freshResolved = resolveQuestionFromContext(
-          liveText,
-          messagesRef.current,
-          null,
-          lastAnswerTimestampRef.current,
-        );
-        // Only use fresh context if it's from live_interim or transcript_history
-        // (not transcript_fallback which joins all messages)
-        if (freshResolved && freshResolved.source !== "transcript_fallback") {
-          questionOverride = freshResolved.question;
-        }
-      }
-
-      console.log(
-        "[useFloatingSession] handleRegenerateResponse: fresh context resolve:",
-        questionOverride ? "live_context" : "cached_question",
-        questionOverride ? `"${questionOverride.slice(0, 120)}..."` : "(using cached question)",
-      );
-
-      await handleRegenerate(info.sessionId, messageId, selectedModelRef.current, questionOverride);
+      // Regenerate must replay the selected card's original generation context.
+      // Do not override with live transcript context here.
+      await handleRegenerate(info.sessionId, messageId, selectedModelRef.current);
     },
-    [handleRegenerate, tabInterimTranscript],
+    [handleRegenerate],
   );
 
   // ── Mic toggle ──────────────────────────────────────────────────────────────
 
   const handleToggleMic = useCallback(async () => {
     if (isMicActive || isMicConnecting) {
-      await invoke("stop_mic_transcription").catch(() => {});
+      await audioControllerRef.current.stopAudioSession("mic", "mic_toggle_off");
       setIsMicActive(false);
       setIsMicConnecting(false);
       setMicInterimTranscript("");
     } else if (sessionInfoRef.current) {
+      audioControllerRef.current.startAudioSession("mic", "mic_toggle_on");
       setIsMicConnecting(true);
       try {
         await invoke("start_mic_transcription", {
@@ -1330,6 +1553,22 @@ export function useFloatingSession() {
       }
     }
   }, [isMicActive, isMicConnecting]);
+
+  useEffect(() => {
+    return () => {
+      const hasActiveSession = !!sessionInfoRef.current?.sessionId;
+      if (hasActiveSession) {
+        if (import.meta.env.DEV) {
+          console.log("[audio-lifecycle] floatingUnmountAudioPreserved", {
+            sessionActive: true,
+            reason: "floating_unmount_preserve_system",
+          });
+        }
+        return;
+      }
+      void audioControllerRef.current.destroyAudioSession("floating_unmount");
+    };
+  }, []);
 
   const handleClearTranscript = useCallback(() => {
     setMicInterimTranscript("");
@@ -1399,7 +1638,16 @@ export function useFloatingSession() {
   }, [dispatch]);
 
   const toggleTranscriptExpanded = useCallback(() => {
-    dispatch(setIsTranscriptExpanded(!isTranscriptExpanded));
+    const nextExpanded = !isTranscriptExpanded;
+    dispatch(setIsTranscriptExpanded(nextExpanded));
+    if (!nextExpanded) {
+      if (import.meta.env.DEV) {
+        console.log("[audio-lifecycle] transcriptCollapseUiOnly", {
+          reason: "transcript_collapsed",
+          sessionActive: !!sessionInfoRef.current?.sessionId,
+        });
+      }
+    }
   }, [dispatch, isTranscriptExpanded]);
 
   const toggleResponsesExpanded = useCallback(() => {
@@ -1432,6 +1680,14 @@ export function useFloatingSession() {
   const interimTranscript = micInterimTranscript || tabInterimTranscript;
   const isTabActive = tabStatus === "transcribing";
   const isTabConnecting = tabStatus === "connecting";
+  const captureStatus =
+    isMicConnecting || isTabConnecting
+      ? "Reconnecting"
+      : isMicActive || isTabActive
+        ? "Live"
+        : sessionInfo
+          ? "Released"
+          : "Disconnected";
 
   return {
     // ── Redux state ──────────────────────────────────────────────────────────
@@ -1468,6 +1724,7 @@ export function useFloatingSession() {
     interimTranscript,
     isTabActive,
     isTabConnecting,
+    captureStatus,
     formattedTime,
 
     // ── Action handlers ──────────────────────────────────────────────────────

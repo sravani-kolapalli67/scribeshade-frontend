@@ -426,6 +426,7 @@ export const useDeepgram = ({
   useEffect(() => { startTranscriptionRef.current = startTranscription; }, [startTranscription]);
 
   const stopTranscription = useCallback(() => {
+    if (import.meta.env.DEV) console.log("[audio-lifecycle] audioSessionStopped", { source: "useDeepgram", mode: "mic" });
     intentionalStopRef.current = true;
     if (retryTimerRef.current) {
       clearTimeout(retryTimerRef.current);
@@ -442,10 +443,12 @@ export const useDeepgram = ({
         socketRef.current.send(JSON.stringify({ type: "CloseStream" }));
       }
       socketRef.current.close();
+      if (import.meta.env.DEV) console.log("[audio-lifecycle] websocketClosed", { source: "useDeepgram", mode: "mic" });
       socketRef.current = null;
     }
     if (mediaRecorderRef.current?.state === "recording") {
       mediaRecorderRef.current.stop();
+      if (import.meta.env.DEV) console.log("[audio-lifecycle] mediaRecorderStopped", { source: "useDeepgram", mode: "mic" });
     }
     mediaRecorderRef.current = null;
 
@@ -457,6 +460,7 @@ export const useDeepgram = ({
     if (cachedMicStreamRef.current) {
       cachedMicStreamRef.current.getTracks().forEach((track) => track.stop());
       cachedMicStreamRef.current = null;
+      if (import.meta.env.DEV) console.log("[audio-lifecycle] mediaTracksReleased", { source: "useDeepgram", mode: "mic" });
     }
 
     setIsTranscribing(false);

@@ -76,6 +76,7 @@ export const TranscriptBubble: React.FC<TranscriptBubbleProps> = ({
             text
           ) : (
             <InlineEditableTranscriptText
+              messageId={id}
               value={text}
               patchedByUser={patchedByUser}
               onPatch={(nextText) => onPatch?.(id, nextText)}

@@ -154,6 +154,7 @@ export const endSessionThunk = createAsyncThunk<void, EndSessionArgs | void>(
       : null;
 
     await Promise.all([
+      invoke("stop_all_audio_transcription").catch(() => {}),
       fetch(`${BACKEND_URL}/api/session/${sessionInfo.sessionId}/deactivate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

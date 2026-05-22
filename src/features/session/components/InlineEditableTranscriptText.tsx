@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 
 interface InlineEditableTranscriptTextProps {
+  messageId?: string;
   value: string;
   patchedByUser?: boolean;
   onPatch: (nextText: string) => void;
@@ -10,6 +11,7 @@ interface InlineEditableTranscriptTextProps {
 }
 
 export function InlineEditableTranscriptText({
+  messageId,
   value,
   patchedByUser = false,
   onPatch,
@@ -56,11 +58,24 @@ export function InlineEditableTranscriptText({
     commit(nextValue);
   }, [commit]);
 
+  const emitEditingState = useCallback(
+    (isEditingNow: boolean) => {
+      if (!messageId) return;
+      window.dispatchEvent(
+        new CustomEvent("scribeshade:transcript-editing", {
+          detail: { messageId, isEditing: isEditingNow },
+        }),
+      );
+    },
+    [messageId],
+  );
+
   useEffect(
     () => () => {
       if (timerRef.current) clearTimeout(timerRef.current);
+      emitEditingState(false);
     },
-    [],
+    [emitEditingState],
   );
 
   return (
@@ -76,11 +91,15 @@ export function InlineEditableTranscriptText({
           "cursor-text",
           className,
         )}
-        onFocus={() => setIsEditing(true)}
+        onFocus={() => {
+          setIsEditing(true);
+          emitEditingState(true);
+        }}
         onBlur={() => {
           const next = rootRef.current?.textContent || "";
           flushCommit(next);
           setIsEditing(false);
+          emitEditingState(false);
         }}
         onInput={() => {
           const next = rootRef.current?.textContent || "";
