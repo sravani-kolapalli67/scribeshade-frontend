@@ -291,6 +291,7 @@ export default function Sessions() {
           const rowStatus = row.original.status;
           const isEnded =
             rowStatus === "COMPLETED" ||
+            rowStatus === "AUTO_ENDED" ||
             rowStatus === "Ended" ||
             !!row.original.endedAt;
           const statusConfig: Record<
@@ -312,6 +313,10 @@ export default function Sessions() {
             COMPLETED: {
               label: "Completed",
               className: "bg-muted text-foreground border-border",
+            },
+            AUTO_ENDED: {
+              label: "Auto Ended",
+              className: "bg-orange-50 text-orange-700 border-orange-300",
             },
             CREDIT_EXHAUSTED: {
               label: "Out of Credits",
@@ -381,6 +386,7 @@ export default function Sessions() {
             {(row.original.status === "PRE_CHECK" ||
               (!row.original.endedAt &&
                 row.original.status !== "COMPLETED" &&
+                row.original.status !== "AUTO_ENDED" &&
                 row.original.status !== "CREDIT_EXHAUSTED" &&
                 row.original.status !== "FORCE_ENDED" &&
                 row.original.status !== "ABANDONED")) && (

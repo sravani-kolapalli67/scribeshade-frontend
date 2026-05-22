@@ -129,12 +129,111 @@ function isQuestionLike(text: string): boolean {
 
 function deriveAnswerTopicFromText(text: string): string {
   const t = (text || "").toLowerCase();
-  if (/\b(sql|postgres|postgresql|query|join|table|index)\b/.test(t)) return "sql";
-  if (/\b(mongodb|mongo|aggregation|pipeline|nosql)\b/.test(t)) return "mongodb";
+  if (/\b(mongoose|mongodb|mongo|aggregation|pipeline|nosql|collection|schema|event logs?|user events?)\b/.test(t)) return "mongodb";
+  if (/\b(sql|postgres|postgresql|select|join|table|index)\b/.test(t)) return "sql";
   if (/\b(react|jsx|hooks|component)\b/.test(t)) return "react";
   if (/\b(pyspark|spark|datalake|databricks)\b/.test(t)) return "pyspark";
   if (/\b(node|express|api|backend)\b/.test(t)) return "backend";
   return "general";
+}
+
+function isWeakDeicticQuestion(text: string): boolean {
+  const t = normalizeLineForDedup(text || "");
+  if (!t) return false;
+  return /^(that|this|that approach|this approach|explain that|explain this|can you explain that|can you explain this|tell me more|tell me more about that|how so|why|explain it|continue)\??$/.test(
+    t,
+  );
+}
+
+function reconstructWeakFollowupQuestion(
+  recentTranscriptWindow: string[],
+  speakerSeparatedTranscript: { content: string }[],
+  currentQuestion: string,
+): {
+  weakFollowupDetected: boolean;
+  reconstructedCurrentQuestion: string;
+  reconstructionChunksUsed: string[];
+} {
+  const original = (currentQuestion || "").trim();
+  const weakFollowupDetected = isWeakDeicticQuestion(original);
+  if (!weakFollowupDetected) {
+    return {
+      weakFollowupDetected: false,
+      reconstructedCurrentQuestion: original,
+      reconstructionChunksUsed: [],
+    };
+  }
+
+  const topicHints = [
+    "mongodb",
+    "mongo",
+    "mongoose",
+    "user event",
+    "user events",
+    "event logs",
+    "tracking",
+    "project",
+    "previous",
+    "mentioned",
+    "used",
+    "approach",
+  ];
+
+  const baseChunks = speakerSeparatedTranscript.length
+    ? speakerSeparatedTranscript.map((e) => e.content || "")
+    : recentTranscriptWindow.map((line) => line.replace(/^\[[^\]]+\]:\s*/, ""));
+
+  const candidates = baseChunks
+    .slice(-10)
+    .map((c) => (c || "").trim())
+    .filter(Boolean);
+
+  const deduped: string[] = [];
+  for (const c of candidates) {
+    const isDup = deduped.some((d) => areNearDuplicateTexts(d, c));
+    if (!isDup) deduped.push(c);
+  }
+
+  const scored = deduped.map((chunk) => {
+    const n = normalizeLineForDedup(chunk);
+    let score = 0;
+    for (const hint of topicHints) {
+      if (n.includes(hint)) score += 2;
+    }
+    if (/[?]/.test(chunk)) score += 1;
+    return { chunk, score };
+  });
+
+  const relevant = [...scored]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 8)
+    .sort(
+      (a, b) =>
+        deduped.indexOf(a.chunk) - deduped.indexOf(b.chunk),
+    )
+    .map((x) => x.chunk);
+
+  const merged = deduplicatePhrases(
+    relevant.join(" ").replace(/\s+/g, " ").trim(),
+  );
+  if (!merged) {
+    return {
+      weakFollowupDetected: true,
+      reconstructedCurrentQuestion: original,
+      reconstructionChunksUsed: relevant,
+    };
+  }
+
+  const suffix = /\?$/.test(original) ? original : `${original}?`;
+  const reconstructedCurrentQuestion = /(\bthat\b|\bthis\b|\bapproach\b)/i.test(original)
+    ? `${merged.replace(/[?]+$/g, "")}. ${suffix}`.replace(/\s+/g, " ").trim()
+    : merged;
+
+  return {
+    weakFollowupDetected: true,
+    reconstructedCurrentQuestion,
+    reconstructionChunksUsed: relevant,
+  };
 }
 
 /**
@@ -202,6 +301,15 @@ export default function ActiveSession() {
     if (!isTauri()) return;
     invoke("set_session_active", { active: true });
     return () => {
+      const preserveFloatingSession = !!sessionStorage.getItem("scribeshade.session-init");
+      if (preserveFloatingSession) {
+        if (import.meta.env.DEV) {
+          console.log("[audio-lifecycle] mainUnmountPreservedForFloatingSession", {
+            reason: "active_session_unmount_hmr_or_hidden_main",
+          });
+        }
+        return;
+      }
       invoke("set_session_active", { active: false });
       void audioControllerRef.current.destroyAudioSession("active_session_unmount");
     };
@@ -509,7 +617,14 @@ export default function ActiveSession() {
   // The parent only cleans up screen stream and internal refs.
   useEffect(() => {
     return () => {
-      void audioControllerRef.current.destroyAudioSession("component_unmount");
+      const preserveFloatingSession = isTauri() && !!sessionStorage.getItem("scribeshade.session-init");
+      if (!preserveFloatingSession) {
+        void audioControllerRef.current.destroyAudioSession("component_unmount");
+      } else if (import.meta.env.DEV) {
+        console.log("[audio-lifecycle] componentUnmountPreservedForFloatingSession", {
+          reason: "component_unmount_hmr_or_hidden_main",
+        });
+      }
       // Stop screen share stream (not handled by hooks)
       try {
         if (stream) {
@@ -1498,9 +1613,24 @@ export default function ActiveSession() {
     const selectedAnswerTopic = deriveAnswerTopicFromText(
       `${selectedAnswerQuestion} ${selectedAnswerText}`,
     );
+    const followupReconstruction = reconstructWeakFollowupQuestion(
+      recentTranscriptWindow,
+      speakerSeparatedTranscript,
+      bestCurrentQuestion,
+    );
+    const effectiveCurrentQuestion =
+      followupReconstruction.reconstructedCurrentQuestion || bestCurrentQuestion;
+    console.log("[AI Answer] followupQuestionReconstruction", {
+      originalCurrentQuestion: bestCurrentQuestion,
+      weakFollowupDetected: followupReconstruction.weakFollowupDetected,
+      reconstructedCurrentQuestion: followupReconstruction.reconstructedCurrentQuestion,
+      reconstructionChunksUsed: followupReconstruction.reconstructionChunksUsed,
+      selectedAnswerTopic,
+    });
+
     const payload: AIAnswerRequestPayload = {
       transcript: transcriptText,
-      currentQuestion: bestCurrentQuestion,
+      currentQuestion: effectiveCurrentQuestion,
       recentTranscriptWindow,
       speakerSeparatedTranscript,
       ...(latestAiAnswer ? { previousAiAnswer: latestAiAnswer } : {}),

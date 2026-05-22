@@ -12,7 +12,7 @@ use url::Url as NavUrl;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod deepgram;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use deepgram::{DeepgramConfig, SttChannel};
+use deepgram::{DeepgramConfig, SttChannel, SystemHealthAtoms, SystemHealthPayload};
 
 static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -61,6 +61,29 @@ fn now_epoch_millis_string() -> String {
         Ok(dur) => dur.as_millis().to_string(),
         Err(_) => "0".to_string(),
     }
+}
+
+fn now_epoch_millis_u64() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(dur) => dur.as_millis() as u64,
+        Err(_) => 0,
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn emit_system_health_event(app: &AppHandle, generation: u64, state: &str) {
+    let payload = SystemHealthPayload {
+        channel: "system".to_string(),
+        capture_running: SYSTEM_STT_RUNNING.load(Ordering::SeqCst),
+        deepgram_running: SYSTEM_DEEPGRAM_RUNNING.load(Ordering::SeqCst),
+        pcm_frames_sent: SYSTEM_PCM_FRAMES_SENT.load(Ordering::SeqCst),
+        last_pcm_at: SYSTEM_LAST_PCM_AT.load(Ordering::SeqCst),
+        empty_final_streak: SYSTEM_EMPTY_FINAL_STREAK.load(Ordering::SeqCst),
+        generation,
+        state: state.to_string(),
+    };
+    let _ = app.emit("stt:health:system", payload);
 }
 
 #[tauri::command]
@@ -169,6 +192,14 @@ static SYSTEM_STT_RUNNING: AtomicBool = AtomicBool::new(false);
 static SYSTEM_STT_GENERATION: AtomicU64 = AtomicU64::new(0);
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 static SYSTEM_STT_STATE: AtomicU8 = AtomicU8::new(AUDIO_STOPPED);
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+static SYSTEM_DEEPGRAM_RUNNING: AtomicBool = AtomicBool::new(false);
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+static SYSTEM_PCM_FRAMES_SENT: AtomicU64 = AtomicU64::new(0);
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+static SYSTEM_LAST_PCM_AT: AtomicU64 = AtomicU64::new(0);
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+static SYSTEM_EMPTY_FINAL_STREAK: AtomicU64 = AtomicU64::new(0);
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 static MIC_STT_RUNNING: AtomicBool = AtomicBool::new(false);
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1426,14 +1457,23 @@ async fn start_system_audio_transcription(
     let tx_capture = tx_arc.clone();
     let my_gen = SYSTEM_STT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     SYSTEM_STT_RUNNING.store(true, Ordering::SeqCst);
+    SYSTEM_DEEPGRAM_RUNNING.store(false, Ordering::SeqCst);
+    SYSTEM_PCM_FRAMES_SENT.store(0, Ordering::SeqCst);
+    SYSTEM_LAST_PCM_AT.store(0, Ordering::SeqCst);
+    SYSTEM_EMPTY_FINAL_STREAK.store(0, Ordering::SeqCst);
+    emit_system_health_event(&app, my_gen, "starting");
+    eprintln!("[stt:system] systemCaptureStarted");
 
     // but PCM goes straight into the broadcast channel — no axum WS server.
+    let app_capture = app.clone();
     std::thread::spawn(move || {
         let tx = tx_capture;
+        let app_for_callback = app_capture.clone();
         let content = match SCShareableContent::get() {
             Ok(c) => c,
             Err(e) => {
                 SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
+                emit_system_health_event(&app_capture, my_gen, "error");
                 let _ = init_tx.send(Err(format!(
                     "Screen Recording permission denied: {e:?}. \
                      Grant in System Settings → Privacy & Security → Screen Recording."
@@ -1445,6 +1485,7 @@ async fn start_system_audio_transcription(
             Some(d) => d,
             None => {
                 SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
+                emit_system_health_event(&app_capture, my_gen, "error");
                 let _ = init_tx.send(Err("No display found for system audio.".into()));
                 return;
             }
@@ -1494,17 +1535,30 @@ async fn start_system_audio_transcription(
                         }
                     }
                 }
-                if !pcm.is_empty() { let _ = tx.send(Arc::new(pcm)); }
+                if !pcm.is_empty() {
+                    let prev = SYSTEM_PCM_FRAMES_SENT.fetch_add(1, Ordering::SeqCst);
+                    SYSTEM_LAST_PCM_AT.store(now_epoch_millis_u64(), Ordering::SeqCst);
+                    if prev == 0 {
+                        eprintln!("[stt:system] systemFirstPcmFrame");
+                        emit_system_health_event(&app_for_callback, my_gen, "capturing");
+                    } else if prev % 50 == 0 {
+                        eprintln!("[stt:system] systemPcmHeartbeat");
+                        emit_system_health_event(&app_for_callback, my_gen, "capturing");
+                    }
+                    let _ = tx.send(Arc::new(pcm));
+                }
             },
             SCStreamOutputType::Audio,
         );
         if let Err(e) = stream.start_capture() {
             SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
+            emit_system_health_event(&app_capture, my_gen, "error");
             let _ = init_tx.send(Err(format!(
                 "System audio capture failed: {e:?}. Check Screen Recording permission."
             )));
             return;
         }
+        emit_system_health_event(&app_capture, my_gen, "capturing");
         let _ = init_tx.send(Ok(()));
         while SYSTEM_STT_RUNNING.load(Ordering::Relaxed)
             && SYSTEM_STT_GENERATION.load(Ordering::Relaxed) == my_gen
@@ -1512,16 +1566,20 @@ async fn start_system_audio_transcription(
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         let _ = stream.stop_capture();
+        eprintln!("[stt:system] systemCaptureThreadExited");
+        emit_system_health_event(&app_capture, my_gen, "stopped");
     });
 
     match tokio::time::timeout(std::time::Duration::from_secs(10), init_rx).await {
         Ok(Ok(Ok(()))) => {
             SYSTEM_STT_STATE.store(AUDIO_RUNNING_STATE, Ordering::SeqCst);
+            emit_system_health_event(&app, my_gen, "capturing");
         }
         Ok(Ok(Err(e))) => {
             eprintln!("[stt:system macos] SCKit init FAILED: {e}");
             SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
             SYSTEM_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+            emit_system_health_event(&app, my_gen, "error");
             return Err(e);
         }
         _ => {
@@ -1529,9 +1587,29 @@ async fn start_system_audio_transcription(
             eprintln!("[stt:system macos] SCKit init TIMEOUT");
             SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
             SYSTEM_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+            emit_system_health_event(&app, my_gen, "error");
             return Err(msg);
         }
     }
+    let app_watchdog = app.clone();
+    tokio::spawn(async move {
+        loop {
+            if !SYSTEM_STT_RUNNING.load(Ordering::SeqCst)
+                || SYSTEM_STT_GENERATION.load(Ordering::SeqCst) != my_gen
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let last_pcm = SYSTEM_LAST_PCM_AT.load(Ordering::SeqCst);
+            if last_pcm == 0 {
+                continue;
+            }
+            let now = now_epoch_millis_u64();
+            if now.saturating_sub(last_pcm) > 10_000 {
+                emit_system_health_event(&app_watchdog, my_gen, "starved");
+            }
+        }
+    });
     let app_c = app.clone();
     tokio::spawn(async move {
         let pcm_rx = tx_arc.subscribe();
@@ -1550,6 +1628,13 @@ async fn start_system_audio_transcription(
             &SYSTEM_STT_RUNNING,
             &SYSTEM_STT_GENERATION,
             my_gen,
+            Some(SystemHealthAtoms {
+                capture_running: &SYSTEM_STT_RUNNING,
+                deepgram_running: &SYSTEM_DEEPGRAM_RUNNING,
+                pcm_frames_sent: &SYSTEM_PCM_FRAMES_SENT,
+                last_pcm_at: &SYSTEM_LAST_PCM_AT,
+                empty_final_streak: &SYSTEM_EMPTY_FINAL_STREAK,
+            }),
         )
         .await;
         if SYSTEM_STT_GENERATION.load(Ordering::SeqCst) == my_gen {
@@ -1566,6 +1651,8 @@ fn stop_system_audio_transcription() {
     SYSTEM_STT_GENERATION.fetch_add(1, Ordering::SeqCst);
     SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
     SYSTEM_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+    SYSTEM_DEEPGRAM_RUNNING.store(false, Ordering::SeqCst);
+    SYSTEM_EMPTY_FINAL_STREAK.store(0, Ordering::SeqCst);
 }
 
 // ── macOS: cpal mic → Deepgram ────────────────────────────────────────────────
@@ -1697,6 +1784,7 @@ async fn start_mic_transcription(
             &MIC_STT_RUNNING,
             &MIC_STT_GENERATION,
             my_gen,
+            None,
         )
         .await;
         if MIC_STT_GENERATION.load(Ordering::SeqCst) == my_gen {
@@ -1755,9 +1843,17 @@ async fn start_system_audio_transcription(
     let tx_capture = tx_arc.clone();
     let my_gen = SYSTEM_STT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     SYSTEM_STT_RUNNING.store(true, Ordering::SeqCst);
+    SYSTEM_DEEPGRAM_RUNNING.store(false, Ordering::SeqCst);
+    SYSTEM_PCM_FRAMES_SENT.store(0, Ordering::SeqCst);
+    SYSTEM_LAST_PCM_AT.store(0, Ordering::SeqCst);
+    SYSTEM_EMPTY_FINAL_STREAK.store(0, Ordering::SeqCst);
+    emit_system_health_event(&app, my_gen, "starting");
+    eprintln!("[stt:system] systemCaptureStarted");
 
+    let app_capture = app.clone();
     std::thread::spawn(move || {
         let tx = tx_capture;
+        let app_for_callback = app_capture.clone();
         let err_fn = |e| eprintln!("[wasapi-stt] stream error: {e}");
         let stream = match config.sample_format() {
             cpal::SampleFormat::F32 => device.build_input_stream(
@@ -1771,6 +1867,17 @@ async fn start_system_audio_transcription(
                         v.to_le_bytes()
                     }).collect();
                     let _ = tx.send(Arc::new(pcm));
+                    if !pcm.is_empty() {
+                        let prev = SYSTEM_PCM_FRAMES_SENT.fetch_add(1, Ordering::SeqCst);
+                        SYSTEM_LAST_PCM_AT.store(now_epoch_millis_u64(), Ordering::SeqCst);
+                        if prev == 0 {
+                            eprintln!("[stt:system] systemFirstPcmFrame");
+                            emit_system_health_event(&app_for_callback, my_gen, "capturing");
+                        } else if prev % 50 == 0 {
+                            eprintln!("[stt:system] systemPcmHeartbeat");
+                            emit_system_health_event(&app_for_callback, my_gen, "capturing");
+                        }
+                    }
                 }, err_fn, None,
             ),
             cpal::SampleFormat::I16 => device.build_input_stream(
@@ -1784,10 +1891,22 @@ async fn start_system_audio_transcription(
                         mono.to_le_bytes()
                     }).collect();
                     let _ = tx.send(Arc::new(pcm));
+                    if !pcm.is_empty() {
+                        let prev = SYSTEM_PCM_FRAMES_SENT.fetch_add(1, Ordering::SeqCst);
+                        SYSTEM_LAST_PCM_AT.store(now_epoch_millis_u64(), Ordering::SeqCst);
+                        if prev == 0 {
+                            eprintln!("[stt:system] systemFirstPcmFrame");
+                            emit_system_health_event(&app_for_callback, my_gen, "capturing");
+                        } else if prev % 50 == 0 {
+                            eprintln!("[stt:system] systemPcmHeartbeat");
+                            emit_system_health_event(&app_for_callback, my_gen, "capturing");
+                        }
+                    }
                 }, err_fn, None,
             ),
             _ => {
                 SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
+                emit_system_health_event(&app_capture, my_gen, "error");
                 let _ = init_tx.send(Err("Unsupported sample format".into()));
                 return;
             }
@@ -1796,35 +1915,64 @@ async fn start_system_audio_transcription(
             Ok(s) => {
                 if let Err(e) = s.play() {
                     SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
+                    emit_system_health_event(&app_capture, my_gen, "error");
                     let _ = init_tx.send(Err(format!("Failed to start system audio stream: {e}")));
                     return;
                 }
+                emit_system_health_event(&app_capture, my_gen, "capturing");
                 let _ = init_tx.send(Ok(()));
                 while SYSTEM_STT_RUNNING.load(Ordering::Relaxed)
                     && SYSTEM_STT_GENERATION.load(Ordering::Relaxed) == my_gen
                 {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
+                eprintln!("[stt:system] systemCaptureThreadExited");
+                emit_system_health_event(&app_capture, my_gen, "stopped");
             }
             Err(e) => {
                 SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
+                emit_system_health_event(&app_capture, my_gen, "error");
                 let _ = init_tx.send(Err(format!("Failed to open loopback device: {e}")));
             }
         }
     });
 
     match tokio::time::timeout(std::time::Duration::from_secs(8), init_rx).await {
-        Ok(Ok(Ok(()))) => { SYSTEM_STT_STATE.store(AUDIO_RUNNING_STATE, Ordering::SeqCst); }
+        Ok(Ok(Ok(()))) => {
+            SYSTEM_STT_STATE.store(AUDIO_RUNNING_STATE, Ordering::SeqCst);
+            emit_system_health_event(&app, my_gen, "capturing");
+        }
         Ok(Ok(Err(e))) => {
             SYSTEM_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+            emit_system_health_event(&app, my_gen, "error");
             return Err(e);
         }
         _ => {
             SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
             SYSTEM_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+            emit_system_health_event(&app, my_gen, "error");
             return Err("System audio STT stream timed out".into());
         }
     }
+    let app_watchdog = app.clone();
+    tokio::spawn(async move {
+        loop {
+            if !SYSTEM_STT_RUNNING.load(Ordering::SeqCst)
+                || SYSTEM_STT_GENERATION.load(Ordering::SeqCst) != my_gen
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let last_pcm = SYSTEM_LAST_PCM_AT.load(Ordering::SeqCst);
+            if last_pcm == 0 {
+                continue;
+            }
+            let now = now_epoch_millis_u64();
+            if now.saturating_sub(last_pcm) > 10_000 {
+                emit_system_health_event(&app_watchdog, my_gen, "starved");
+            }
+        }
+    });
 
     let app_c = app.clone();
     tokio::spawn(async move {
@@ -1844,6 +1992,13 @@ async fn start_system_audio_transcription(
             &SYSTEM_STT_RUNNING,
             &SYSTEM_STT_GENERATION,
             my_gen,
+            Some(SystemHealthAtoms {
+                capture_running: &SYSTEM_STT_RUNNING,
+                deepgram_running: &SYSTEM_DEEPGRAM_RUNNING,
+                pcm_frames_sent: &SYSTEM_PCM_FRAMES_SENT,
+                last_pcm_at: &SYSTEM_LAST_PCM_AT,
+                empty_final_streak: &SYSTEM_EMPTY_FINAL_STREAK,
+            }),
         )
         .await;
         if SYSTEM_STT_GENERATION.load(Ordering::SeqCst) == my_gen {
@@ -1860,6 +2015,8 @@ fn stop_system_audio_transcription() {
     SYSTEM_STT_GENERATION.fetch_add(1, Ordering::SeqCst);
     SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
     SYSTEM_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+    SYSTEM_DEEPGRAM_RUNNING.store(false, Ordering::SeqCst);
+    SYSTEM_EMPTY_FINAL_STREAK.store(0, Ordering::SeqCst);
 }
 
 // ── Windows: cpal mic input → Deepgram ───────────────────────────────────────
@@ -1991,6 +2148,7 @@ async fn start_mic_transcription(
             &MIC_STT_RUNNING,
             &MIC_STT_GENERATION,
             my_gen,
+            None,
         )
         .await;
         if MIC_STT_GENERATION.load(Ordering::SeqCst) == my_gen {

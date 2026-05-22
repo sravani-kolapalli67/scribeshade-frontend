@@ -314,8 +314,16 @@ function normalizeProjectAnswerMarkdown(question: string, answer: string): strin
   if (!answer?.trim() || !isProjectQuestion(question)) return answer;
   if (/^\s*-\s+\*\*[^*\n]+\*\*\s*(?:—|-|:)/m.test(answer)) return answer;
 
-  const inlineNumberedBoundary = /\s+(?=\d{1,2}\.\s+[A-Z])/g;
-  const inlineNumberedParts = answer
+  // Normalize common broken model output:
+  // - "1.ProjectName" (missing space)
+  // - "...platform.2.ProjectName" (missing newline before next item)
+  // so markdown list conversion can split reliably.
+  const normalizedNumbering = answer
+    .replace(/([^\n])(\d{1,2})\.\s*(?=[A-Z])/g, "$1\n$2. ")
+    .replace(/(^|\n)(\d{1,2})\.\s*(?=[A-Z])/g, "$1$2. ");
+
+  const inlineNumberedBoundary = /\s+(?=\d{1,2}\.\s*[A-Z])/g;
+  const inlineNumberedParts = normalizedNumbering
     .replace(/\s*•\s*/g, " • ")
     .split(inlineNumberedBoundary)
     .map((part) => part.trim())
@@ -324,7 +332,7 @@ function normalizeProjectAnswerMarkdown(question: string, answer: string): strin
   if (inlineNumberedParts.length > 1) {
     const output: string[] = [];
     for (const part of inlineNumberedParts) {
-      const projectMatch = part.match(/^(\d{1,2})\.\s+([\s\S]*)$/);
+      const projectMatch = part.match(/^(\d{1,2})\.\s*([\s\S]*)$/);
       if (!projectMatch) {
         output.push(part.replace(/:\s*$/, ":"));
         continue;
@@ -1027,7 +1035,7 @@ const FloatingApp: React.FC = () => {
                   </Tooltip>
                   <button
                     type="button"
-                    onClick={() => { void session.startSystemAudio(); }}
+                    onClick={() => { void session.retrySystemAudio(); }}
                     className="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider bg-white/10 hover:bg-white/20 text-white border border-white/10 transition-colors"
                   >
                     Retry
@@ -1061,6 +1069,15 @@ const FloatingApp: React.FC = () => {
             )}>
               {session.captureStatus}
             </div>
+            {session.captureStatus === "Error" && (
+              <button
+                type="button"
+                onClick={() => { void session.retrySystemAudio(); }}
+                className="px-2 py-1 rounded-lg border text-[10px] font-semibold tracking-wide bg-white/10 hover:bg-white/20 text-white border-white/15 transition-colors"
+              >
+                Retry
+              </button>
+            )}
             <Tooltip>
               <TooltipTrigger asChild>
                 <button

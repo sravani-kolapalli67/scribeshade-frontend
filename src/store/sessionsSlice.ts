@@ -10,7 +10,8 @@ type SessionStatus =
   | "COMPLETED"
   | "CREDIT_EXHAUSTED"
   | "FORCE_ENDED"
-  | "ABANDONED";
+  | "ABANDONED"
+  | "AUTO_ENDED";
 
 export interface Session {
   id: string;

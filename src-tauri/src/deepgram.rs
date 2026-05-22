@@ -56,6 +56,49 @@ pub struct SttStatusPayload {
     pub error: Option<String>,
 }
 
+/// System-channel health payload emitted on `stt:health:system`.
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemHealthPayload {
+    pub channel: String,
+    pub capture_running: bool,
+    pub deepgram_running: bool,
+    pub pcm_frames_sent: u64,
+    pub last_pcm_at: u64,
+    pub empty_final_streak: u64,
+    pub generation: u64,
+    pub state: String,
+}
+
+#[derive(Copy, Clone)]
+pub struct SystemHealthAtoms {
+    pub capture_running: &'static AtomicBool,
+    pub deepgram_running: &'static AtomicBool,
+    pub pcm_frames_sent: &'static AtomicU64,
+    pub last_pcm_at: &'static AtomicU64,
+    pub empty_final_streak: &'static AtomicU64,
+}
+
+fn emit_system_health(
+    app: &AppHandle,
+    atoms: Option<&SystemHealthAtoms>,
+    generation: u64,
+    state: &str,
+) {
+    let Some(h) = atoms else { return };
+    let payload = SystemHealthPayload {
+        channel: "system".to_string(),
+        capture_running: h.capture_running.load(Ordering::SeqCst),
+        deepgram_running: h.deepgram_running.load(Ordering::SeqCst),
+        pcm_frames_sent: h.pcm_frames_sent.load(Ordering::SeqCst),
+        last_pcm_at: h.last_pcm_at.load(Ordering::SeqCst),
+        empty_final_streak: h.empty_final_streak.load(Ordering::SeqCst),
+        generation,
+        state: state.to_string(),
+    };
+    let _ = app.emit("stt:health:system", payload);
+}
+
 /// Which capture path this Deepgram session belongs to. Determines event
 /// channel names and log tags so callers cannot mismatch them.
 #[derive(Copy, Clone)]
@@ -160,10 +203,14 @@ pub async fn run_session(
     running: &'static AtomicBool,
     generation: &'static AtomicU64,
     my_gen: u64,
+    system_health: Option<SystemHealthAtoms>,
 ) {
     let tag = channel.log_tag();
     let status_evt = channel.status_event();
     let transcript_evt = channel.transcript_event();
+    if let Some(h) = system_health {
+        h.deepgram_running.store(false, Ordering::SeqCst);
+    }
 
     // ── Validate inputs before touching the network ─────────────────────────
     // An empty model or language causes Deepgram to return 400 Bad Request
@@ -252,6 +299,7 @@ pub async fn run_session(
             error: None,
         },
     );
+    emit_system_health(&app, system_health.as_ref(), my_gen, "starting");
 
     let mut req = match dg_url.as_str().into_client_request() {
         Ok(r) => r,
@@ -315,6 +363,9 @@ pub async fn run_session(
             };
             eprintln!("[{tag}] Deepgram connect FAILED: {detail}");
             running.store(false, Ordering::SeqCst);
+            if let Some(h) = system_health {
+                h.deepgram_running.store(false, Ordering::SeqCst);
+            }
             let _ = app.emit(
                 status_evt,
                 SttStatusPayload {
@@ -322,9 +373,16 @@ pub async fn run_session(
                     error: Some(format!("Deepgram connect failed: {detail}")),
                 },
             );
+            emit_system_health(&app, system_health.as_ref(), my_gen, "error");
             return;
         }
     };
+
+    if let Some(h) = system_health {
+        h.deepgram_running.store(true, Ordering::SeqCst);
+    }
+    eprintln!("[{tag}] systemDeepgramConnected");
+    emit_system_health(&app, system_health.as_ref(), my_gen, "connected");
 
     let _ = app.emit(
         status_evt,
@@ -344,6 +402,7 @@ pub async fn run_session(
         tokio::sync::oneshot::channel::<ExitReason>();
     let app_r = app.clone();
     let reader_gen = my_gen;
+    let reader_health = system_health;
     tokio::spawn(async move {
         let mut sender = Some(reader_done_tx);
         let send_once = |s: &mut Option<tokio::sync::oneshot::Sender<ExitReason>>,
@@ -380,11 +439,23 @@ pub async fn run_session(
                                     "[{tag}] finalReceived sourcePlatform=tauri channel={} textLength={}",
                                     tag, text_len
                                 );
+                                if let Some(h) = reader_health {
+                                    if text_len == 0 {
+                                        h.empty_final_streak.fetch_add(1, Ordering::SeqCst);
+                                    } else {
+                                        h.empty_final_streak.store(0, Ordering::SeqCst);
+                                    }
+                                    emit_system_health(&app_r, Some(&h), reader_gen, "connected");
+                                }
                             } else if text_len > 0 {
                                 eprintln!(
                                     "[{tag}] interimReceived sourcePlatform=tauri channel={} textLength={}",
                                     tag, text_len
                                 );
+                                if let Some(h) = reader_health {
+                                    h.empty_final_streak.store(0, Ordering::SeqCst);
+                                    emit_system_health(&app_r, Some(&h), reader_gen, "connected");
+                                }
                             }
 
                             // Emit final boundaries even when transcript text is empty.
@@ -421,6 +492,7 @@ pub async fn run_session(
 
     // ── Send loop: KeepAlive + PCM, stops on user stop / reader exit / error.
     let mut ka = tokio::time::interval(Duration::from_secs(8));
+    let mut health_tick = tokio::time::interval(Duration::from_secs(2));
     let exit_reason = loop {
         if !running.load(Ordering::Relaxed)
             || generation.load(Ordering::Relaxed) != my_gen
@@ -443,9 +515,15 @@ pub async fn run_session(
                     break ExitReason::SendError(e.to_string());
                 }
             }
+            _ = health_tick.tick() => {
+                emit_system_health(&app, system_health.as_ref(), my_gen, "connected");
+            }
             result = pcm_rx.recv() => {
                 match result {
                     Ok(pcm) => {
+                        if let Some(h) = system_health {
+                            h.pcm_frames_sent.fetch_add(1, Ordering::SeqCst);
+                        }
                         if let Err(e) = write.send(WsMsg::Binary((*pcm).clone())).await {
                             eprintln!("[{tag}] PCM send FAILED: {e}");
                             break ExitReason::SendError(e.to_string());
@@ -466,6 +544,10 @@ pub async fn run_session(
     let _ = write.send(WsMsg::Close(None)).await;
 
     running.store(false, Ordering::SeqCst);
+    if let Some(h) = system_health {
+        h.deepgram_running.store(false, Ordering::SeqCst);
+    }
+    eprintln!("[{tag}] systemDeepgramExited");
 
     // If the user stopped, prefer "idle" even if the reader reported a remote
     // close that arrived in the same instant.
@@ -476,6 +558,12 @@ pub async fn run_session(
     } else {
         exit_reason
     };
+    let final_state = if matches!(final_reason, ExitReason::UserStop) {
+        "stopped"
+    } else {
+        "error"
+    };
     let payload = final_reason.into_status();
     let _ = app.emit(status_evt, payload);
+    emit_system_health(&app, system_health.as_ref(), my_gen, final_state);
 }

@@ -168,6 +168,13 @@ const FALLBACK_MSG_COUNT = 12;
 const NEAR_DUPLICATE_GAP_MS = 2500;
 const STT_INTERIM_FALLBACK_MS = 1500;
 const MIN_INCLUDE_DUPLICATE_LEN = 20;
+const SYSTEM_EMPTY_FINAL_STORM_COUNT = 6;
+const SYSTEM_EMPTY_FINAL_STORM_WINDOW_MS = 10_000;
+const SYSTEM_NO_EVENTS_STALE_MS = 10_000;
+const SYSTEM_NO_MEANINGFUL_STALE_MS = 20_000;
+const SYSTEM_RESTART_MAX_PER_WINDOW = 3;
+const SYSTEM_RESTART_WINDOW_MS = 60_000;
+const SYSTEM_RESTART_BUDGET_RESET_MS = 75_000;
 type TranscriptInsertSource =
   | "stt:user"
   | "stt:interviewer"
@@ -181,6 +188,16 @@ type CommitOutcome =
   | { status: "patched"; id: string; reason?: string }
   | { status: "suppressed"; reason: string }
   | { status: "empty"; reason: string };
+type SystemHealthPayload = {
+  channel: "system";
+  captureRunning: boolean;
+  deepgramRunning: boolean;
+  pcmFramesSent: number;
+  lastPcmAt: number;
+  emptyFinalStreak: number;
+  generation: number;
+  state: string;
+};
 
 function normalizeLoose(text: string): string {
   return (text || "")
@@ -207,12 +224,111 @@ function areNearDuplicateTexts(a: string, b: string): boolean {
 
 function deriveAnswerTopicFromText(text: string): string {
   const t = (text || "").toLowerCase();
-  if (/\b(sql|postgres|postgresql|query|join|table|index)\b/.test(t)) return "sql";
-  if (/\b(mongodb|mongo|aggregation|pipeline|nosql)\b/.test(t)) return "mongodb";
+  if (/\b(mongoose|mongodb|mongo|aggregation|pipeline|nosql|collection|schema|event logs?|user events?)\b/.test(t)) return "mongodb";
+  if (/\b(sql|postgres|postgresql|select|join|table|index)\b/.test(t)) return "sql";
   if (/\b(react|jsx|hooks|component)\b/.test(t)) return "react";
   if (/\b(pyspark|spark|datalake|databricks)\b/.test(t)) return "pyspark";
   if (/\b(node|express|api|backend)\b/.test(t)) return "backend";
   return "general";
+}
+
+function isWeakDeicticQuestion(text: string): boolean {
+  const t = normalizeLoose(text || "");
+  if (!t) return false;
+  return /^(that|this|that approach|this approach|explain that|explain this|can you explain that|can you explain this|tell me more|tell me more about that|how so|why|explain it|continue)\??$/.test(
+    t,
+  );
+}
+
+function reconstructWeakFollowupQuestion(
+  recentTranscriptWindow: string[],
+  speakerSeparatedTranscript: { content: string }[],
+  currentQuestion: string,
+): {
+  weakFollowupDetected: boolean;
+  reconstructedCurrentQuestion: string;
+  reconstructionChunksUsed: string[];
+} {
+  const original = (currentQuestion || "").trim();
+  const weakFollowupDetected = isWeakDeicticQuestion(original);
+  if (!weakFollowupDetected) {
+    return {
+      weakFollowupDetected: false,
+      reconstructedCurrentQuestion: original,
+      reconstructionChunksUsed: [],
+    };
+  }
+
+  const topicHints = [
+    "mongodb",
+    "mongo",
+    "mongoose",
+    "user event",
+    "user events",
+    "event logs",
+    "tracking",
+    "project",
+    "previous",
+    "mentioned",
+    "used",
+    "approach",
+  ];
+
+  const baseChunks = speakerSeparatedTranscript.length
+    ? speakerSeparatedTranscript.map((e) => e.content || "")
+    : recentTranscriptWindow.map((line) => line.replace(/^\[[^\]]+\]:\s*/, ""));
+
+  const candidates = baseChunks
+    .slice(-10)
+    .map((c) => (c || "").trim())
+    .filter(Boolean);
+
+  const deduped: string[] = [];
+  for (const c of candidates) {
+    const isDup = deduped.some((d) => areNearDuplicateTexts(d, c));
+    if (!isDup) deduped.push(c);
+  }
+
+  const scored = deduped.map((chunk) => {
+    const n = normalizeLoose(chunk);
+    let score = 0;
+    for (const hint of topicHints) {
+      if (n.includes(hint)) score += 2;
+    }
+    if (/[?]/.test(chunk)) score += 1;
+    return { chunk, score };
+  });
+
+  const relevant = [...scored]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 8)
+    .sort(
+      (a, b) =>
+        deduped.indexOf(a.chunk) - deduped.indexOf(b.chunk),
+    )
+    .map((x) => x.chunk);
+
+  const merged = deduplicatePhrases(
+    relevant.join(" ").replace(/\s+/g, " ").trim(),
+  );
+  if (!merged) {
+    return {
+      weakFollowupDetected: true,
+      reconstructedCurrentQuestion: original,
+      reconstructionChunksUsed: relevant,
+    };
+  }
+
+  const suffix = /\?$/.test(original) ? original : `${original}?`;
+  const reconstructedCurrentQuestion = /(\bthat\b|\bthis\b|\bapproach\b)/i.test(original)
+    ? `${merged.replace(/[?]+$/g, "")}. ${suffix}`.replace(/\s+/g, " ").trim()
+    : merged;
+
+  return {
+    weakFollowupDetected: true,
+    reconstructedCurrentQuestion,
+    reconstructionChunksUsed: relevant,
+  };
 }
 
 function endsWithConnector(text: string): boolean {
@@ -584,6 +700,47 @@ export function useFloatingSession() {
   const [tabError, setTabError] = useState<string | null>(null);
   const [tabInterimTranscript, setTabInterimTranscript] = useState("");
   const [captureArmed, setCaptureArmed] = useState(false);
+  const [isSystemStale, setIsSystemStale] = useState(false);
+  const systemStartIssuedForSessionRef = useRef<string | null>(null);
+  const systemHealthIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const systemReacquireInFlightRef = useRef(false);
+  const systemHealthRef = useRef<{
+    lastSystemInterimAt: number;
+    lastSystemFinalAt: number;
+    lastMeaningfulSystemTranscriptAt: number;
+    lastSystemEventAt: number;
+    emptyFinalStreak: number;
+    emptyFinalWindowStartAt: number;
+    systemRestartCount: number;
+    systemRestartWindowStartAt: number;
+    lastSystemRestartAt: number;
+    lastHealthyAt: number;
+    lastPcmAt: number;
+    lastPcmFramesSent: number;
+    lastDeepgramRunningAt: number;
+    captureRunning: boolean;
+    deepgramRunning: boolean;
+    healthState: string;
+    isSystemSilent: boolean;
+  }>({
+    lastSystemInterimAt: 0,
+    lastSystemFinalAt: 0,
+    lastMeaningfulSystemTranscriptAt: 0,
+    lastSystemEventAt: 0,
+    emptyFinalStreak: 0,
+    emptyFinalWindowStartAt: 0,
+    systemRestartCount: 0,
+    systemRestartWindowStartAt: 0,
+    lastSystemRestartAt: 0,
+    lastHealthyAt: 0,
+    lastPcmAt: 0,
+    lastPcmFramesSent: 0,
+    lastDeepgramRunningAt: 0,
+    captureRunning: false,
+    deepgramRunning: false,
+    healthState: "idle",
+    isSystemSilent: false,
+  });
   const [isCapturing, setIsCapturing] = useState(false);
   const [inputValue, setInputValue] = useState("");
   const patchPersistTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
@@ -736,6 +893,7 @@ export function useFloatingSession() {
           id: match.id,
           patchedText: text.trim(),
           patchedAt: timestamp,
+          patchedByUser: false,
         }),
       );
       recentInsertionsRef.current = [
@@ -923,6 +1081,7 @@ export function useFloatingSession() {
                 id: fallbackId,
                 patchedText: finalTrimmed,
                 patchedAt: Date.now(),
+                patchedByUser: false,
               }),
             );
             persistAutoTranscriptUpgrade(
@@ -1063,6 +1222,7 @@ export function useFloatingSession() {
     if (!sessionInfoRef.current) return;
     const lang = getLanguageCode(sessionInfoRef.current.language ?? "English");
     setTabError(null);
+    setIsSystemStale(false);
     setTabStatus("connecting");
     audioControllerRef.current.startAudioSession("system", "start_system_audio");
     try {
@@ -1074,13 +1234,138 @@ export function useFloatingSession() {
     }
   }, []);
 
+  const retrySystemAudio = useCallback(async () => {
+    if (!sessionInfoRef.current) return;
+    setTabError(null);
+    setIsSystemStale(false);
+    setTabStatus("connecting");
+    try {
+      await audioControllerRef.current.stopAudioSession("system", "manual_retry_system_audio");
+    } catch {
+      // best effort stop; continue with fresh start attempt
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await startSystemAudio();
+  }, [startSystemAudio]);
+
+  const reacquireSystemAudio = useCallback(async (reason: string) => {
+    if (systemReacquireInFlightRef.current) return;
+    const now = Date.now();
+    const health = systemHealthRef.current;
+    if (health.lastHealthyAt && now - health.lastHealthyAt >= SYSTEM_RESTART_BUDGET_RESET_MS) {
+      health.systemRestartCount = 0;
+      health.systemRestartWindowStartAt = now;
+    }
+    if (!health.systemRestartWindowStartAt || now - health.systemRestartWindowStartAt > SYSTEM_RESTART_WINDOW_MS) {
+      health.systemRestartWindowStartAt = now;
+      health.systemRestartCount = 0;
+    }
+    if (health.systemRestartCount >= SYSTEM_RESTART_MAX_PER_WINDOW) {
+      if (import.meta.env.DEV) {
+        console.log("[audio-lifecycle] systemRestartRateLimited", {
+          stopReason: reason,
+          restartCount: health.systemRestartCount,
+          sessionActive: !!sessionInfoRef.current?.sessionId,
+        });
+      }
+      setTabStatus("error");
+      setTabError("System audio restart limit reached. Check Screen Recording/audio device and retry.");
+      setIsSystemStale(true);
+      return;
+    }
+
+    systemReacquireInFlightRef.current = true;
+    health.systemRestartCount += 1;
+    health.lastSystemRestartAt = now;
+    setIsSystemStale(true);
+    setTabStatus("connecting");
+    if (import.meta.env.DEV) {
+      console.log("[audio-lifecycle] systemStaleReacquireStart", {
+        stopReason: reason,
+        restartCount: health.systemRestartCount,
+        sessionActive: !!sessionInfoRef.current?.sessionId,
+      });
+    }
+    try {
+      await audioControllerRef.current.stopAudioSession("system", "system_stale_reacquire");
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await startSystemAudio();
+      if (import.meta.env.DEV) {
+        console.log("[audio-lifecycle] systemStaleReacquireSuccess", {
+          stopReason: reason,
+          sessionActive: !!sessionInfoRef.current?.sessionId,
+        });
+      }
+    } catch (err) {
+      const msg = String(err);
+      setTabStatus("error");
+      setTabError(msg);
+      if (import.meta.env.DEV) {
+        console.log("[audio-lifecycle] systemStaleReacquireFailed", {
+          stopReason: reason,
+          sessionActive: !!sessionInfoRef.current?.sessionId,
+          error: msg,
+        });
+      }
+    } finally {
+      systemReacquireInFlightRef.current = false;
+    }
+  }, [startSystemAudio]);
+
   // System audio transcript + status listeners (unconditional — wires up once)
   useEffect(() => {
     let unlistenTx: (() => void) | undefined;
     let unlistenSt: (() => void) | undefined;
+    let unlistenHealth: (() => void) | undefined;
 
     listen<{ text: string; is_final: boolean }>("stt:system-audio", (event) => {
       const { text, is_final } = event.payload;
+      const now = Date.now();
+      const health = systemHealthRef.current;
+      health.lastSystemEventAt = now;
+      if (is_final) {
+        health.lastSystemFinalAt = now;
+        const trimmed = text.trim();
+        if (!trimmed) {
+          if (!health.emptyFinalWindowStartAt || now - health.emptyFinalWindowStartAt > SYSTEM_EMPTY_FINAL_STORM_WINDOW_MS) {
+            health.emptyFinalWindowStartAt = now;
+            health.emptyFinalStreak = 0;
+          }
+          health.emptyFinalStreak += 1;
+          if (import.meta.env.DEV) {
+            console.log("[audio-lifecycle] systemEmptyFinalStreak", {
+              emptyFinalStreak: health.emptyFinalStreak,
+              stopReason: "empty_final",
+              sessionActive: !!sessionInfoRef.current?.sessionId,
+            });
+          }
+        } else {
+          health.lastMeaningfulSystemTranscriptAt = now;
+          health.emptyFinalStreak = 0;
+          health.emptyFinalWindowStartAt = 0;
+          health.lastHealthyAt = now;
+          health.isSystemSilent = false;
+          setIsSystemStale(false);
+        }
+      } else {
+        health.lastSystemInterimAt = now;
+        if (text.trim().length > 0) {
+          health.lastMeaningfulSystemTranscriptAt = now;
+          health.emptyFinalStreak = 0;
+          health.emptyFinalWindowStartAt = 0;
+          health.lastHealthyAt = now;
+          health.isSystemSilent = false;
+          setIsSystemStale(false);
+        }
+      }
+      if (import.meta.env.DEV) {
+        console.log("[audio-lifecycle] systemHealthTick", {
+          stopReason: "stt_system_audio_event",
+          sessionActive: !!sessionInfoRef.current?.sessionId,
+          hasMeaningfulText: text.trim().length > 0,
+          isFinal: is_final,
+        });
+      }
       if (is_final) {
         setTabInterimTranscript("");
         handleInterviewerTranscriptRef.current(text, true);
@@ -1093,6 +1378,13 @@ export function useFloatingSession() {
     listen<{ status: string; error?: string }>("stt:status:system", (event) => {
       const { status, error } = event.payload;
       setTabStatus(status as "idle" | "connecting" | "transcribing" | "error");
+       if (status === "transcribing") {
+        const now = Date.now();
+        const health = systemHealthRef.current;
+        health.lastDeepgramRunningAt = now;
+        health.lastHealthyAt = now;
+        setIsSystemStale(false);
+      }
       if (status === "error" && error) {
         setTabError(error);
       } else if (status === "transcribing") {
@@ -1100,21 +1392,163 @@ export function useFloatingSession() {
       }
     }).then((fn) => { unlistenSt = fn; }).catch(() => {});
 
+    listen<SystemHealthPayload>("stt:health:system", (event) => {
+      const now = Date.now();
+      const payload = event.payload;
+      const health = systemHealthRef.current;
+      health.captureRunning = !!payload.captureRunning;
+      health.deepgramRunning = !!payload.deepgramRunning;
+      health.lastPcmAt = Number(payload.lastPcmAt) || 0;
+      health.lastPcmFramesSent = Number(payload.pcmFramesSent) || 0;
+      health.healthState = payload.state;
+      if (health.deepgramRunning) {
+        health.lastDeepgramRunningAt = now;
+      }
+      if (payload.state === "capturing" || payload.state === "connected") {
+        health.lastHealthyAt = now;
+      }
+      if (import.meta.env.DEV) {
+        console.log("[audio-lifecycle] systemHealthTick", {
+          stopReason: "stt_health_system",
+          sessionActive: !!sessionInfoRef.current?.sessionId,
+          state: payload.state,
+          pcmFramesSent: payload.pcmFramesSent,
+          deepgramRunning: payload.deepgramRunning,
+          captureRunning: payload.captureRunning,
+        });
+      }
+    }).then((fn) => { unlistenHealth = fn; }).catch(() => {});
+
     return () => {
       unlistenTx?.();
       unlistenSt?.();
+      unlistenHealth?.();
     };
   }, []);
 
   // Arm → start system audio (only on live session-init, not sessionStorage hydration)
+  // Important: do NOT auto-stop system audio in cleanup here.
+  // React remount/strict-mode cleanup can race and immediately release system
+  // capture right after startup. Full teardown belongs to terminal session
+  // lifecycle (set_session_active false / end-session destroy).
   useEffect(() => {
-    if (!captureArmed || !sessionInfo) return;
+    const sessionId = sessionInfo?.sessionId;
+    if (!captureArmed || !sessionId) return;
+    if (systemStartIssuedForSessionRef.current === sessionId) return;
+    systemStartIssuedForSessionRef.current = sessionId;
     void startSystemAudio();
-    return () => {
-      void audioControllerRef.current.stopAudioSession("system", "capture_disarmed_or_session_change");
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [captureArmed, sessionInfo?.sessionId]);
+
+  // Reset per-session start marker when the session is gone so a future
+  // session can auto-arm and start system capture again.
+  useEffect(() => {
+    if (!sessionInfo?.sessionId) {
+      systemStartIssuedForSessionRef.current = null;
+      systemHealthRef.current = {
+        lastSystemInterimAt: 0,
+        lastSystemFinalAt: 0,
+        lastMeaningfulSystemTranscriptAt: 0,
+        lastSystemEventAt: 0,
+        emptyFinalStreak: 0,
+        emptyFinalWindowStartAt: 0,
+        systemRestartCount: 0,
+        systemRestartWindowStartAt: 0,
+        lastSystemRestartAt: 0,
+        lastHealthyAt: 0,
+        lastPcmAt: 0,
+        lastPcmFramesSent: 0,
+        lastDeepgramRunningAt: 0,
+        captureRunning: false,
+        deepgramRunning: false,
+        healthState: "idle",
+        isSystemSilent: false,
+      };
+      setIsSystemStale(false);
+    }
+  }, [sessionInfo?.sessionId]);
+
+  // Health monitor: classify silent vs stale and do controlled system-only reacquire.
+  useEffect(() => {
+    if (systemHealthIntervalRef.current) {
+      clearInterval(systemHealthIntervalRef.current);
+      systemHealthIntervalRef.current = null;
+    }
+
+    if (!captureArmed || !sessionInfo?.sessionId) return;
+
+    systemHealthIntervalRef.current = setInterval(() => {
+      const now = Date.now();
+      const health = systemHealthRef.current;
+      const sessionActive = !!sessionInfoRef.current?.sessionId && captureArmed;
+      if (!sessionActive || tabStatus === "error") return;
+
+      if (health.lastHealthyAt && now - health.lastHealthyAt >= SYSTEM_RESTART_BUDGET_RESET_MS) {
+        health.systemRestartCount = 0;
+        health.systemRestartWindowStartAt = now;
+      }
+
+      const noSystemEvents = health.lastSystemEventAt > 0 && now - health.lastSystemEventAt > SYSTEM_NO_EVENTS_STALE_MS;
+      const noPcm = health.lastPcmAt === 0 || now - health.lastPcmAt > SYSTEM_NO_EVENTS_STALE_MS;
+      const noMeaningful = health.lastMeaningfulSystemTranscriptAt > 0
+        ? now - health.lastMeaningfulSystemTranscriptAt > SYSTEM_NO_MEANINGFUL_STALE_MS
+        : now - health.lastDeepgramRunningAt > SYSTEM_NO_MEANINGFUL_STALE_MS;
+      const inEmptyStormWindow =
+        health.emptyFinalWindowStartAt > 0 && now - health.emptyFinalWindowStartAt <= SYSTEM_EMPTY_FINAL_STORM_WINDOW_MS;
+      const emptyFinalStorm = inEmptyStormWindow && health.emptyFinalStreak >= SYSTEM_EMPTY_FINAL_STORM_COUNT;
+      const deepgramDead = !health.deepgramRunning && health.lastDeepgramRunningAt > 0 && now - health.lastDeepgramRunningAt > 5000;
+      const weakPhysicalHealth = noPcm || !health.captureRunning;
+      const staleBySilenceWithWeakPcm = noMeaningful && weakPhysicalHealth;
+      const staleByEmptyStorm = emptyFinalStorm && weakPhysicalHealth;
+      const staleByNoEvents = noSystemEvents && weakPhysicalHealth;
+      const staleByExplicitHealth =
+        health.healthState === "error" || health.healthState === "starved" || health.healthState === "stopped";
+      const stale = staleBySilenceWithWeakPcm || staleByEmptyStorm || staleByNoEvents || deepgramDead || staleByExplicitHealth;
+
+      health.isSystemSilent = !stale && !!health.deepgramRunning && !!health.captureRunning && noMeaningful;
+
+      if (import.meta.env.DEV) {
+        console.log("[audio-lifecycle] systemHealthTick", {
+          stopReason: "monitor_tick",
+          sessionActive,
+          tabStatus,
+          noSystemEvents,
+          noPcm,
+          noMeaningful,
+          emptyFinalStorm,
+          deepgramDead,
+          stale,
+          isSystemSilent: health.isSystemSilent,
+          state: health.healthState,
+        });
+      }
+
+      if (!stale) {
+        setIsSystemStale(false);
+        return;
+      }
+      setIsSystemStale(true);
+      if (import.meta.env.DEV) {
+        console.log("[audio-lifecycle] systemAudioStaleDetected", {
+          stopReason: "stale_classifier",
+          sessionActive,
+          staleBySilenceWithWeakPcm,
+          staleByEmptyStorm,
+          staleByNoEvents,
+          deepgramDead,
+          staleByExplicitHealth,
+        });
+      }
+      void reacquireSystemAudio("system_stale_reacquire");
+    }, 2000);
+
+    return () => {
+      if (systemHealthIntervalRef.current) {
+        clearInterval(systemHealthIntervalRef.current);
+        systemHealthIntervalRef.current = null;
+      }
+    };
+  }, [captureArmed, sessionInfo?.sessionId, tabStatus, reacquireSystemAudio]);
 
   // Mic STT listeners
   useEffect(() => {
@@ -1407,12 +1841,27 @@ export function useFloatingSession() {
     const selectedAnswerTopic = deriveAnswerTopicFromText(
       `${selectedAnswerQuestion} ${selectedAnswerText}`,
     );
+    const followupReconstruction = reconstructWeakFollowupQuestion(
+      recentTranscriptWindow,
+      speakerSeparatedTranscript,
+      question,
+    );
+    const effectiveCurrentQuestion =
+      followupReconstruction.reconstructedCurrentQuestion || question;
+    console.log("[useFloatingSession] followupQuestionReconstruction", {
+      originalCurrentQuestion: question,
+      weakFollowupDetected: followupReconstruction.weakFollowupDetected,
+      reconstructedCurrentQuestion: followupReconstruction.reconstructedCurrentQuestion,
+      reconstructionChunksUsed: followupReconstruction.reconstructionChunksUsed,
+      selectedAnswerTopic,
+    });
+
     const payload: AIAnswerRequestPayload = {
       transcript:
         recentTranscriptWindow.length > 0
           ? recentTranscriptWindow.join("\n")
           : question,
-      currentQuestion: question,
+      currentQuestion: effectiveCurrentQuestion,
       recentTranscriptWindow,
       speakerSeparatedTranscript,
       ...(latestAiAnswer ? { previousAiAnswer: latestAiAnswer } : {}),
@@ -1681,7 +2130,9 @@ export function useFloatingSession() {
   const isTabActive = tabStatus === "transcribing";
   const isTabConnecting = tabStatus === "connecting";
   const captureStatus =
-    isMicConnecting || isTabConnecting
+    tabStatus === "error"
+      ? "Error"
+      : isSystemStale || isMicConnecting || isTabConnecting
       ? "Reconnecting"
       : isMicActive || isTabActive
         ? "Live"
@@ -1737,6 +2188,7 @@ export function useFloatingSession() {
     handleClearTranscript,
     handlePatchTranscriptMessage,
     startSystemAudio,
+    retrySystemAudio,
     collapseWindow,
     expandWindow,
     toggleTranscriptExpanded,

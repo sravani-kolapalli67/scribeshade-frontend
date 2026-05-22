@@ -220,6 +220,7 @@ const floatingSessionSlice = createSlice({
         id: string;
         patchedText: string;
         patchedAt?: number;
+        patchedByUser?: boolean;
       }>,
     ) {
       const msg = state.messages.find((m) => m.id === action.payload.id);
@@ -230,7 +231,7 @@ const floatingSessionSlice = createSlice({
       msg.patchedText = nextText;
       msg.text = nextText;
       msg.patchedAt = action.payload.patchedAt ?? Date.now();
-      msg.patchedByUser = true;
+      msg.patchedByUser = action.payload.patchedByUser ?? true;
     },
 
     clearMessages(state) {
