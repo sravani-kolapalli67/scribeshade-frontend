@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "ScribeShade",
-  "version": "2.1.1",
+  "version": "2.1.24",
   "identifier": "com.hiddenmindsolutions.scribeshade-frontend",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -54,6 +54,7 @@
   "bundle": {
     "active": true,
     "targets": [
+      "app",
       "appimage",
       "deb",
       "rpm",
@@ -95,9 +96,9 @@
     },
     "updater": {
       "endpoints": [
-        "https://test.backend.scribeshade.org/api/updates/latest.json"
+        "https://pub-992f115513ba42f681595c2ca5fac628.r2.dev/tauri-updates/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM3MjU2MjVCQkNGRjlENzEKUldSeG5mKzhXMklsTnkyTU5yZEhMLy9sODRGSDMraXJHaGlGM2ZTNllENnZlYWMza3FtSGRiL0kK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI4MzRFNTZERkE3QTg0QQpSV1JLcUtmZlZrNkRBdW9HY2hmcWlOTUVqOVNEc1pKOGNYcDZDaG9aVTFnL1JhTURLR1B6MVRnVAo=",
       "windows": {
         "installMode": "passive"
       }

@@ -55,4 +55,17 @@ const result = spawnSync(tauriBin, args, {
   stdio: "inherit",
   shell: true,
 });
+
+if (args[0] === "build" && (result.status ?? 1) === 0) {
+  const patchResult = spawnSync(
+    "node",
+    [path.join("scripts", "update-updater-manifest.cjs")],
+    { cwd: root, stdio: "inherit", shell: true },
+  );
+
+  if (patchResult.status !== 0) {
+    process.exit(patchResult.status ?? 1);
+  }
+}
+
 process.exit(result.status ?? 0);

@@ -1,16 +1,5 @@
 name: Release ScribeShade
 
-# Trigger: push to the `release` branch.
-# Workflow:
-#   1. Build macOS (universal: arm64 + x86_64) on macos-latest
-#   2. Build Windows x64 on windows-latest
-#   3. tauri-action signs all artifacts, generates latest.json, creates the
-#      GitHub Release, and uploads every artifact — fully automatic.
-#
-# Prerequisites (set once in repo Settings → Secrets → Actions):
-#   TAURI_SIGNING_PRIVATE_KEY         raw text of ~/.tauri/scribeshade.key
-#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  your key password (or empty string)
-
 on:
   push:
     branches:
@@ -20,19 +9,16 @@ on:
 jobs:
   publish-tauri:
     permissions:
-      contents: write   # required to create GitHub Releases
+      contents: write
 
     strategy:
       fail-fast: false
       matrix:
         include:
-          # ── macOS universal binary (runs on both Intel and Apple Silicon) ──
           - platform: macos-latest
             args: --target universal-apple-darwin
-          # ── Windows x64 ──────────────────────────────────────────────────
           - platform: windows-latest
             args: ""
-          # ── Linux (Ubuntu 22.04) ───────────────────────────────────────────
           - platform: ubuntu-22.04
             args: --bundles appimage,deb,rpm
 
@@ -45,35 +31,30 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v3
         with:
-          version: 10   # keep in sync with existing build.yml
+          version: 10
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20   # keep in sync with existing build.yml
+          node-version: 20
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      # Explicitly add macOS cross-compile targets after toolchain install.
-      # dtolnay/rust-toolchain@stable does install them via `targets:` but
-      # tauri-action@v0 invokes cargo early and may resolve the wrong binary
-      # before the PATH set by dtolnay is fully in effect.  Running rustup
-      # here forces the shell to re-evaluate PATH before we proceed.
       - name: Add macOS universal targets
         if: matrix.platform == 'macos-latest'
         run: |
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
-          rustup show   # Confirms correct cargo is on PATH
+          rustup show
 
       - name: Verify cargo is available
         shell: bash
         run: cargo --version
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2   # same action + casing as existing build.yml
+        uses: Swatinem/rust-cache@v2
         with:
           workspaces: ./src-tauri -> target
           cache-on-failure: true
@@ -82,15 +63,28 @@ jobs:
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt install -y \
-          libwebkit2gtk-4.1-dev \
-          libgtk-3-dev \
-          libayatana-appindicator3-dev \
-          librsvg2-dev \
-          patchelf \
-          build-essential
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential
 
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Validate version parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAURI_VERSION=$(node -p "JSON.parse(require('fs').readFileSync('src-tauri/tauri.conf.json','utf8')).version")
+          CARGO_VERSION=$(grep -m1 '^version = ' src-tauri/Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')
+          echo "package.json: $PKG_VERSION"
+          echo "tauri.conf.json: $TAURI_VERSION"
+          echo "Cargo.toml: $CARGO_VERSION"
+          test "$PKG_VERSION" = "$TAURI_VERSION"
+          test "$PKG_VERSION" = "$CARGO_VERSION"
 
       - name: Verify required release secrets are present
         shell: bash
@@ -108,27 +102,17 @@ jobs:
               echo "OK: $1 is present"
             fi
           }
-          check VITE_DEEPGRAM_API_KEY    "$VITE_DEEPGRAM_API_KEY"
+          check VITE_DEEPGRAM_API_KEY "$VITE_DEEPGRAM_API_KEY"
           check VITE_CLERK_PUBLISHABLE_KEY "$VITE_CLERK_PUBLISHABLE_KEY"
-          check TAURI_SIGNING_PRIVATE_KEY  "$TAURI_SIGNING_PRIVATE_KEY"
+          check TAURI_SIGNING_PRIVATE_KEY "$TAURI_SIGNING_PRIVATE_KEY"
           exit $fail
 
-      # tauri-action runs pnpm tauri build internally.  Our tauri-wrapper.cjs
-      # detects CI=true and skips the local version-bump, so the version
-      # committed by bump-version.sh is used as-is.
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-
-          # ── Vite / frontend env vars baked into the bundle at compile time ──
-          # All VITE_* vars are embedded by Vite during `pnpm tauri build`.
-          # Without these the release app falls back to localhost URLs and
-          # keys are undefined → nothing works.
-          #
-          # Add each of these to: repo Settings → Secrets and variables → Actions
           VITE_BACKEND_URL: "https://test.backend.scribeshade.org"
           VITE_FRONTEND_URL: "https://app.scribeshade.org"
           VITE_CLERK_PUBLISHABLE_KEY: ${{ secrets.VITE_CLERK_PUBLISHABLE_KEY }}
@@ -141,7 +125,6 @@ jobs:
           VITE_INACTIVITY_TIMEOUT_MS: "60000"
           VITE_INACTIVITY_WARNING_MS: "30000"
         with:
-          # __VERSION__ is replaced by tauri-action with the version from tauri.conf.json
           tagName: v__VERSION__
           releaseName: ScribeShade v__VERSION__
           releaseBody: |
@@ -154,3 +137,26 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Validate updater artifacts (fail-fast)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Scanning updater artifacts..."
+          find src-tauri/target -name "latest.json" -o -name "*.sig" | sed -n '1,80p'
+
+          if [ "${{ matrix.platform }}" = "windows-latest" ]; then
+            test -n "$(find src-tauri/target -name 'latest.json' -print -quit)"
+            test -n "$(find src-tauri/target -name 'windows-x86_64*' -name '*.sig' -print -quit)" || test -n "$(find src-tauri/target -name '*.msi.sig' -print -quit)"
+          fi
+
+          if [ "${{ matrix.platform }}" = "macos-latest" ]; then
+            test -n "$(find src-tauri/target -name 'latest.json' -print -quit)"
+            test -n "$(find src-tauri/target -name '*darwin-aarch64*' -name '*.sig' -print -quit)" || test -n "$(find src-tauri/target -name '*.app.tar.gz.sig' -print -quit)"
+            test -n "$(find src-tauri/target -name '*darwin-x86_64*' -name '*.sig' -print -quit)" || test -n "$(find src-tauri/target -name '*.app.tar.gz.sig' -print -quit)"
+          fi
+
+          if [ "${{ matrix.platform }}" = "ubuntu-22.04" ]; then
+            test -n "$(find src-tauri/target -name 'latest.json' -print -quit)"
+            test -n "$(find src-tauri/target -name 'linux-x86_64*' -name '*.sig' -print -quit)" || true
+          fi

@@ -106,6 +106,8 @@ function normalizeLineForDedup(text: string): string {
 
 const NEAR_DUPLICATE_GAP_MS = 2500;
 const MIN_INCLUDE_DUPLICATE_LEN = 20;
+const OVERLAY_TRANSCRIPT_MAX_MESSAGES = 60;
+const OVERLAY_TRANSCRIPT_MAX_CHARS = 6000;
 
 function areNearDuplicateTexts(a: string, b: string): boolean {
   const na = normalizeLineForDedup(a);
@@ -116,6 +118,16 @@ function areNearDuplicateTexts(a: string, b: string): boolean {
   const longer = na.length > nb.length ? na : nb;
   if (shorter.length < MIN_INCLUDE_DUPLICATE_LEN) return false;
   return longer.includes(shorter);
+}
+
+function buildOverlayTranscript(messages: Message[]): string {
+  const joined = messages
+    .slice(-OVERLAY_TRANSCRIPT_MAX_MESSAGES)
+    .map((m) => m.text)
+    .join("\n")
+    .trim();
+  if (joined.length <= OVERLAY_TRANSCRIPT_MAX_CHARS) return joined;
+  return joined.slice(joined.length - OVERLAY_TRANSCRIPT_MAX_CHARS);
 }
 
 function isQuestionLike(text: string): boolean {
@@ -1222,7 +1234,7 @@ export default function ActiveSession() {
         {
           transcript: stableTranscript,
           currentQuestion: stableTranscript,
-          sourcePlatform: "web",
+          sourcePlatform: isTauri() ? "tauri" : "web",
           answerMode: "auto",
         },
         selectedModel,
@@ -1237,7 +1249,7 @@ export default function ActiveSession() {
             {
               transcript: segment,
               currentQuestion: segment,
-              sourcePlatform: "web",
+              sourcePlatform: isTauri() ? "tauri" : "web",
               answerMode: "auto",
             },
             selectedModel,
@@ -1371,12 +1383,16 @@ export default function ActiveSession() {
     async (payload?: any) => {
       if (isExecutingRef.current || !id) return;
       isExecutingRef.current = true;
+      let tempStream: MediaStream | null = null;
+      let tempVideo: HTMLVideoElement | null = null;
+      let nativeCaptureOverlayHidden = false;
       try {
-        console.log("[Trigger] Analyze Screen initiated");
+        if (import.meta.env.DEV) {
+          console.warn("[audio-lifecycle] analyzeScreenCaptureStarted");
+        }
         let screenshot: Blob | null = null;
 
         if (payload?.screenshotData) {
-          // Convert base64 to Blob
           const base64Data = payload.screenshotData.split(",")[1];
           const contentType = payload.screenshotData
             .split(",")[0]
@@ -1391,13 +1407,90 @@ export default function ActiveSession() {
             for (let i = 0; i < slice.length; i++) {
               byteNumbers[i] = slice.charCodeAt(i);
             }
-            const byteArray = new Uint8Array(byteNumbers);
-            byteArrays.push(byteArray);
+            byteArrays.push(new Uint8Array(byteNumbers));
           }
 
           screenshot = new Blob(byteArrays, { type: contentType });
+          if (import.meta.env.DEV && screenshot) {
+            console.warn("[audio-lifecycle] screenshotCaptured", {
+              captureMethod: "overlayPayload",
+              screenshotSize: screenshot.size,
+            });
+          }
+        } else if (isTauri()) {
+          if (import.meta.env.DEV) {
+            console.warn("[audio-lifecycle] captureMethod", { method: "native" });
+          }
+          try {
+            nativeCaptureOverlayHidden = true;
+            await invoke("toggle_content_protection", { protected: true });
+            await new Promise((resolve) => setTimeout(resolve, 150));
+            const screenshotData = await invoke<string>("capture_screen");
+            const base64Data = screenshotData.split(",")[1];
+            const contentType = screenshotData
+              .split(",")[0]
+              .split(":")[1]
+              .split(";")[0];
+            const byteCharacters = atob(base64Data);
+            const byteArrays = [];
+            for (let offset = 0; offset < byteCharacters.length; offset += 512) {
+              const slice = byteCharacters.slice(offset, offset + 512);
+              const byteNumbers = new Array(slice.length);
+              for (let i = 0; i < slice.length; i++) byteNumbers[i] = slice.charCodeAt(i);
+              byteArrays.push(new Uint8Array(byteNumbers));
+            }
+            screenshot = new Blob(byteArrays, { type: contentType });
+            if (import.meta.env.DEV && screenshot) {
+              console.warn("[audio-lifecycle] screenshotCaptured", {
+                captureMethod: "native",
+                screenshotSize: screenshot.size,
+                nativeCaptureOverlayHidden: true,
+              });
+            }
+          } finally {
+            if (nativeCaptureOverlayHidden) {
+              await invoke("toggle_content_protection", { protected: false }).catch(() => {});
+              nativeCaptureOverlayHidden = false;
+            }
+          }
         } else if (stream) {
+          if (import.meta.env.DEV) {
+            console.warn("[audio-lifecycle] captureMethod", { method: "existingStream" });
+          }
           screenshot = await captureScreenshot();
+          if (import.meta.env.DEV && screenshot) {
+            console.warn("[audio-lifecycle] screenshotCaptured", {
+              captureMethod: "existingStream",
+              screenshotSize: screenshot.size,
+            });
+          }
+        } else {
+          if (import.meta.env.DEV) {
+            console.warn("[audio-lifecycle] captureMethod", { method: "getDisplayMediaFallback" });
+          }
+          tempStream = await navigator.mediaDevices.getDisplayMedia({
+            video: true,
+            audio: false,
+          });
+          tempVideo = document.createElement("video");
+          tempVideo.srcObject = tempStream;
+          await tempVideo.play();
+          const canvas = document.createElement("canvas");
+          canvas.width = tempVideo.videoWidth || 1920;
+          canvas.height = tempVideo.videoHeight || 1080;
+          const ctx = canvas.getContext("2d");
+          if (ctx) {
+            ctx.drawImage(tempVideo, 0, 0, canvas.width, canvas.height);
+            screenshot = await new Promise<Blob | null>((resolve) =>
+              canvas.toBlob(resolve, "image/png"),
+            );
+          }
+          if (import.meta.env.DEV && screenshot) {
+            console.warn("[audio-lifecycle] screenshotCaptured", {
+              captureMethod: "getDisplayMediaFallback",
+              screenshotSize: screenshot.size,
+            });
+          }
         }
 
         if (screenshot) {
@@ -1406,15 +1499,38 @@ export default function ActiveSession() {
           console.warn("No screenshot could be captured.");
         }
       } catch (err) {
+        const msg = String(err);
+        if (import.meta.env.DEV && /denied|permission|not allowed|screen recording/i.test(msg)) {
+          console.warn("[audio-lifecycle] screenPermissionDenied", { error: msg });
+        }
+        if (isTauri() && /denied|permission|not allowed|screen recording/i.test(msg)) {
+          toast.error("Screen Recording permission denied. Open Settings and retry. You may need to restart the app.");
+        }
         console.error("Error analyzing screen:", err);
       } finally {
-        // Small delay to ensure any duplicate events from the same interaction are ignored
+        if (tempStream) {
+          tempStream.getTracks().forEach((track) => track.stop());
+          if (import.meta.env.DEV) {
+            console.warn("[audio-lifecycle] screenStreamTracksStopped");
+          }
+        }
+        if (tempVideo) {
+          tempVideo.pause();
+          tempVideo.srcObject = null;
+          tempVideo.remove();
+        }
+        if (nativeCaptureOverlayHidden) {
+          await invoke("toggle_content_protection", { protected: false }).catch(() => {});
+        }
+        if (import.meta.env.DEV) {
+          console.warn("[audio-lifecycle] analyzeScreenCaptureReleased");
+        }
         setTimeout(() => {
           isExecutingRef.current = false;
         }, 1000);
       }
     },
-    [stream, id, captureScreenshot, handleAnalyzeScreen],
+    [stream, id, captureScreenshot, handleAnalyzeScreen, selectedModel],
   );
 
   const onAiAnswer = useCallback(() => {
@@ -1449,18 +1565,26 @@ export default function ActiveSession() {
     const CONTEXT_WINDOW_MS = 60000; // 60 second window for recent context
 
     if (isTauri()) {
+      const lastInterviewer = [...messagesSnapshot]
+        .reverse()
+        .find((m) => m.sender === "Interviewer" && m.text?.trim())?.text;
+      const lastAny = [...messagesSnapshot]
+        .reverse()
+        .find((m) => m.text?.trim())?.text;
       // Prefer the live (not-yet-final) interviewer speech; fall back to the last
       // finalised Interviewer message in the transcript; fall back to the last
       // finalised message of any sender; fall back to any live interim text.
       question =
         interviewerInterim ||
-        messagesSnapshot.reverse().find((m) => m.sender === "Interviewer")?.text ||
-        messagesSnapshot.reverse().find((m) => m.text)?.text ||
+        lastInterviewer ||
+        lastAny ||
         interimText ||
         "";
-      questionSource = interviewerInterim ? "interviewer_interim" : 
-                       messagesSnapshot.reverse().find((m) => m.sender === "Interviewer")?.text ? "last_interviewer" :
-                       "fallback";
+      questionSource = interviewerInterim
+        ? "interviewer_interim"
+        : lastInterviewer
+          ? "last_interviewer"
+          : "fallback";
     } else {
       // For web/browser context, both the user voice input and processed transcript/context
       // should be included together so the AI can correctly understand and answer the intended question.
@@ -1645,7 +1769,7 @@ export default function ActiveSession() {
         : {}),
       ...(selectedAnswerTopic ? { selectedAnswerTopic } : {}),
       answerMode: "auto",
-      sourcePlatform: "web",
+      sourcePlatform: isTauri() ? "tauri" : "web",
     };
 
     isExecutingRef.current = true;
@@ -1682,6 +1806,8 @@ export default function ActiveSession() {
 
   const isOpeningOverlayRef = useRef(false);
   const lastMinimizeTriggerRef = useRef(0);
+  const overlaySyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastOverlayPayloadRef = useRef("");
 
   const handleOpenOverlay = async () => {
     if (!isTauri() || isOpeningOverlayRef.current) return;
@@ -1743,25 +1869,43 @@ export default function ActiveSession() {
   useEffect(() => {
     const syncOverlay = async () => {
       if (!isTauri()) return;
-      const combinedTranscript = messages.map((m) => m.text).join("\n");
-      await emit("overlay-update", {
+      const combinedTranscript = buildOverlayTranscript(messages);
+      const status =
+        isMicConnectingState || mergedTabIsConnecting
+          ? "Connecting"
+          : isMicTranscribing || mergedTabIsTranscribing
+            ? "Recording"
+            : "Connected";
+      const payload = {
         transcript: combinedTranscript,
         interimTranscript:
           activeMicInterimTranscript || mergedTabInterimTranscript,
-        status:
-          isMicConnectingState || mergedTabIsConnecting
-            ? "Connecting"
-            : isMicTranscribing || mergedTabIsTranscribing
-              ? "Recording"
-              : "Connected",
+        status,
         isMicActive: isMicTranscribing,
         isMicConnecting: isMicConnectingState,
         timerText: formattedTime,
         sessionId: id || null,
         selectedModel: selectedModel,
-      });
+      };
+      const payloadKey = JSON.stringify(payload);
+      if (payloadKey === lastOverlayPayloadRef.current) return;
+      lastOverlayPayloadRef.current = payloadKey;
+      try {
+        await emit("overlay-update", payload);
+      } catch (error) {
+        console.warn("Failed to sync overlay update:", error);
+      }
     };
-    syncOverlay();
+    if (overlaySyncTimerRef.current) {
+      clearTimeout(overlaySyncTimerRef.current);
+    }
+    overlaySyncTimerRef.current = setTimeout(syncOverlay, 120);
+    return () => {
+      if (overlaySyncTimerRef.current) {
+        clearTimeout(overlaySyncTimerRef.current);
+        overlaySyncTimerRef.current = null;
+      }
+    };
   }, [
     messages,
     isMicTranscribing,
@@ -1928,7 +2072,7 @@ export default function ActiveSession() {
   });
 
   useKeyboardShortcut("k", onAnalyzeScreen, {
-    disabled: !stream || isAnalyzing,
+    disabled: isAnalyzing,
   });
 
   const transcriptProps = {
@@ -1958,7 +2102,7 @@ export default function ActiveSession() {
       messages.length > 0 ||
       !!activeMicInterimTranscript ||
       !!mergedTabInterimTranscript,
-    canAnalyze: !!stream,
+    canAnalyze: isTauri() || !!stream,
     onAiAnswer,
     onAnalyzeScreen,
     onSend: () => id && handleCustomQuery(id, inputMessage, selectedModel),

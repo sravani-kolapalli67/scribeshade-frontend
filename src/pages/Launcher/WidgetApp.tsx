@@ -1,3 +1,4 @@
+import "@/lib/disableDebugLogs";
 import React, { useEffect, useRef, useCallback, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { createRoot } from "react-dom/client";
@@ -173,6 +174,9 @@ function WidgetContent() {
   // ── Card position + drag ───────────────────────────────────────────────────
   const { cardPos, isDraggingRef, handleDragStart } = useCardPosition();
 
+  // ── Inspect dialog state (rendered as a child dialog, not a separate window) ─
+  const [inspectOpen, setInspectOpen] = useState(false);
+
   // ── Cursor passthrough ────────────────────────────────────────────────────
   useCursorPassthrough({ isDraggingRef });
 
@@ -225,9 +229,6 @@ function WidgetContent() {
   // Used to lock private mode toggle during active sessions (Feature 4).
   const [isSessionActive, setIsSessionActive] = useState(false);
 
-  // ── Inspect dialog state (rendered as a child dialog, not a separate window) ─
-  const [inspectOpen, setInspectOpen] = useState(false);
-
   const handleCreateSession = useCallback(
     () => {
       // Only mark session active after the creation flow succeeds.
@@ -272,9 +273,43 @@ function WidgetContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Auto-update check ──────────────────────────────────────────────────────
+  // ── Auto-update check + retry policy ───────────────────────────────────────
   useEffect(() => {
-    checkForUpdates();
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const scheduleRetry = (attempt: number) => {
+      if (cancelled || attempt > 3) return;
+      const delayMs = Math.min(60000, 5000 * Math.pow(2, attempt - 1));
+      retryTimer = setTimeout(async () => {
+        if (cancelled) return;
+        const retryResult = await checkForUpdates(false);
+        if (retryResult.status === "error") {
+          scheduleRetry(attempt + 1);
+        }
+      }, delayMs);
+    };
+
+    const runStartupCheck = async () => {
+      const result = await checkForUpdates(false);
+      if (result.status === "error") {
+        scheduleRetry(1);
+      }
+    };
+
+    runStartupCheck().catch(() => {});
+
+    const sixHoursMs = 6 * 60 * 60 * 1000;
+    const jitterMs = Math.floor(Math.random() * 5 * 60 * 1000);
+    const periodicTimer = setInterval(() => {
+      checkForUpdates(false).catch(() => {});
+    }, sixHoursMs + jitterMs);
+
+    return () => {
+      cancelled = true;
+      clearInterval(periodicTimer);
+      if (retryTimer) clearTimeout(retryTimer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -447,7 +482,7 @@ function WidgetContent() {
             >
       <div
         ref={cardRef}
-        className="rounded-3xl bg-white shadow-2xl shadow-black/20"
+        className="relative rounded-3xl bg-white shadow-2xl shadow-black/20"
       >
         <div
           ref={innerContentRef}
@@ -947,9 +982,7 @@ function WidgetContent() {
                                                     />
                                                   </svg>
                                                 )}
-{/* Inspect dialog — rendered as a child overlay inside the same webview */}
-      <InspectDialog open={inspectOpen} onClose={handleCloseInspect} />
-    </div>
+                                              </div>
                                               <span className="truncate">
                                                 {label}
                                               </span>
@@ -1001,6 +1034,8 @@ function WidgetContent() {
               )}
           </>
         </div>
+        {/* Inspect dialog — attached to the widget card so drag moves both */}
+        <InspectDialog open={inspectOpen} onClose={handleCloseInspect} />
       </div>
             </motion.div>
           )}
@@ -1102,9 +1137,6 @@ function WidgetContent() {
         </>,
         document.body,
       )}
-
-      {/* Inspect dialog — rendered as a child overlay inside the same webview */}
-      <InspectDialog open={inspectOpen} onClose={handleCloseInspect} />
     </div>
   );
 }

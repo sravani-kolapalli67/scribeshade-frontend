@@ -10,6 +10,16 @@ export interface AIAnswerSpeakerEntry {
   timestamp?: number;
 }
 
+export interface ActiveQuestionDetectionPayload {
+  activeQuestion: string;
+  cleanedQuestion: string;
+  isFollowUp: boolean;
+  topicChanged: boolean;
+  confidenceScore: number;
+  ignoredNoise: boolean;
+  referencedHistoryTurnId?: string;
+}
+
 export interface AIAnswerRequestPayload {
   transcript: string;
   currentQuestion?: string;
@@ -34,6 +44,7 @@ export interface AIAnswerRequestPayload {
   isRegenerate?: boolean;
   regenerateTargetAnswerId?: string;
   regenerateInstruction?: string;
+  activeQuestionDetection?: ActiveQuestionDetectionPayload;
 }
 
 export const AI_ANSWER_LIMITS = {
@@ -94,6 +105,19 @@ export function sanitizeAIAnswerPayload(
   const regenerateInstruction = payload.regenerateInstruction
     ? payload.regenerateInstruction.slice(0, AI_ANSWER_LIMITS.regenerateInstructionMaxChars)
     : undefined;
+  const activeQuestionDetection = payload.activeQuestionDetection
+    ? {
+        activeQuestion: payload.activeQuestionDetection.activeQuestion.slice(0, 2000),
+        cleanedQuestion: payload.activeQuestionDetection.cleanedQuestion.slice(0, 2000),
+        isFollowUp: !!payload.activeQuestionDetection.isFollowUp,
+        topicChanged: !!payload.activeQuestionDetection.topicChanged,
+        confidenceScore: Math.max(0, Math.min(1, Number(payload.activeQuestionDetection.confidenceScore || 0))),
+        ignoredNoise: !!payload.activeQuestionDetection.ignoredNoise,
+        ...(payload.activeQuestionDetection.referencedHistoryTurnId
+          ? { referencedHistoryTurnId: payload.activeQuestionDetection.referencedHistoryTurnId.slice(0, 120) }
+          : {}),
+      }
+    : undefined;
   const recentTranscriptWindow = (payload.recentTranscriptWindow || [])
     .map((item) => item.trim())
     .filter(Boolean)
@@ -127,6 +151,7 @@ export function sanitizeAIAnswerPayload(
     ...(payload.isRegenerate ? { isRegenerate: true } : {}),
     ...(regenerateTargetAnswerId ? { regenerateTargetAnswerId } : {}),
     ...(regenerateInstruction ? { regenerateInstruction } : {}),
+    ...(activeQuestionDetection ? { activeQuestionDetection } : {}),
   };
 }
 

@@ -8,6 +8,13 @@ import {
   resolveQueryFromAIAnswerPayload,
 } from "@/types/ai-answer";
 import { isTauri } from "@/lib/utils";
+import {
+  type ConversationContinuityState,
+  type ConversationMode,
+  extractTopicAndEntities,
+  resolveQuestionWithContinuity,
+  summarizeAnswerForMemory,
+} from "@/lib/conversation-continuity";
 import { 
   prepareGeneration, 
   shouldTriggerGeneration, 
@@ -627,6 +634,94 @@ export const useAIChat = () => {
   const generationGuardRef = useRef(createGenerationGuard());
   // Tracks the last successfully generated transcript for continuation detection.
   const previousContextRef = useRef<{ transcript: string; timestamp: number } | null>(null);
+  const conversationContinuityRef = useRef<ConversationContinuityState>({
+    lastResolvedQuestion: "",
+    lastResolvedTopic: "",
+    lastAnswerSummary: "",
+    lastTechnicalEntities: [],
+    lastConversationMode: "button",
+    lastUpdatedAt: 0,
+  });
+
+  const logContinuity = useCallback(
+    (
+      sourceType: "transcript" | "manual",
+      resolvedQuestion: string,
+      confidence: number,
+      previousTopic: string,
+    ) => {
+      if (!import.meta.env.DEV) return;
+      console.log("[useAIChat] conversationalFollowUpDetected", {
+        sourceType,
+        previousTopic,
+        resolvedQuestion,
+        continuityConfidence: confidence,
+      });
+    },
+    [],
+  );
+
+  const applyContinuityToQuestion = useCallback(
+    (
+      rawQuestion: string,
+      mode: ConversationMode,
+      sourceType: "transcript" | "manual",
+    ) => {
+      const previousTopic = conversationContinuityRef.current.lastResolvedTopic;
+      const continuity = resolveQuestionWithContinuity(
+        rawQuestion,
+        conversationContinuityRef.current,
+      );
+      if (continuity.usedPreviousTopic) {
+        logContinuity(
+          sourceType,
+          continuity.resolvedQuestion,
+          continuity.confidence,
+          previousTopic,
+        );
+      }
+
+      const topicInfo = extractTopicAndEntities(continuity.resolvedQuestion || rawQuestion);
+      conversationContinuityRef.current = {
+        ...conversationContinuityRef.current,
+        lastResolvedQuestion: continuity.resolvedQuestion || rawQuestion,
+        lastResolvedTopic:
+          topicInfo.topic || conversationContinuityRef.current.lastResolvedTopic,
+        lastTechnicalEntities:
+          topicInfo.entities.length > 0
+            ? topicInfo.entities
+            : conversationContinuityRef.current.lastTechnicalEntities,
+        lastConversationMode: mode,
+        lastUpdatedAt: Date.now(),
+      };
+      return continuity;
+    },
+    [logContinuity],
+  );
+
+  const commitContinuityFromAnswer = useCallback(
+    (
+      resolvedQuestion: string,
+      answerText: string,
+      mode: ConversationMode,
+    ) => {
+      const topicInfo = extractTopicAndEntities(resolvedQuestion);
+      const answerSummary = summarizeAnswerForMemory(answerText);
+      conversationContinuityRef.current = {
+        ...conversationContinuityRef.current,
+        lastResolvedQuestion: resolvedQuestion || conversationContinuityRef.current.lastResolvedQuestion,
+        lastResolvedTopic: topicInfo.topic || conversationContinuityRef.current.lastResolvedTopic,
+        lastTechnicalEntities:
+          topicInfo.entities.length > 0
+            ? topicInfo.entities
+            : conversationContinuityRef.current.lastTechnicalEntities,
+        lastAnswerSummary: answerSummary || conversationContinuityRef.current.lastAnswerSummary,
+        lastConversationMode: mode,
+        lastUpdatedAt: Date.now(),
+      };
+    },
+    [],
+  );
 
   // Stable ref so handleAiAnswer can call handleAiAnswerSingle without a
   // forward-reference ordering issue (handleAiAnswerSingle is defined after).
@@ -755,6 +850,11 @@ export const useAIChat = () => {
       setAiChat((prev) => [...prev, newAiMessage]);
 
       try {
+        conversationContinuityRef.current = {
+          ...conversationContinuityRef.current,
+          lastConversationMode: "screenshot",
+          lastUpdatedAt: Date.now(),
+        };
         const formData = new FormData();
         formData.append("screenshot", screenshotBlob, "screenshot.jpg");
         if (aiModel) {
@@ -807,6 +907,12 @@ export const useAIChat = () => {
         }
 
         console.log("[useAIChat] handleAnalyzeScreen: Stream consumption completed. Rendered IDs:", renderedIds);
+        const primaryId = renderedIds[0] || messageId;
+        const answerText =
+          aiChatRef.current.find((m) => m.id === primaryId)?.text?.trim() || "";
+        const continuityQuestion =
+          conversationContinuityRef.current.lastResolvedQuestion || "Analyze this screen";
+        commitContinuityFromAnswer(continuityQuestion, answerText, "screenshot");
 
         // Guardrail: if the model ignored sentinel rules and returned a
         // clarification blob, normalize it to one soft no-question message.
@@ -896,7 +1002,7 @@ export const useAIChat = () => {
         }
       }
     },
-    [startNewRequest],
+    [commitContinuityFromAnswer, startNewRequest],
   );
 
   const handleAiAnswer = useCallback(
@@ -911,9 +1017,11 @@ export const useAIChat = () => {
           : request,
       );
       const resolvedFromPayload = resolveQueryFromAIAnswerPayload(basePayload);
-      const normalizedQuestion = deduplicateQuestionsInText(
+      const rawQuestion = deduplicateQuestionsInText(
         normalizeSttTranscript(resolvedFromPayload),
       );
+      const continuity = applyContinuityToQuestion(rawQuestion, "button", "transcript");
+      const normalizedQuestion = continuity.resolvedQuestion || rawQuestion;
       if (import.meta.env.DEV) {
         console.log("[AI Answer Debug][FE] Raw input request:", request);
         console.log("[AI Answer Debug][FE] Base sanitized payload:", basePayload);
@@ -1027,7 +1135,7 @@ export const useAIChat = () => {
         generationGuardRef.current.releaseGeneration(segmentId);
       }
     },
-    [startNewRequest],
+    [applyContinuityToQuestion, startNewRequest],
   );
 
   // Inner single-question implementation — called by handleAiAnswer via ref after splitting.
@@ -1122,6 +1230,10 @@ export const useAIChat = () => {
           return;
         }
 
+        const answerText =
+          aiChatRef.current.find((m) => m.id === messageId)?.text?.trim() || "";
+        commitContinuityFromAnswer(resolvedQuestion, answerText, "button");
+
         // Genuine empty response (model returned nothing useful) — show fallback.
         setAiChat((prev) => {
           const target = prev.find((msg) => msg.id === messageId);
@@ -1167,7 +1279,7 @@ export const useAIChat = () => {
         }
       }
     },
-    [startNewRequest],
+    [commitContinuityFromAnswer, startNewRequest],
   );
   // Keep the ref in sync so handleAiAnswer always calls the latest callback.
   handleAiAnswerSingleRef.current = handleAiAnswerSingle;
@@ -1175,12 +1287,14 @@ export const useAIChat = () => {
   const handleCustomQuery = useCallback(
     async (sessionId: string, query: string, aiModel: string) => {
       const normalizedQuery = normalizeSttTranscript(query);
-      console.log(`[useAIChat] handleCustomQuery triggered. sessionId: ${sessionId}, query: "${normalizedQuery}", model: ${aiModel}`);
+      const continuity = applyContinuityToQuestion(normalizedQuery, "manual", "manual");
+      const resolvedQuery = continuity.resolvedQuestion || normalizedQuery;
+      console.log(`[useAIChat] handleCustomQuery triggered. sessionId: ${sessionId}, query: "${resolvedQuery}", model: ${aiModel}`);
       if (import.meta.env.DEV) {
         console.log("[AI Answer Debug][FE][Manual] Raw manual query:", query);
         console.log("[AI Answer Debug][FE][Manual] Normalized manual query:", normalizedQuery);
       }
-      if (!normalizedQuery.trim()) {
+      if (!resolvedQuery.trim()) {
         console.log("[useAIChat] handleCustomQuery: Query is empty. Aborting.");
         return;
       }
@@ -1268,8 +1382,8 @@ export const useAIChat = () => {
               .join("\n\n")
           : "";
       const enrichedQuery = contextPreamble
-        ? `${contextPreamble}\n\n[New question / follow-up]\n${normalizedQuery}`
-        : normalizedQuery;
+        ? `${contextPreamble}\n\n[New question / follow-up]\n${resolvedQuery}`
+        : resolvedQuery;
       const previousAiAnswer =
         recentAiAnswers.length > 0
           ? recentAiAnswers[recentAiAnswers.length - 1].text?.trim() || ""
@@ -1313,7 +1427,7 @@ export const useAIChat = () => {
             body: JSON.stringify({
               ...sanitizeAIAnswerPayload({
                 transcript: enrichedQuery,
-                currentQuestion: normalizedQuery,
+                currentQuestion: resolvedQuery,
                 previousAiAnswer: previousAiAnswer || undefined,
                 previousCodeBlocks,
                 sourcePlatform: runtimePlatform,
@@ -1329,7 +1443,7 @@ export const useAIChat = () => {
           console.log("[AI Answer Debug][FE][Manual] POST /ai-answer body:", {
               ...sanitizeAIAnswerPayload({
                 transcript: enrichedQuery,
-                currentQuestion: normalizedQuery,
+                currentQuestion: resolvedQuery,
                 previousAiAnswer: previousAiAnswer || undefined,
                 previousCodeBlocks,
                 sourcePlatform: runtimePlatform,
@@ -1357,8 +1471,12 @@ export const useAIChat = () => {
           controller.signal,
         );
 
+        const answerText =
+          aiChatRef.current.find((m) => m.id === aiMessageId)?.text?.trim() || "";
+        commitContinuityFromAnswer(resolvedQuery, answerText, "manual");
+
         // Update previous context after successful generation
-        previousContextRef.current = { transcript: normalizedQuery, timestamp: Date.now() };
+        previousContextRef.current = { transcript: resolvedQuery, timestamp: Date.now() };
       } catch (error: any) {
         if (error.name === "AbortError") {
           console.log("[useAIChat] Custom query aborted:", reqId);
@@ -1391,7 +1509,7 @@ export const useAIChat = () => {
         }
       }
     },
-    [startNewRequest],
+    [applyContinuityToQuestion, commitContinuityFromAnswer, startNewRequest],
   );
 
   const handleRegenerate = useCallback(
@@ -1410,16 +1528,22 @@ export const useAIChat = () => {
         cachedContext?.currentQuestion?.trim() ||
         targetMessage.question?.trim() ||
         extractedQ;
+      const continuity = applyContinuityToQuestion(
+        question,
+        "regenerate",
+        "transcript",
+      );
+      const resolvedQuestion = continuity.resolvedQuestion || question;
 
-      if (!question) {
+      if (!resolvedQuestion) {
         console.warn("[useAIChat] handleRegenerate: No question could be resolved for this message. Aborting.");
         return;
       }
 
-      const transcriptForReplay = cachedContext?.originalTranscript?.trim() || question;
+      const transcriptForReplay = cachedContext?.originalTranscript?.trim() || resolvedQuestion;
       const replayPayload = sanitizeAIAnswerPayload({
         transcript: transcriptForReplay,
-        currentQuestion: question,
+        currentQuestion: resolvedQuestion,
         ...(cachedContext?.recentTranscriptWindow?.length
           ? { recentTranscriptWindow: cachedContext.recentTranscriptWindow }
           : {}),
@@ -1446,7 +1570,7 @@ export const useAIChat = () => {
         hasOriginalGenerationContext: !!cachedContext,
         hasOriginalTranscript: !!cachedContext?.originalTranscript,
         hasSelectedAnswerId: !!cachedContext?.selectedAnswerId,
-        originalQuestion: question.slice(0, 140),
+        originalQuestion: resolvedQuestion.slice(0, 140),
         isRegenerate: true,
         regenerateTargetAnswerId: messageId,
       });
@@ -1517,9 +1641,9 @@ export const useAIChat = () => {
           controller.signal,
           {
             ...(cachedContext || {}),
-            originalQuestion: question.slice(0, 1000),
+            originalQuestion: resolvedQuestion.slice(0, 1000),
             originalTranscript: transcriptForReplay.slice(0, 8000),
-            currentQuestion: question.slice(0, 1000),
+            currentQuestion: resolvedQuestion.slice(0, 1000),
             answerMode: replayPayload.answerMode || "auto",
             sourcePlatform: replayPayload.sourcePlatform || (isTauri() ? "tauri" : "web"),
             generatedAnswerText: cachedContext?.generatedAnswerText || "",
@@ -1527,7 +1651,11 @@ export const useAIChat = () => {
           },
         );
 
-        previousContextRef.current = { transcript: question, timestamp: Date.now() };
+        const answerText =
+          aiChatRef.current.find((m) => m.id === messageId)?.text?.trim() || "";
+        commitContinuityFromAnswer(resolvedQuestion, answerText, "regenerate");
+
+        previousContextRef.current = { transcript: resolvedQuestion, timestamp: Date.now() };
       } catch (error: any) {
         if (error.name === "AbortError") {
           console.log("[useAIChat] Regenerate aborted:", reqId);
@@ -1560,7 +1688,7 @@ export const useAIChat = () => {
         }
       }
     },
-    [startNewRequest],
+    [applyContinuityToQuestion, commitContinuityFromAnswer, startNewRequest],
   );
 
   return {

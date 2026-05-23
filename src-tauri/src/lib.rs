@@ -1,4 +1,7 @@
-use tauri::{Manager, Emitter, WebviewWindowBuilder, WebviewUrl, AppHandle, Window, PhysicalPosition, PhysicalSize, command};
+use tauri::{
+    command, AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl,
+    WebviewWindow, WebviewWindowBuilder, Window,
+};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
 use screenshots::Screen;
@@ -29,6 +32,136 @@ static CONTENT_PROTECTED: AtomicBool = AtomicBool::new(false);
 /// screenshot with protection in the wrong state.
 static CAPTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+enum OverlayMode {
+    CompactOverlay,
+    FullscreenOverlay,
+}
+
+#[cfg(target_os = "macos")]
+fn apply_macos_overlay_policy(
+    window: &tauri::WebviewWindow,
+    activate_app: bool,
+) -> Result<(), String> {
+    let win = window.clone();
+
+    window
+        .run_on_main_thread(move || {
+            unsafe {
+                let app_cls = objc2::class!(NSApplication);
+                let ns_app: *mut objc2::runtime::AnyObject =
+                    objc2::msg_send![app_cls, sharedApplication];
+
+                if activate_app {
+                    let _: bool = objc2::msg_send![ns_app, setActivationPolicy: 1i64];
+                }
+
+                if let Ok(ns_win) = win.ns_window() {
+                    let ptr = ns_win as *mut objc2::runtime::AnyObject;
+
+                    const NS_POPUP_MENU_WINDOW_LEVEL: i64 = 101;
+                    // canJoinAllSpaces | stationary | ignoresCycle | fullScreenAuxiliary
+                    const OVERLAY_BEHAVIOR: u64 = 1 | 16 | 64 | 256;
+
+                    let _: () = objc2::msg_send![ptr, setLevel: NS_POPUP_MENU_WINDOW_LEVEL];
+                    let _: () = objc2::msg_send![ptr, setCollectionBehavior: OVERLAY_BEHAVIOR];
+                    let _: () = objc2::msg_send![ptr, setOpaque: false];
+
+                    let ns_color_cls = objc2::class!(NSColor);
+                    let clear_color: *mut objc2::runtime::AnyObject =
+                        objc2::msg_send![ns_color_cls, clearColor];
+                    let _: () = objc2::msg_send![ptr, setBackgroundColor: clear_color];
+
+                    let _: () = objc2::msg_send![ptr, setHidesOnDeactivate: false];
+                    let _: () = objc2::msg_send![ptr, setCanHide: false];
+
+                    if activate_app {
+                        let _: () = objc2::msg_send![ptr, orderFrontRegardless];
+                        let _: () = objc2::msg_send![ns_app, activateIgnoringOtherApps: true];
+                    }
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+fn apply_overlay_policy_to_window(
+    window: &WebviewWindow,
+    mode: OverlayMode,
+) -> Result<(), String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        window.set_always_on_top(true).map_err(|e| e.to_string())?;
+        window
+            .set_visible_on_all_workspaces(true)
+            .map_err(|e| e.to_string())?;
+        window.set_skip_taskbar(true).map_err(|e| e.to_string())?;
+        window.set_decorations(false).map_err(|e| e.to_string())?;
+        window
+            .set_shadow(matches!(mode, OverlayMode::CompactOverlay))
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = mode;
+        apply_macos_overlay_policy(window, false)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn reinforce_window_level(win: &tauri::WebviewWindow) {
+    let w = win.clone();
+    let _ = win.run_on_main_thread(move || {
+        unsafe {
+            if let Ok(ns_win) = w.ns_window() {
+                let ptr = ns_win as *mut objc2::runtime::AnyObject;
+                const NS_POPUP_MENU_WINDOW_LEVEL: i64 = 101;
+                // canJoinAllSpaces | stationary | ignoresCycle | fullScreenAuxiliary
+                const OVERLAY_BEHAVIOR: u64 = 1 | 16 | 64 | 256;
+                let _: () = objc2::msg_send![ptr, setLevel: NS_POPUP_MENU_WINDOW_LEVEL];
+                let _: () = objc2::msg_send![ptr, setCollectionBehavior: OVERLAY_BEHAVIOR];
+            }
+        }
+    });
+}
+
+fn set_overlay_passthrough(window: &tauri::WebviewWindow) {
+    #[cfg(target_os = "macos")]
+    {
+        let w = window.clone();
+        let _ = window.run_on_main_thread(move || {
+            unsafe {
+                if let Ok(ns_win) = w.ns_window() {
+                    let ptr = ns_win as *mut objc2::runtime::AnyObject;
+                    let _: () = objc2::msg_send![ptr, setIgnoresMouseEvents: true];
+                }
+            }
+        });
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = window.set_ignore_cursor_events(true);
+    }
+}
+
+fn apply_overlay_policy_for_label(
+    app: &AppHandle,
+    label: &str,
+    mode: OverlayMode,
+) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(label) {
+        apply_overlay_policy_to_window(&window, mode)?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PersistedAuthSession {
@@ -43,6 +176,22 @@ struct AuthStateChangedPayload {
     session_id: Option<String>,
     signed_in: bool,
     emitted_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MacOsAppIdentity {
+    bundle_identifier: String,
+    executable_path: String,
+    app_name: String,
+    is_packaged: bool,
+    is_dev_mode: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionStatusPayload {
+    status: String,
 }
 
 fn auth_session_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -68,6 +217,24 @@ fn now_epoch_millis_u64() -> u64 {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(dur) => dur.as_millis() as u64,
         Err(_) => 0,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn current_macos_identity(app: &AppHandle) -> MacOsAppIdentity {
+    let executable_path = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let bundle_identifier = app.config().identifier.clone();
+    let app_name = app.package_info().name.clone();
+    let is_packaged = executable_path.contains(".app/Contents/MacOS/");
+    let is_dev_mode = !is_packaged;
+    MacOsAppIdentity {
+        bundle_identifier,
+        executable_path,
+        app_name,
+        is_packaged,
+        is_dev_mode,
     }
 }
 
@@ -413,6 +580,8 @@ async fn capture_screen(app: AppHandle, window: Window) -> Result<String, String
 
 #[tauri::command]
 async fn show_mini_top_center(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let _ = set_macos_activation_policy("accessory".to_string());
     // The mini window is destroyed when a session ends (getCurrentWindow().close()).
     // Re-create it with the same config as tauri.conf.json when it no longer exists.
     let window = match app.get_webview_window("mini") {
@@ -460,58 +629,18 @@ async fn show_mini_top_center(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     window.set_minimizable(false).map_err(|e| e.to_string())?;
     window.set_maximizable(false).map_err(|e| e.to_string())?;
+    apply_overlay_policy_to_window(&window, OverlayMode::FullscreenOverlay)?;
 
-    // ── macOS: atomic level + shadow/opacity + show ───────────────────────
-    //
-    // Identical to show_launcher_widget.  run_on_main_thread enqueues to the
-    // Winit event-loop user-event queue so ALL show/level/behavior work runs
-    // atomically on one tick — no level-race with set_focus.
-    //
-    // setHasShadow:false + setOpaque:false + clearColor:
-    //   A fullscreen transparent overlay MUST NOT have an NSWindow shadow —
-    //   AppKit composites a dark halo around any non-fully-transparent pixel
-    //   (the session card). clearColor also disables edge-antialiasing blend
-    //   that bleeds dark pixels at rounded corners.
     #[cfg(target_os = "macos")]
     {
-        let win_clone = window.clone();
-        window
-            .run_on_main_thread(move || {
-                const OVERLAY_LEVEL: i64 = 25; // NSStatusWindowLevel
-                // canJoinAllSpaces(1) | stationary(16) | ignoresCycle(64) | fullScreenAuxiliary(256)
-                const OVERLAY_BEHAVIOR: u64 = 1 | 16 | 64 | 256;
-                unsafe {
-                    if let Ok(ns_win) = win_clone.ns_window() {
-                        let ptr = ns_win as *mut objc2::runtime::AnyObject;
-                        // 1. Level — must be set before orderFront.
-                        let _: () = objc2::msg_send![ptr, setLevel: OVERLAY_LEVEL];
-                        // 2. Collection behavior (fullScreenAuxiliary is critical).
-                        let _: () = objc2::msg_send![ptr, setCollectionBehavior: OVERLAY_BEHAVIOR];
-                        // 3. Kill native shadow + force clear background.
-                        let _: () = objc2::msg_send![ptr, setHasShadow: false];
-                        let _: () = objc2::msg_send![ptr, setOpaque: false];
-                        let ns_color_cls = objc2::class!(NSColor);
-                        let clear_color: *mut objc2::runtime::AnyObject =
-                            objc2::msg_send![ns_color_cls, clearColor];
-                        let _: () = objc2::msg_send![ptr, setBackgroundColor: clear_color];
-                        // 4. Show regardless of app-active state.
-                        let _: () = objc2::msg_send![ptr, orderFrontRegardless];
-                        // 5. Activate so the widget receives key events.
-                        let app_cls = objc2::class!(NSApplication);
-                        let ns_app: *mut objc2::runtime::AnyObject =
-                            objc2::msg_send![app_cls, sharedApplication];
-                        let _: () = objc2::msg_send![ns_app, activateIgnoringOtherApps: true];
-                    }
-                }
-            })
-            .map_err(|e| e.to_string())?;
+        window.show().map_err(|e| e.to_string())?;
+        apply_macos_overlay_policy(&window, true)?;
     }
 
     // ── Windows ───────────────────────────────────────────────────────────
     #[cfg(target_os = "windows")]
     {
         window.show().map_err(|e| e.to_string())?;
-        window.set_always_on_top(true).map_err(|e| e.to_string())?;
         if let Ok(hwnd) = window.hwnd() {
             let win_hwnd = windows::Win32::Foundation::HWND(hwnd.0);
             let _ = winvd::pin_window(win_hwnd);
@@ -528,12 +657,13 @@ async fn show_mini_top_center(app: AppHandle) -> Result<(), String> {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         window.show().map_err(|e| e.to_string())?;
-        window.set_always_on_top(true).map_err(|e| e.to_string())?;
     }
 
     // On macOS focus is handled by activateIgnoringOtherApps in the block above.
     #[cfg(not(target_os = "macos"))]
     window.set_focus().map_err(|e| e.to_string())?;
+
+    set_overlay_passthrough(&window);
 
     Ok(())
 }
@@ -1542,7 +1672,6 @@ async fn start_system_audio_transcription(
                         eprintln!("[stt:system] systemFirstPcmFrame");
                         emit_system_health_event(&app_for_callback, my_gen, "capturing");
                     } else if prev % 50 == 0 {
-                        eprintln!("[stt:system] systemPcmHeartbeat");
                         emit_system_health_event(&app_for_callback, my_gen, "capturing");
                     }
                     let _ = tx.send(Arc::new(pcm));
@@ -1875,7 +2004,6 @@ async fn start_system_audio_transcription(
                             eprintln!("[stt:system] systemFirstPcmFrame");
                             emit_system_health_event(&app_for_callback, my_gen, "capturing");
                         } else if prev % 50 == 0 {
-                            eprintln!("[stt:system] systemPcmHeartbeat");
                             emit_system_health_event(&app_for_callback, my_gen, "capturing");
                         }
                     }
@@ -1900,7 +2028,6 @@ async fn start_system_audio_transcription(
                             eprintln!("[stt:system] systemFirstPcmFrame");
                             emit_system_health_event(&app_for_callback, my_gen, "capturing");
                         } else if prev % 50 == 0 {
-                            eprintln!("[stt:system] systemPcmHeartbeat");
                             emit_system_health_event(&app_for_callback, my_gen, "capturing");
                         }
                     }
@@ -2242,6 +2369,152 @@ async fn ensure_microphone_permission() -> Result<(), String> {
 }
 
 #[tauri::command]
+fn get_macos_app_identity(app: tauri::AppHandle) -> Result<MacOsAppIdentity, String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(current_macos_identity(&app))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err("Not supported on this OS".into())
+    }
+}
+
+#[tauri::command]
+async fn check_microphone_permission(_app: tauri::AppHandle) -> Result<PermissionStatusPayload, String> {
+    #[cfg(target_os = "macos")]
+    {
+        use cpal::traits::{DeviceTrait, HostTrait};
+        let host = cpal::default_host();
+        let status = match host.default_input_device() {
+            Some(device) => match device.default_input_config() {
+                Ok(_) => "granted",
+                Err(_) => "denied",
+            },
+            None => "unknown",
+        };
+        Ok(PermissionStatusPayload {
+            status: status.to_string(),
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(PermissionStatusPayload {
+            status: "granted".to_string(),
+        })
+    }
+}
+
+#[tauri::command]
+async fn request_microphone_permission(app: tauri::AppHandle) -> Result<PermissionStatusPayload, String> {
+    let _ = ensure_microphone_permission().await;
+    check_microphone_permission(app).await
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGRequestScreenCaptureAccess() -> bool;
+    fn CGPreflightScreenCaptureAccess() -> bool;
+}
+
+#[tauri::command]
+fn check_screen_recording_permission(_app: tauri::AppHandle) -> Result<PermissionStatusPayload, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let granted = unsafe { CGPreflightScreenCaptureAccess() };
+        let status = if granted { "granted" } else { "denied" };
+        Ok(PermissionStatusPayload {
+            status: status.to_string(),
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(PermissionStatusPayload {
+            status: "granted".to_string(),
+        })
+    }
+}
+
+#[tauri::command]
+fn request_screen_recording_permission(_app: tauri::AppHandle) -> Result<PermissionStatusPayload, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let granted_before = unsafe { CGPreflightScreenCaptureAccess() };
+        if granted_before {
+            return Ok(PermissionStatusPayload {
+                status: "granted".to_string(),
+            });
+        }
+        let granted_now = unsafe { CGRequestScreenCaptureAccess() };
+        let status = if granted_now {
+            "granted"
+        } else {
+            // Common macOS behavior: user enables from Settings but app restart needed.
+            "restart_required"
+        };
+        Ok(PermissionStatusPayload {
+            status: status.to_string(),
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(PermissionStatusPayload {
+            status: "granted".to_string(),
+        })
+    }
+}
+
+#[tauri::command]
+fn open_macos_privacy_settings(
+    app: tauri::AppHandle,
+    permission_type: String,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let url = match permission_type.as_str() {
+            "microphone" => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+            }
+            "screen_recording" | "screen-recording" => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+            }
+            _ => return Err("Unsupported permissionType".into()),
+        };
+        app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        let _ = permission_type;
+        Err("Not supported on this OS".into())
+    }
+}
+
+#[tauri::command]
+fn set_macos_activation_policy(mode: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let app_cls = objc2::class!(NSApplication);
+        let ns_app: *mut objc2::runtime::AnyObject = objc2::msg_send![app_cls, sharedApplication];
+        let policy: i64 = match mode.as_str() {
+            "regular" => 0,
+            "accessory" => 1,
+            _ => return Err("Unsupported activation policy mode".into()),
+        };
+        let ok: bool = objc2::msg_send![ns_app, setActivationPolicy: policy];
+        eprintln!("[audio-lifecycle] macDockPolicyApplied activationPolicy={mode} ok={ok}");
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = mode;
+        Ok(())
+    }
+}
+
+#[tauri::command]
 fn open_screen_recording_settings(app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -2290,8 +2563,13 @@ fn open_microphone_settings(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[command]
-fn set_session_active(active: bool) {
+fn set_session_active(app: AppHandle, active: bool) {
     SESSION_ACTIVE.store(active, Ordering::SeqCst);
+    if active {
+        let _ = apply_overlay_policy_for_label(&app, "mini", OverlayMode::FullscreenOverlay);
+    } else {
+        let _ = apply_overlay_policy_for_label(&app, "launcher", OverlayMode::FullscreenOverlay);
+    }
     if !active {
         stop_all_audio_transcription();
     }
@@ -2332,48 +2610,34 @@ async fn toggle_content_protection(app: AppHandle, protected: bool) -> Result<()
 #[command]
 fn handle_launcher_click(app: AppHandle) -> Result<(), String> {
     if SESSION_ACTIVE.load(Ordering::SeqCst) {
+        let _ = apply_overlay_policy_for_label(&app, "mini", OverlayMode::FullscreenOverlay);
         if let Some(mini) = app.get_webview_window("mini") {
-            // macOS: never call show() or set_focus() on overlay windows —
-            // they both route through makeKeyAndOrderFront which resets the
-            // compositor level back to NSFloatingWindowLevel (3). Use
-            // orderFrontRegardless instead, which honours the existing level.
             #[cfg(target_os = "macos")]
             {
-                let w = mini.clone();
-                let _ = mini.run_on_main_thread(move || {
-                    unsafe {
-                        if let Ok(ns_win) = w.ns_window() {
-                            let ptr = ns_win as *mut objc2::runtime::AnyObject;
-                            let _: () = objc2::msg_send![ptr, orderFrontRegardless];
-                        }
-                    }
-                });
+                let _ = apply_macos_overlay_policy(&mini, true);
+                set_overlay_passthrough(&mini);
             }
             #[cfg(not(target_os = "macos"))]
             {
                 let _ = mini.show();
                 let _ = mini.unminimize();
                 let _ = mini.set_focus();
+                set_overlay_passthrough(&mini);
             }
         }
     } else {
+        let _ = apply_overlay_policy_for_label(&app, "launcher", OverlayMode::FullscreenOverlay);
         if let Some(launcher) = app.get_webview_window("launcher") {
             #[cfg(target_os = "macos")]
             {
-                let w = launcher.clone();
-                let _ = launcher.run_on_main_thread(move || {
-                    unsafe {
-                        if let Ok(ns_win) = w.ns_window() {
-                            let ptr = ns_win as *mut objc2::runtime::AnyObject;
-                            let _: () = objc2::msg_send![ptr, orderFrontRegardless];
-                        }
-                    }
-                });
+                let _ = apply_macos_overlay_policy(&launcher, true);
+                set_overlay_passthrough(&launcher);
             }
             #[cfg(not(target_os = "macos"))]
             {
                 let _ = launcher.show();
                 let _ = launcher.set_focus();
+                set_overlay_passthrough(&launcher);
             }
         }
     }
@@ -2399,6 +2663,8 @@ async fn open_main_dashboard(
     // hidden background session-processor (e.g. event bus for the mini overlay).
     visible: Option<bool>,
 ) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let _ = set_macos_activation_policy("regular".to_string());
     // ── 1. Create the main window lazily — only when the user explicitly needs it ──
     let is_new_window = app.get_webview_window("main").is_none();
 
@@ -2425,6 +2691,8 @@ async fn open_main_dashboard(
             .center()
             .resizable(false)
             .maximized(true)
+            .always_on_top(false)
+            .visible_on_all_workspaces(false)
             .skip_taskbar(false)
             .content_protected(false)
             .on_navigation(move |url| {
@@ -2454,12 +2722,15 @@ async fn open_main_dashboard(
     // previous call that predates this setting being added to the builder.
     main_win.set_decorations(false).map_err(|e| e.to_string())?;
 
+    let _ = is_new_window;
+
     // Only show/focus when caller wants the window to be visible (default true).
     // Passing `visible: false` creates or navigates the window as a hidden
     // background processor (e.g. session event bus for the mini overlay).
     if visible.unwrap_or(true) {
         main_win.show().map_err(|e| e.to_string())?;
         main_win.unminimize().map_err(|e| e.to_string())?;
+        let _ = main_win.set_always_on_top(false);
         main_win.set_focus().map_err(|e| e.to_string())?;
     }
 
@@ -2508,6 +2779,8 @@ async fn open_main_dashboard(
 /// net in case it is ever called from a tokio worker via invoke.
 #[tauri::command]
 fn show_launcher_widget(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let _ = set_macos_activation_policy("accessory".to_string());
     let window = app
         .get_webview_window("launcher")
         .ok_or("launcher window not found")?;
@@ -2531,65 +2804,18 @@ fn show_launcher_widget(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     window.set_minimizable(false).map_err(|e| e.to_string())?;
     window.set_maximizable(false).map_err(|e| e.to_string())?;
+    apply_overlay_policy_to_window(&window, OverlayMode::FullscreenOverlay)?;
 
-    // ── macOS: atomic level + show in one run_on_main_thread block ────────
-    //
-    // Same race-condition fix as show_mini_top_center. See that function for
-    // the detailed explanation. TL;DR: run_on_main_thread enqueues to the
-    // Winit event-loop user-event queue, so any Tauri call made AFTER it on
-    // the calling thread may execute BEFORE the closure. We therefore put ALL
-    // macOS show/level/focus work inside one closure and skip set_focus() on
-    // the outer call path for macOS.
-    //
-    // orderFrontRegardless — shows the overlay even when the app is inactive.
-    // activateIgnoringOtherApps — lets the widget receive key events.
     #[cfg(target_os = "macos")]
     {
-        let win_clone = window.clone();
-        window
-            .run_on_main_thread(move || {
-                const NS_STATUS_WINDOW_LEVEL: i64 = 25;
-                unsafe {
-                    if let Ok(ns_win) = win_clone.ns_window() {
-                        let ptr = ns_win as *mut objc2::runtime::AnyObject;
-                        // 1. Set level before showing — compositor locks at
-                        //    the level the window has when first ordered front.
-                        let _: () = objc2::msg_send![ptr, setLevel: NS_STATUS_WINDOW_LEVEL];
-                        // 2. canJoinAllSpaces | stationary | ignoresCycle | fullScreenAuxiliary
-                        let behavior: u64 = 1 | 16 | 64 | 256;
-                        let _: () = objc2::msg_send![ptr, setCollectionBehavior: behavior];
-                        // 2b. Kill native shadow + force clear background.
-                        //     A fullscreen transparent overlay must NOT have an
-                        //     NSWindow shadow — AppKit otherwise composites a
-                        //     dark halo around any non-fully-transparent pixel
-                        //     (the launcher card), which appears as the black
-                        //     irregular outline.  setOpaque:NO + clearColor
-                        //     also disables the compositor's edge antialiasing
-                        //     blend that bleeds dark pixels at rounded corners.
-                        let _: () = objc2::msg_send![ptr, setHasShadow: false];
-                        let _: () = objc2::msg_send![ptr, setOpaque: false];
-                        let ns_color_cls = objc2::class!(NSColor);
-                        let clear_color: *mut objc2::runtime::AnyObject =
-                            objc2::msg_send![ns_color_cls, clearColor];
-                        let _: () = objc2::msg_send![ptr, setBackgroundColor: clear_color];
-                        // 3. Show regardless of app-active state.
-                        let _: () = objc2::msg_send![ptr, orderFrontRegardless];
-                        // 4. Activate so the widget can receive key events.
-                        let app_cls = objc2::class!(NSApplication);
-                        let ns_app: *mut objc2::runtime::AnyObject =
-                            objc2::msg_send![app_cls, sharedApplication];
-                        let _: () = objc2::msg_send![ns_app, activateIgnoringOtherApps: true];
-                    }
-                }
-            })
-            .map_err(|e| e.to_string())?;
+        window.show().map_err(|e| e.to_string())?;
+        apply_macos_overlay_policy(&window, true)?;
     }
 
     // ── Windows ───────────────────────────────────────────────────────────
     #[cfg(target_os = "windows")]
     {
         window.show().map_err(|e| e.to_string())?;
-        window.set_always_on_top(true).map_err(|e| e.to_string())?;
         if let Ok(hwnd) = window.hwnd() {
             let win_hwnd = windows::Win32::Foundation::HWND(hwnd.0);
             let _ = winvd::pin_window(win_hwnd);
@@ -2606,12 +2832,13 @@ fn show_launcher_widget(app: AppHandle) -> Result<(), String> {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         window.show().map_err(|e| e.to_string())?;
-        window.set_always_on_top(true).map_err(|e| e.to_string())?;
     }
 
     // macOS: focus handled by activateIgnoringOtherApps in the block above.
     #[cfg(not(target_os = "macos"))]
     window.set_focus().map_err(|e| e.to_string())?;
+
+    set_overlay_passthrough(&window);
 
     Ok(())
 }
@@ -2641,14 +2868,14 @@ fn set_cursor_passthrough(window: Window, passthrough: bool) -> Result<(), Strin
         let win_for_thread = window.clone();
         window
             .run_on_main_thread(move || {
-            unsafe {
-                if let Ok(ns_win) = win_for_thread.ns_window() {
-                    let ptr = ns_win as *mut objc2::runtime::AnyObject;
-                    let _: () = objc2::msg_send![ptr, setIgnoresMouseEvents: passthrough];
+                unsafe {
+                    if let Ok(ns_win) = win_for_thread.ns_window() {
+                        let ptr = ns_win as *mut objc2::runtime::AnyObject;
+                        let _: () = objc2::msg_send![ptr, setIgnoresMouseEvents: passthrough];
+                    }
                 }
-            }
-        })
-        .map_err(|e| e.to_string())?;
+            })
+            .map_err(|e| e.to_string())?;
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -2703,16 +2930,9 @@ pub fn run() {
         .unwrap_or_default();
 
     if deepgram_key.is_empty() {
-        eprintln!(
-            "[startup] VITE_DEEPGRAM_API_KEY is not set — STT will fail.\n\
-             Dev: add it to .env\n\
-             Release: add it as a GitHub Actions secret and expose it in the \
-             release workflow (VITE_DEEPGRAM_API_KEY: ${{{{ secrets.VITE_DEEPGRAM_API_KEY }}}})"
-        );
-        // In release builds, abort immediately — a missing key means STT is
-        // completely broken and would confuse debugging with permission errors.
+        eprintln!("[startup] VITE_DEEPGRAM_API_KEY is not set - STT will fail.");
         #[cfg(not(debug_assertions))]
-        panic!("Release build is missing VITE_DEEPGRAM_API_KEY — aborting to prevent silent STT failure.");
+        panic!("Release build is missing VITE_DEEPGRAM_API_KEY - aborting to prevent silent STT failure.");
     }
 
     tauri::Builder::default()
@@ -2725,29 +2945,9 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .manage(DeepgramKey(deepgram_key))
         .setup(|app| {
-            // ── macOS: switch to Accessory activation policy ───────────────
-            //
-            // ROOT CAUSE FIX: The default NSApplicationActivationPolicyRegular
-            // (0) makes macOS treat us as a foreground app whose windows can be
-            // beaten by any active app, even at NSStatusWindowLevel (25).
-            //
-            // NSApplicationActivationPolicyAccessory (1) means:
-            //   - No dock icon / menu bar (pure overlay / background app)
-            //   - Our windows float above ALL regular-policy windows
-            //   - We never steal the active-app indicator from the frontmost app
-            //
-            // This is how Loom, Parakeet, Raycast, and every true macOS overlay
-            // achieves persistent above-all-others behavior.
-            //
-            // setup() runs on the main thread — safe to call ObjC directly.
+            // Default to Regular policy at boot; switch dynamically based on mode.
             #[cfg(target_os = "macos")]
-            unsafe {
-                let app_cls = objc2::class!(NSApplication);
-                let ns_app: *mut objc2::runtime::AnyObject =
-                    objc2::msg_send![app_cls, sharedApplication];
-                // 1 = NSApplicationActivationPolicyAccessory
-                let _: () = objc2::msg_send![ns_app, setActivationPolicy: 1i64];
-            }
+            let _ = set_macos_activation_policy("regular".to_string());
 
             // ── Apply OS chrome removal to the mini overlay ────────────────
             #[cfg(target_os = "windows")]
@@ -2773,6 +2973,11 @@ pub fn run() {
             if let Err(e) = show_launcher_widget(app.handle().clone()) {
                 eprintln!("[setup] show_launcher_widget failed: {e}");
             }
+            let _ = apply_overlay_policy_for_label(
+                &app.handle().clone(),
+                "launcher",
+                OverlayMode::FullscreenOverlay,
+            );
 
             // ── Deep-link: handle auth ticket + bring widget to front ────
             // scribeshade://auth-callback?ticket=TOKEN  ← browser login flow
@@ -2809,22 +3014,20 @@ pub fn run() {
 
                     // Bring launcher to front — do NOT open the main window
                     if let Some(widget) = deep_link_handle.get_webview_window("launcher") {
+                        let _ = apply_overlay_policy_to_window(
+                            &widget,
+                            OverlayMode::FullscreenOverlay,
+                        );
                         #[cfg(target_os = "macos")]
                         {
-                            let w = widget.clone();
-                            let _ = widget.run_on_main_thread(move || {
-                                unsafe {
-                                    if let Ok(ns_win) = w.ns_window() {
-                                        let ptr = ns_win as *mut objc2::runtime::AnyObject;
-                                        let _: () = objc2::msg_send![ptr, orderFrontRegardless];
-                                    }
-                                }
-                            });
+                            let _ = apply_macos_overlay_policy(&widget, true);
+                            set_overlay_passthrough(&widget);
                         }
                         #[cfg(not(target_os = "macos"))]
                         {
                             let _ = widget.show();
                             let _ = widget.set_focus();
+                            set_overlay_passthrough(&widget);
                         }
                     }
                     return;
@@ -2835,44 +3038,37 @@ pub fn run() {
                     let _ = main.show();
                     let _ = main.set_focus();
                 } else if let Some(widget) = deep_link_handle.get_webview_window("launcher") {
+                    let _ = apply_overlay_policy_to_window(
+                        &widget,
+                        OverlayMode::FullscreenOverlay,
+                    );
                     #[cfg(target_os = "macos")]
                     {
-                        let w = widget.clone();
-                        let _ = widget.run_on_main_thread(move || {
-                            unsafe {
-                                if let Ok(ns_win) = w.ns_window() {
-                                    let ptr = ns_win as *mut objc2::runtime::AnyObject;
-                                    let _: () = objc2::msg_send![ptr, orderFrontRegardless];
-                                }
-                            }
-                        });
+                        let _ = apply_macos_overlay_policy(&widget, true);
+                        set_overlay_passthrough(&widget);
                     }
                     #[cfg(not(target_os = "macos"))]
                     {
                         let _ = widget.show();
                         let _ = widget.set_focus();
+                        set_overlay_passthrough(&widget);
                     }
                 }
             });
 
             if let Ok(Some(_)) = app.handle().deep_link().get_current() {
                 if let Some(widget) = app.handle().get_webview_window("launcher") {
+                    let _ = apply_overlay_policy_to_window(&widget, OverlayMode::FullscreenOverlay);
                     #[cfg(target_os = "macos")]
                     {
-                        let w = widget.clone();
-                        let _ = widget.run_on_main_thread(move || {
-                            unsafe {
-                                if let Ok(ns_win) = w.ns_window() {
-                                    let ptr = ns_win as *mut objc2::runtime::AnyObject;
-                                    let _: () = objc2::msg_send![ptr, orderFrontRegardless];
-                                }
-                            }
-                        });
+                        let _ = apply_macos_overlay_policy(&widget, true);
+                        set_overlay_passthrough(&widget);
                     }
                     #[cfg(not(target_os = "macos"))]
                     {
                         let _ = widget.show();
                         let _ = widget.set_focus();
+                        set_overlay_passthrough(&widget);
                     }
                 }
             }
@@ -2889,23 +3085,20 @@ pub fn run() {
                                 let _ = mini.hide();
                                 if !SESSION_ACTIVE.load(Ordering::SeqCst) {
                                     if let Some(widget) = mini_handle.get_webview_window("launcher") {
-                                        // macOS: avoid makeKeyAndOrderFront path.
+                                        let _ = apply_overlay_policy_to_window(
+                                            &widget,
+                                            OverlayMode::FullscreenOverlay,
+                                        );
                                         #[cfg(target_os = "macos")]
                                         {
-                                            let w = widget.clone();
-                                            let _ = widget.run_on_main_thread(move || {
-                                                unsafe {
-                                                    if let Ok(ns_win) = w.ns_window() {
-                                                        let ptr = ns_win as *mut objc2::runtime::AnyObject;
-                                                        let _: () = objc2::msg_send![ptr, orderFrontRegardless];
-                                                    }
-                                                }
-                                            });
+                                            let _ = apply_macos_overlay_policy(&widget, true);
+                                            set_overlay_passthrough(&widget);
                                         }
                                         #[cfg(not(target_os = "macos"))]
                                         {
                                             let _ = widget.show();
                                             let _ = widget.set_focus();
+                                            set_overlay_passthrough(&widget);
                                         }
                                     }
                                 }
@@ -2933,7 +3126,7 @@ pub fn run() {
                 });
             }
 
-            // ── macOS: re-apply NSStatusWindowLevel on every Focused event ─
+            // ── macOS: re-apply overlay policy on lifecycle events ───────────
             //
             // macOS resets window levels after any focus / show lifecycle
             // event (Tauri internally calls makeKeyAndOrderFront which
@@ -2950,28 +3143,19 @@ pub fn run() {
             {
                 // launcher window — always shown
                 if let Some(win) = app.get_webview_window("launcher") {
-                    let w = win.clone();
                     let exit_handle = app.handle().clone();
+                    let launcher_handle = app.handle().clone();
                     win.on_window_event(move |event| {
                         match event {
-                            tauri::WindowEvent::Focused(_) => {
-                                // Re-apply BOTH level AND collectionBehavior.
-                                // macOS can reset either property after makeKeyAndOrderFront
-                                // or a Space transition. Level alone is not enough — if
-                                // collectionBehavior loses fullScreenAuxiliary the overlay
-                                // will no longer appear above fullscreen apps.
-                                let ww = w.clone();
-                                let _ = w.run_on_main_thread(move || {
-                                    const OVERLAY_LEVEL: i64 = 25;
-                                    const OVERLAY_BEHAVIOR: u64 = 1 | 16 | 64 | 256;
-                                    unsafe {
-                                        if let Ok(ns_win) = ww.ns_window() {
-                                            let ptr = ns_win as *mut objc2::runtime::AnyObject;
-                                            let _: () = objc2::msg_send![ptr, setLevel: OVERLAY_LEVEL];
-                                            let _: () = objc2::msg_send![ptr, setCollectionBehavior: OVERLAY_BEHAVIOR];
-                                        }
-                                    }
-                                });
+                            tauri::WindowEvent::Focused(true)
+                            | tauri::WindowEvent::Resized(_)
+                            | tauri::WindowEvent::Moved(_)
+                            | tauri::WindowEvent::ScaleFactorChanged { .. } => {
+                                if let Some(w) =
+                                    launcher_handle.get_webview_window("launcher")
+                                {
+                                    reinforce_window_level(&w);
+                                }
                             }
                             // BUG FIX: Exit the process when the launcher is destroyed.
                             //
@@ -2997,21 +3181,18 @@ pub fn run() {
 
                 // mini overlay — shown during active sessions
                 if let Some(win) = app.get_webview_window("mini") {
-                    let w = win.clone();
+                    let mini_handle = app.handle().clone();
                     win.on_window_event(move |event| {
-                        if let tauri::WindowEvent::Focused(_) = event {
-                            let ww = w.clone();
-                            let _ = w.run_on_main_thread(move || {
-                                const OVERLAY_LEVEL: i64 = 25;
-                                const OVERLAY_BEHAVIOR: u64 = 1 | 16 | 64 | 256;
-                                unsafe {
-                                    if let Ok(ns_win) = ww.ns_window() {
-                                        let ptr = ns_win as *mut objc2::runtime::AnyObject;
-                                        let _: () = objc2::msg_send![ptr, setLevel: OVERLAY_LEVEL];
-                                        let _: () = objc2::msg_send![ptr, setCollectionBehavior: OVERLAY_BEHAVIOR];
-                                    }
-                                }
-                            });
+                        if matches!(
+                            event,
+                            tauri::WindowEvent::Focused(true)
+                                | tauri::WindowEvent::Resized(_)
+                                | tauri::WindowEvent::Moved(_)
+                                | tauri::WindowEvent::ScaleFactorChanged { .. }
+                        ) {
+                            if let Some(w) = mini_handle.get_webview_window("mini") {
+                                reinforce_window_level(&w);
+                            }
                         }
                     });
                 }
@@ -3026,11 +3207,10 @@ pub fn run() {
             // NSWindowCollectionBehavior during the Space compositor handoff,
             // causing the overlay to disappear behind the fullscreen app.
             //
-            // FIX: A lightweight background task re-applies level=25 +
-            // collectionBehavior (canJoinAllSpaces | stationary | ignoresCycle |
-            // fullScreenAuxiliary) to every visible overlay window every 2 seconds.
-            // The cost is two run_on_main_thread dispatches per interval — each is
-            // two ObjC msg_send calls. CPU impact is negligible.
+            // FIX: A lightweight background task re-applies the popup menu
+            // window level plus collection behavior (canJoinAllSpaces |
+            // stationary | ignoresCycle | fullScreenAuxiliary) to every visible
+            // overlay window every 2 seconds. CPU impact is negligible.
             //
             // This handles: fullscreen Space entry/exit, Mission Control, Exposé,
             // hot corners, and any other event that silently resets window
@@ -3044,18 +3224,7 @@ pub fn run() {
                         for label in ["launcher", "mini"] {
                             if let Some(win) = reinforce_handle.get_webview_window(label) {
                                 if win.is_visible().unwrap_or(false) {
-                                    let w = win.clone();
-                                    let _ = win.run_on_main_thread(move || {
-                                        const OVERLAY_LEVEL: i64 = 25;
-                                        const OVERLAY_BEHAVIOR: u64 = 1 | 16 | 64 | 256;
-                                        unsafe {
-                                            if let Ok(ns_win) = w.ns_window() {
-                                                let ptr = ns_win as *mut objc2::runtime::AnyObject;
-                                                let _: () = objc2::msg_send![ptr, setLevel: OVERLAY_LEVEL];
-                                                let _: () = objc2::msg_send![ptr, setCollectionBehavior: OVERLAY_BEHAVIOR];
-                                            }
-                                        }
-                                    });
+                                    reinforce_window_level(&win);
                                 }
                             }
                         }
@@ -3091,6 +3260,10 @@ pub fn run() {
             stop_all_audio_transcription,
             open_screen_recording_settings, open_microphone_settings,
             ensure_microphone_permission,
+            get_macos_app_identity,
+            check_microphone_permission, request_microphone_permission,
+            check_screen_recording_permission, request_screen_recording_permission,
+            open_macos_privacy_settings, set_macos_activation_policy,
             set_session_active, toggle_content_protection, handle_launcher_click,
             open_main_dashboard, show_launcher_widget,
             get_cursor_position, set_cursor_passthrough,

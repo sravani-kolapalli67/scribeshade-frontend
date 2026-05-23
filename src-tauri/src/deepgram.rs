@@ -435,10 +435,6 @@ pub async fn run_session(
                                 .to_string();
                             let text_len = transcript.trim().len();
                             if is_final {
-                                eprintln!(
-                                    "[{tag}] finalReceived sourcePlatform=tauri channel={} textLength={}",
-                                    tag, text_len
-                                );
                                 if let Some(h) = reader_health {
                                     if text_len == 0 {
                                         h.empty_final_streak.fetch_add(1, Ordering::SeqCst);

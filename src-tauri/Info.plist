@@ -33,8 +33,5 @@
   <key>NSScreenCaptureUsageDescription</key>
   <string>ScribeShade needs screen capture access to display and analyze the shared content.</string>
 
-  <!-- Hide from Dock and Cmd+Tab - makes app a background utility -->
-  <key>LSUIElement</key>
-  <true/>
 </dict>
 </plist>

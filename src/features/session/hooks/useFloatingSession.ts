@@ -55,6 +55,7 @@ import {
   selectTimerParams,
 } from "@/features/session/selectors/floatingSessionSelectors";
 import { isScenarioBased, extractContextFromMessages, buildDynamicTranscriptWindow } from "@/semantic";
+import { detectActiveQuestion } from "@/features/session/detection/activeQuestionDetector";
 import {
   type AIAnswerRequestPayload,
   extractCodeBlocks,
@@ -135,6 +136,8 @@ function getLanguageCode(lang: string): string {
 // Fallback window (ms) used only when no AI answer has been given yet in this
 // session. Covers a multi-question interviewer monologue at the very start.
 const FIRST_ANSWER_WINDOW_MS = 120_000;
+const ACTIVE_QUESTION_DEBOUNCE_MS = 2000;
+const ACTIVE_QUESTION_CONFIDENCE_THRESHOLD = 0.58;
 
 // When regenerate is clicked we intentionally wait a bit so additional
 // transcript chunks can arrive before rebuilding the question context.
@@ -172,9 +175,11 @@ const SYSTEM_EMPTY_FINAL_STORM_COUNT = 6;
 const SYSTEM_EMPTY_FINAL_STORM_WINDOW_MS = 10_000;
 const SYSTEM_NO_EVENTS_STALE_MS = 10_000;
 const SYSTEM_NO_MEANINGFUL_STALE_MS = 20_000;
+const SYSTEM_HEALTH_LOG_INTERVAL_MS = 5000;
 const SYSTEM_RESTART_MAX_PER_WINDOW = 3;
 const SYSTEM_RESTART_WINDOW_MS = 60_000;
 const SYSTEM_RESTART_BUDGET_RESET_MS = 75_000;
+const EMPTY_FINAL_LOG_THRESHOLDS = [3, 6, 10] as const;
 type TranscriptInsertSource =
   | "stt:user"
   | "stt:interviewer"
@@ -197,6 +202,24 @@ type SystemHealthPayload = {
   emptyFinalStreak: number;
   generation: number;
   state: string;
+};
+
+type MacPermissionStatus =
+  | "granted"
+  | "denied"
+  | "not_determined"
+  | "restricted"
+  | "unknown"
+  | "restart_required";
+
+type MacPermissionPayload = { status: MacPermissionStatus };
+
+type MacAppIdentity = {
+  bundleIdentifier: string;
+  executablePath: string;
+  appName: string;
+  isPackaged: boolean;
+  isDevMode: boolean;
 };
 
 function normalizeLoose(text: string): string {
@@ -698,12 +721,23 @@ export function useFloatingSession() {
   const [micInterimTranscript, setMicInterimTranscript] = useState("");
   const [tabStatus, setTabStatus] = useState<"idle" | "connecting" | "transcribing" | "error">("idle");
   const [tabError, setTabError] = useState<string | null>(null);
+  const [tabErrorPermissionType, setTabErrorPermissionType] = useState<"microphone" | "screen-recording" | null>(null);
+  const [permissionIdentity, setPermissionIdentity] = useState<MacAppIdentity | null>(null);
+  const [permissionRequiresRestart, setPermissionRequiresRestart] = useState(false);
   const [tabInterimTranscript, setTabInterimTranscript] = useState("");
   const [captureArmed, setCaptureArmed] = useState(false);
   const [isSystemStale, setIsSystemStale] = useState(false);
   const systemStartIssuedForSessionRef = useRef<string | null>(null);
   const systemHealthIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const systemReacquireInFlightRef = useRef(false);
+  const lastLoggedHealthAtRef = useRef(0);
+  const lastLoggedEmptyFinalThresholdRef = useRef(0);
+  const previousHealthStateRef = useRef("idle");
+  const previousCaptureRunningRef = useRef(false);
+  const previousDeepgramRunningRef = useRef(false);
+  const previousIsSystemStaleRef = useRef(false);
+  const previousSystemPhaseRef = useRef<"idle" | "connecting" | "transcribing" | "stale" | "reconnecting" | "error">("idle");
+  const lastPcmFramesCheckedRef = useRef(0);
   const systemHealthRef = useRef<{
     lastSystemInterimAt: number;
     lastSystemFinalAt: number;
@@ -741,6 +775,30 @@ export function useFloatingSession() {
     healthState: "idle",
     isSystemSilent: false,
   });
+  const logSystemHealthSummary = useCallback(
+    (state: string, stale: boolean) => {
+      if (!import.meta.env.DEV) return;
+      const now = Date.now();
+      if (now - lastLoggedHealthAtRef.current < SYSTEM_HEALTH_LOG_INTERVAL_MS) return;
+      lastLoggedHealthAtRef.current = now;
+      const health = systemHealthRef.current;
+      console.log("[audio-lifecycle] systemHealthSummary", {
+        state,
+        pcmFramesSent: health.lastPcmFramesSent,
+        emptyFinalStreak: health.emptyFinalStreak,
+        silent: health.isSystemSilent,
+        stale,
+      });
+    },
+    [],
+  );
+  const logSystemTransition = useCallback(
+    (from: "idle" | "connecting" | "transcribing" | "stale" | "reconnecting" | "live" | "error", to: "idle" | "connecting" | "transcribing" | "stale" | "reconnecting" | "live" | "error") => {
+      if (!import.meta.env.DEV || from === to) return;
+      console.log("[audio-lifecycle] systemTransition", { transition: `${from} -> ${to}` });
+    },
+    [],
+  );
   const [isCapturing, setIsCapturing] = useState(false);
   const [inputValue, setInputValue] = useState("");
   const patchPersistTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
@@ -1218,10 +1276,98 @@ export function useFloatingSession() {
 
   // ── System audio (Rust STT) ─────────────────────────────────────────────────
 
+  const logMacPermission = useCallback((event: string, payload?: unknown) => {
+    if (!import.meta.env.DEV) return;
+    console.warn(`[audio-lifecycle] ${event}`, payload ?? {});
+  }, []);
+
+  const getMacIdentity = useCallback(async (): Promise<MacAppIdentity | null> => {
+    try {
+      const identity = await invoke<MacAppIdentity>("get_macos_app_identity");
+      setPermissionIdentity(identity);
+      logMacPermission("macAppIdentity", identity);
+      return identity;
+    } catch {
+      return null;
+    }
+  }, [logMacPermission]);
+
+  const preflightSystemPermission = useCallback(async (isRetry = false): Promise<boolean> => {
+    if (isRetry) logMacPermission("permissionRetryClicked", { permissionType: "screen-recording" });
+    logMacPermission("macPermissionCheckStarted", { permissionType: "screen-recording" });
+    const identity = await getMacIdentity();
+    const check = await invoke<MacPermissionPayload>("check_screen_recording_permission");
+    logMacPermission("screenRecordingPermissionStatus", check);
+    if (check.status === "granted") {
+      logMacPermission("permissionRecheckPassed", { permissionType: "screen-recording" });
+      setTabErrorPermissionType(null);
+      setPermissionRequiresRestart(false);
+      return true;
+    }
+    const requested = await invoke<MacPermissionPayload>("request_screen_recording_permission");
+    logMacPermission("screenRecordingPermissionStatus", { requested });
+    if (requested.status === "granted") {
+      logMacPermission("permissionRecheckPassed", { permissionType: "screen-recording" });
+      setTabErrorPermissionType(null);
+      setPermissionRequiresRestart(false);
+      return true;
+    }
+    const restartRequired = requested.status === "restart_required";
+    setPermissionRequiresRestart(restartRequired);
+    setTabErrorPermissionType("screen-recording");
+    const detail = identity
+      ? ` [bundleIdentifier=${identity.bundleIdentifier}, executablePath=${identity.executablePath}]`
+      : "";
+    setTabError(
+      restartRequired
+        ? `Screen Recording permission requires app restart after enabling.${detail}`
+        : `Screen Recording permission denied. Open Settings and retry.${detail}`,
+    );
+    logMacPermission("permissionDeniedReason", { permissionType: "screen-recording", restartRequired });
+    logMacPermission("permissionRecheckFailed", { permissionType: "screen-recording", restartRequired });
+    return false;
+  }, [getMacIdentity, logMacPermission]);
+
+  const preflightMicPermission = useCallback(async (isRetry = false): Promise<boolean> => {
+    if (isRetry) logMacPermission("permissionRetryClicked", { permissionType: "microphone" });
+    logMacPermission("macPermissionCheckStarted", { permissionType: "microphone" });
+    const identity = await getMacIdentity();
+    const check = await invoke<MacPermissionPayload>("check_microphone_permission");
+    logMacPermission("micPermissionStatus", check);
+    if (check.status === "granted") {
+      logMacPermission("permissionRecheckPassed", { permissionType: "microphone" });
+      setTabErrorPermissionType(null);
+      return true;
+    }
+    const requested = await invoke<MacPermissionPayload>("request_microphone_permission");
+    logMacPermission("micPermissionStatus", { requested });
+    if (requested.status === "granted") {
+      logMacPermission("permissionRecheckPassed", { permissionType: "microphone" });
+      setTabErrorPermissionType(null);
+      return true;
+    }
+    setTabErrorPermissionType("microphone");
+    const detail = identity
+      ? ` [bundleIdentifier=${identity.bundleIdentifier}, executablePath=${identity.executablePath}]`
+      : "";
+    const msg = `Microphone permission denied. Open Settings and retry.${detail}`;
+    setTabError(msg);
+    logMacPermission("permissionDeniedReason", { permissionType: "microphone" });
+    logMacPermission("permissionRecheckFailed", { permissionType: "microphone" });
+    return false;
+  }, [getMacIdentity, logMacPermission]);
+
   const startSystemAudio = useCallback(async () => {
     if (!sessionInfoRef.current) return;
     const lang = getLanguageCode(sessionInfoRef.current.language ?? "English");
     setTabError(null);
+    setTabErrorPermissionType(null);
+    setPermissionRequiresRestart(false);
+    const allowed = await preflightSystemPermission(false);
+    if (!allowed) {
+      setTabStatus("error");
+      return;
+    }
     setIsSystemStale(false);
     setTabStatus("connecting");
     audioControllerRef.current.startAudioSession("system", "start_system_audio");
@@ -1232,13 +1378,19 @@ export function useFloatingSession() {
       setTabError(msg);
       setTabStatus("error");
     }
-  }, []);
+  }, [preflightSystemPermission]);
 
   const retrySystemAudio = useCallback(async () => {
     if (!sessionInfoRef.current) return;
     setTabError(null);
+    setTabErrorPermissionType(null);
     setIsSystemStale(false);
     setTabStatus("connecting");
+    const allowed = await preflightSystemPermission(true);
+    if (!allowed) {
+      setTabStatus("error");
+      return;
+    }
     try {
       await audioControllerRef.current.stopAudioSession("system", "manual_retry_system_audio");
     } catch {
@@ -1246,7 +1398,7 @@ export function useFloatingSession() {
     }
     await new Promise((resolve) => setTimeout(resolve, 300));
     await startSystemAudio();
-  }, [startSystemAudio]);
+  }, [preflightSystemPermission, startSystemAudio]);
 
   const reacquireSystemAudio = useCallback(async (reason: string) => {
     if (systemReacquireInFlightRef.current) return;
@@ -1332,17 +1484,19 @@ export function useFloatingSession() {
             health.emptyFinalStreak = 0;
           }
           health.emptyFinalStreak += 1;
-          if (import.meta.env.DEV) {
+          const threshold = EMPTY_FINAL_LOG_THRESHOLDS.find((t) => health.emptyFinalStreak >= t);
+          if (import.meta.env.DEV && threshold && threshold > lastLoggedEmptyFinalThresholdRef.current) {
+            lastLoggedEmptyFinalThresholdRef.current = threshold;
             console.log("[audio-lifecycle] systemEmptyFinalStreak", {
               emptyFinalStreak: health.emptyFinalStreak,
-              stopReason: "empty_final",
-              sessionActive: !!sessionInfoRef.current?.sessionId,
+              threshold,
             });
           }
         } else {
           health.lastMeaningfulSystemTranscriptAt = now;
           health.emptyFinalStreak = 0;
           health.emptyFinalWindowStartAt = 0;
+          lastLoggedEmptyFinalThresholdRef.current = 0;
           health.lastHealthyAt = now;
           health.isSystemSilent = false;
           setIsSystemStale(false);
@@ -1353,18 +1507,11 @@ export function useFloatingSession() {
           health.lastMeaningfulSystemTranscriptAt = now;
           health.emptyFinalStreak = 0;
           health.emptyFinalWindowStartAt = 0;
+          lastLoggedEmptyFinalThresholdRef.current = 0;
           health.lastHealthyAt = now;
           health.isSystemSilent = false;
           setIsSystemStale(false);
         }
-      }
-      if (import.meta.env.DEV) {
-        console.log("[audio-lifecycle] systemHealthTick", {
-          stopReason: "stt_system_audio_event",
-          sessionActive: !!sessionInfoRef.current?.sessionId,
-          hasMeaningfulText: text.trim().length > 0,
-          isFinal: is_final,
-        });
       }
       if (is_final) {
         setTabInterimTranscript("");
@@ -1377,6 +1524,18 @@ export function useFloatingSession() {
 
     listen<{ status: string; error?: string }>("stt:status:system", (event) => {
       const { status, error } = event.payload;
+      if (import.meta.env.DEV) {
+        if (status === "connecting" && previousSystemPhaseRef.current === "idle") {
+          logSystemTransition("idle", "connecting");
+          previousSystemPhaseRef.current = "connecting";
+        } else if (status === "transcribing" && previousSystemPhaseRef.current === "connecting") {
+          logSystemTransition("connecting", "transcribing");
+          previousSystemPhaseRef.current = "transcribing";
+        } else if (status === "error") {
+          logSystemTransition(previousSystemPhaseRef.current, "error");
+          previousSystemPhaseRef.current = "error";
+        }
+      }
       setTabStatus(status as "idle" | "connecting" | "transcribing" | "error");
        if (status === "transcribing") {
         const now = Date.now();
@@ -1408,15 +1567,20 @@ export function useFloatingSession() {
         health.lastHealthyAt = now;
       }
       if (import.meta.env.DEV) {
-        console.log("[audio-lifecycle] systemHealthTick", {
-          stopReason: "stt_health_system",
-          sessionActive: !!sessionInfoRef.current?.sessionId,
-          state: payload.state,
-          pcmFramesSent: payload.pcmFramesSent,
-          deepgramRunning: payload.deepgramRunning,
-          captureRunning: payload.captureRunning,
-        });
+        const stateChanged = previousHealthStateRef.current !== health.healthState;
+        const captureChanged = previousCaptureRunningRef.current !== health.captureRunning;
+        const deepgramChanged = previousDeepgramRunningRef.current !== health.deepgramRunning;
+        if (stateChanged || captureChanged || deepgramChanged) {
+          if (health.healthState === "error") {
+            logSystemTransition(previousSystemPhaseRef.current, "error");
+            previousSystemPhaseRef.current = "error";
+          }
+          previousHealthStateRef.current = health.healthState;
+          previousCaptureRunningRef.current = health.captureRunning;
+          previousDeepgramRunningRef.current = health.deepgramRunning;
+        }
       }
+      logSystemHealthSummary(health.healthState, previousIsSystemStaleRef.current);
     }).then((fn) => { unlistenHealth = fn; }).catch(() => {});
 
     return () => {
@@ -1464,6 +1628,14 @@ export function useFloatingSession() {
         healthState: "idle",
         isSystemSilent: false,
       };
+      lastLoggedHealthAtRef.current = 0;
+      lastLoggedEmptyFinalThresholdRef.current = 0;
+      previousHealthStateRef.current = "idle";
+      previousCaptureRunningRef.current = false;
+      previousDeepgramRunningRef.current = false;
+      previousIsSystemStaleRef.current = false;
+      previousSystemPhaseRef.current = "idle";
+      lastPcmFramesCheckedRef.current = 0;
       setIsSystemStale(false);
     }
   }, [sessionInfo?.sessionId]);
@@ -1489,7 +1661,11 @@ export function useFloatingSession() {
       }
 
       const noSystemEvents = health.lastSystemEventAt > 0 && now - health.lastSystemEventAt > SYSTEM_NO_EVENTS_STALE_MS;
-      const noPcm = health.lastPcmAt === 0 || now - health.lastPcmAt > SYSTEM_NO_EVENTS_STALE_MS;
+      const pcmIncreasing = health.lastPcmFramesSent > lastPcmFramesCheckedRef.current;
+      const pcmRecent = health.lastPcmAt > 0 && now - health.lastPcmAt <= SYSTEM_NO_EVENTS_STALE_MS;
+      const healthyPcm = health.captureRunning && health.deepgramRunning && (pcmRecent || pcmIncreasing);
+      const noPcm = !pcmRecent && !pcmIncreasing;
+      lastPcmFramesCheckedRef.current = health.lastPcmFramesSent;
       const noMeaningful = health.lastMeaningfulSystemTranscriptAt > 0
         ? now - health.lastMeaningfulSystemTranscriptAt > SYSTEM_NO_MEANINGFUL_STALE_MS
         : now - health.lastDeepgramRunningAt > SYSTEM_NO_MEANINGFUL_STALE_MS;
@@ -1498,30 +1674,29 @@ export function useFloatingSession() {
       const emptyFinalStorm = inEmptyStormWindow && health.emptyFinalStreak >= SYSTEM_EMPTY_FINAL_STORM_COUNT;
       const deepgramDead = !health.deepgramRunning && health.lastDeepgramRunningAt > 0 && now - health.lastDeepgramRunningAt > 5000;
       const weakPhysicalHealth = noPcm || !health.captureRunning;
+      const healthySilentWindow = noMeaningful && healthyPcm;
       const staleBySilenceWithWeakPcm = noMeaningful && weakPhysicalHealth;
       const staleByEmptyStorm = emptyFinalStorm && weakPhysicalHealth;
       const staleByNoEvents = noSystemEvents && weakPhysicalHealth;
       const staleByExplicitHealth =
         health.healthState === "error" || health.healthState === "starved" || health.healthState === "stopped";
-      const stale = staleBySilenceWithWeakPcm || staleByEmptyStorm || staleByNoEvents || deepgramDead || staleByExplicitHealth;
+      const stale = !healthySilentWindow
+        && (staleBySilenceWithWeakPcm || staleByEmptyStorm || staleByNoEvents || deepgramDead || staleByExplicitHealth);
 
       health.isSystemSilent = !stale && !!health.deepgramRunning && !!health.captureRunning && noMeaningful;
 
-      if (import.meta.env.DEV) {
-        console.log("[audio-lifecycle] systemHealthTick", {
-          stopReason: "monitor_tick",
-          sessionActive,
-          tabStatus,
-          noSystemEvents,
-          noPcm,
-          noMeaningful,
-          emptyFinalStorm,
-          deepgramDead,
-          stale,
-          isSystemSilent: health.isSystemSilent,
-          state: health.healthState,
-        });
+      logSystemHealthSummary(health.healthState, stale);
+
+      if (import.meta.env.DEV && stale !== previousIsSystemStaleRef.current) {
+        if (stale) {
+          logSystemTransition("transcribing", "stale");
+          previousSystemPhaseRef.current = "stale";
+        } else if (previousSystemPhaseRef.current === "reconnecting" || previousSystemPhaseRef.current === "stale") {
+          logSystemTransition(previousSystemPhaseRef.current, "live");
+          previousSystemPhaseRef.current = "transcribing";
+        }
       }
+      previousIsSystemStaleRef.current = stale;
 
       if (!stale) {
         setIsSystemStale(false);
@@ -1529,15 +1704,8 @@ export function useFloatingSession() {
       }
       setIsSystemStale(true);
       if (import.meta.env.DEV) {
-        console.log("[audio-lifecycle] systemAudioStaleDetected", {
-          stopReason: "stale_classifier",
-          sessionActive,
-          staleBySilenceWithWeakPcm,
-          staleByEmptyStorm,
-          staleByNoEvents,
-          deepgramDead,
-          staleByExplicitHealth,
-        });
+        logSystemTransition("stale", "reconnecting");
+        previousSystemPhaseRef.current = "reconnecting";
       }
       void reacquireSystemAudio("system_stale_reacquire");
     }, 2000);
@@ -1747,10 +1915,32 @@ export function useFloatingSession() {
       console.log("[useFloatingSession] handleAiAnswerClick: Suppressed click (no sessionInfo available).");
       return;
     }
+    isEmittingRef.current = true;
+    try {
 
-    // Create an immutable transcript snapshot at the moment AI Answer is triggered.
-    // This prevents race conditions where new transcript chunks arrive during
-    // context extraction and contaminate the AI request context.
+    // 1) Apply semantic debounce before locking active question snapshot.
+    const preDebounceMessages = [...messagesRef.current];
+    const preDebounceDetection = detectActiveQuestion({
+      liveInterimText: tabInterimTranscript.trim(),
+      allMessages: preDebounceMessages
+        .filter((m) => (m.sender === "Interviewer" || m.sender === "User") && !!m.text?.trim())
+        .map((m) => ({
+          sender: m.sender as "User" | "Interviewer",
+          text: m.text.trim(),
+          timestamp: m.timestamp,
+        })),
+      cutoffTimestamp:
+        lastAnswerTimestampRef.current !== null
+          ? Math.min(lastAnswerTimestampRef.current, Date.now() - 5000)
+          : Date.now() - FIRST_ANSWER_WINDOW_MS,
+      selectedAnswerQuestion: "",
+    });
+    const initialSignature = `${messagesRef.current.length}:${tabInterimTranscript.trim()}`;
+    await new Promise((r) => setTimeout(r, ACTIVE_QUESTION_DEBOUNCE_MS));
+    const afterDebounceSignature = `${messagesRef.current.length}:${tabInterimTranscript.trim()}`;
+    const evolving = initialSignature !== afterDebounceSignature;
+
+    // 2) Freeze immutable snapshot used for this request only.
     const snapshotTimestamp = Date.now();
     const msgsSnapshot = [...messagesRef.current];
     const liveInterviewerTextSnapshot = tabInterimTranscript.trim();
@@ -1758,31 +1948,62 @@ export function useFloatingSession() {
     console.log("[useFloatingSession] Creating transcript snapshot at timestamp:", snapshotTimestamp);
     console.log("[useFloatingSession] Snapshot contains", msgsSnapshot.length, "messages");
 
-    // Try to resolve question from multiple sources using the immutable snapshot.
-    // Pass lastAnswerTimestampRef so only messages AFTER the last answered
-    // question are included — prevents merging already-answered questions.
-    const resolved = resolveQuestionFromContext(
-      liveInterviewerTextSnapshot,
-      msgsSnapshot,
-      lastMessage,
-      lastAnswerTimestampRef.current,
-    );
+    const safeResponseIndexForDetection =
+      aiResponses.length > 0
+        ? Math.min(currentResponseIndex, aiResponses.length - 1)
+        : 0;
+    const selectedAiMessageForDetection =
+      aiResponses[safeResponseIndexForDetection] ||
+      [...aiChat].reverse().find((m) => m.sender === "AI" && m.text?.trim()) ||
+      null;
 
-    if (!resolved) {
-      const interviewerCount = msgsSnapshot.filter((m) => m.sender === "Interviewer").length;
-      const userCount = msgsSnapshot.filter((m) => m.sender === "User").length;
-      console.log("[useFloatingSession] handleAiAnswerClick: No question found from any source. Aborting.", {
-        liveInterimText: liveInterviewerTextSnapshot,
-        interviewerMessagesCount: interviewerCount,
-        userMessagesCount: userCount,
-        totalMessages: msgsSnapshot.length,
-        lastMessageSender: lastMessage?.sender,
+    const cutoff =
+      lastAnswerTimestampRef.current !== null
+        ? Math.min(lastAnswerTimestampRef.current, Date.now() - 5000)
+        : Date.now() - FIRST_ANSWER_WINDOW_MS;
+    const detection = detectActiveQuestion({
+      liveInterimText: liveInterviewerTextSnapshot,
+      allMessages: msgsSnapshot
+        .filter((m) => (m.sender === "Interviewer" || m.sender === "User") && !!m.text?.trim())
+        .map((m) => ({
+          sender: m.sender as "User" | "Interviewer",
+          text: m.text.trim(),
+          timestamp: m.timestamp,
+        })),
+      cutoffTimestamp: cutoff,
+      selectedAnswerQuestion: selectedAiMessageForDetection?.question?.trim() || "",
+      selectedAnswerId: selectedAiMessageForDetection?.id,
+    });
+
+    const question = detection.cleanedQuestion.trim();
+    const source = detection.source;
+    const stableQuestionHash =
+      preDebounceDetection.cleanedQuestion.trim().toLowerCase() ===
+      question.toLowerCase();
+    const confidenceDelta = Math.abs(
+      (preDebounceDetection.confidenceScore || 0) - (detection.confidenceScore || 0),
+    );
+    const semanticallyStable = stableQuestionHash && confidenceDelta <= 0.2;
+    if (!question || detection.ignoredNoise || detection.confidenceScore < ACTIVE_QUESTION_CONFIDENCE_THRESHOLD) {
+      console.log("[useFloatingSession] handleAiAnswerClick: No confident active question after debounce.", {
+        evolving,
+        detection,
+        preDebounceDetection,
+        semanticallyStable,
+        snapshotTimestamp,
+      });
+      return;
+    }
+    if (evolving && !semanticallyStable) {
+      console.log("[useFloatingSession] handleAiAnswerClick: Transcript still semantically evolving, skip this click.", {
+        preDebounceDetection,
+        detection,
+        confidenceDelta,
         snapshotTimestamp,
       });
       return;
     }
 
-    const { question, source } = resolved;
     console.log("[useFloatingSession] handleAiAnswerClick: Resolved question from", source, ":", question);
     console.log("[useFloatingSession] handleAiAnswerClick: Snapshot timestamp:", snapshotTimestamp);
 
@@ -1875,12 +2096,21 @@ export function useFloatingSession() {
         ? { selectedAnswerCodeBlocks }
         : {}),
       ...(selectedAnswerTopic ? { selectedAnswerTopic } : {}),
+      activeQuestionDetection: {
+        activeQuestion: question,
+        cleanedQuestion: effectiveCurrentQuestion,
+        isFollowUp: detection.isFollowUp,
+        topicChanged: detection.topicChanged,
+        confidenceScore: detection.confidenceScore,
+        ignoredNoise: detection.ignoredNoise,
+        ...(detection.referencedHistoryTurnId
+          ? { referencedHistoryTurnId: detection.referencedHistoryTurnId }
+          : {}),
+      },
       answerMode: "auto",
       sourcePlatform: "tauri",
     };
 
-    isEmittingRef.current = true;
-    try {
       await handleAiAnswer(info.sessionId, payload, selectedModelRef.current);
 
       // Save pre-advance cutoff so regenerate can widen the window back to
@@ -1989,6 +2219,11 @@ export function useFloatingSession() {
       setIsMicConnecting(false);
       setMicInterimTranscript("");
     } else if (sessionInfoRef.current) {
+      const allowed = await preflightMicPermission(false);
+      if (!allowed) {
+        setIsMicConnecting(false);
+        return;
+      }
       audioControllerRef.current.startAudioSession("mic", "mic_toggle_on");
       setIsMicConnecting(true);
       try {
@@ -2001,7 +2236,7 @@ export function useFloatingSession() {
         setIsMicConnecting(false);
       }
     }
-  }, [isMicActive, isMicConnecting]);
+  }, [isMicActive, isMicConnecting, preflightMicPermission]);
 
   useEffect(() => {
     return () => {
@@ -2164,6 +2399,9 @@ export function useFloatingSession() {
     micInterimTranscript,
     tabStatus,
     tabError,
+    tabErrorPermissionType,
+    permissionIdentity,
+    permissionRequiresRestart,
     tabInterimTranscript,
     isCapturing,
     inputValue,
@@ -2189,6 +2427,7 @@ export function useFloatingSession() {
     handlePatchTranscriptMessage,
     startSystemAudio,
     retrySystemAudio,
+    preflightMicPermission,
     collapseWindow,
     expandWindow,
     toggleTranscriptExpanded,

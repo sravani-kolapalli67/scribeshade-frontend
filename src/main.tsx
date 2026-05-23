@@ -1,3 +1,4 @@
+import "@/lib/disableDebugLogs";
 import { BrowserRouter, useNavigate } from "react-router-dom";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";

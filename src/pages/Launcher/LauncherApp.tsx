@@ -1,3 +1,4 @@
+import "@/lib/disableDebugLogs";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";

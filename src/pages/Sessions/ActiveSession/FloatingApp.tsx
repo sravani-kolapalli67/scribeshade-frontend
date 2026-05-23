@@ -1,3 +1,4 @@
+import "@/lib/disableDebugLogs";
 import React, { useEffect, useState, useRef, useCallback, memo } from "react";
 import { createRoot } from "react-dom/client";
 import { Provider } from "react-redux";
@@ -304,6 +305,32 @@ function normalizeBulletParagraphs(text: string): string {
     .join("\n\n");
 }
 
+function applyDeterministicHighlighting(markdown: string): string {
+  if (!markdown?.trim()) return markdown;
+
+  const wrapIfNotBold = (text: string, pattern: RegExp) =>
+    text.replace(pattern, (match, p1, p2, p3) => {
+      const before = p1 || "";
+      const token = p2 || match;
+      const after = p3 || "";
+      if (before.endsWith("**") || after.startsWith("**")) return match;
+      return `${before}**${token}**${after}`;
+    });
+
+  const processPlain = (plain: string) => {
+    let out = plain;
+    out = wrapIfNotBold(out, /(^|[^\w*])(Databricks|PySpark|ADF|Azure DevOps)(?=[^\w*]|$)/gi);
+    out = wrapIfNotBold(out, /(^|[^\w*])(1TB\+|40%|50%)(?=[^\w*]|$)/g);
+    out = wrapIfNotBold(out, /(^|[^\w*])(coalesce\(\)|current_date\(\)|withColumnRenamed\(\))(?=[^\w*]|$)/gi);
+    return out;
+  };
+
+  const segments = markdown.split(/(```[\s\S]*?```)/g);
+  return segments
+    .map((seg) => (seg.startsWith("```") ? seg : processPlain(seg)))
+    .join("");
+}
+
 function isProjectQuestion(question: string): boolean {
   return /\b(projects?|portfolio|what have you built|work(?:ed)? on|tell me about your work)\b/i.test(
     question || "",
@@ -428,9 +455,11 @@ const AnswerArea: React.FC<{
         // cleaned question and should be the source of truth. Fallback to
         // re-parsing only if the message field is not set.
         const finalQuestion = parsed.question || resp.question?.trim() || "";
-        const answerMarkdown = normalizeProjectAnswerMarkdown(
+        const answerMarkdown = applyDeterministicHighlighting(
+          normalizeProjectAnswerMarkdown(
           finalQuestion,
           parsed.answer,
+          ),
         );
 
         // Universal "Copy All" payload — always includes the question (when
@@ -1035,18 +1064,37 @@ const FloatingApp: React.FC = () => {
                   </Tooltip>
                   <button
                     type="button"
-                    onClick={() => { void session.retrySystemAudio(); }}
+                    onClick={() => {
+                      if (session.tabErrorPermissionType === "microphone") {
+                        void session.preflightMicPermission(true);
+                      } else {
+                        void session.retrySystemAudio();
+                      }
+                    }}
                     className="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider bg-white/10 hover:bg-white/20 text-white border border-white/10 transition-colors"
                   >
                     Retry
                   </button>
                   <button
                     type="button"
-                    onClick={() => { invoke("open_screen_recording_settings").catch(() => {}); }}
+                    onClick={() => {
+                      if (session.tabErrorPermissionType === "microphone") {
+                        invoke("open_macos_privacy_settings", { permissionType: "microphone" }).catch(() => {});
+                      } else if (session.tabErrorPermissionType === "screen-recording") {
+                        invoke("open_macos_privacy_settings", { permissionType: "screen-recording" }).catch(() => {});
+                      } else {
+                        invoke("open_screen_recording_settings").catch(() => {});
+                      }
+                    }}
                     className="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider bg-white/10 hover:bg-white/20 text-white border border-white/10 transition-colors"
                   >
                     Open Settings
                   </button>
+                  {session.permissionRequiresRestart && (
+                    <span className="text-[10px] text-amber-300/90">
+                      Restart app after enabling permission
+                    </span>
+                  )}
                 </span>
               ) : (
                 <span className="text-white/20">

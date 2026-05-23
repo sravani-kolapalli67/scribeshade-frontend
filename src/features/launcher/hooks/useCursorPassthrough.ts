@@ -3,6 +3,7 @@ import { tauriOverlay } from "@/services/tauriOverlay";
 
 interface UseCursorPassthroughOptions {
   isDraggingRef: React.MutableRefObject<boolean>;
+  forceInteractive?: boolean;
 }
 
 /**
@@ -15,6 +16,7 @@ interface UseCursorPassthroughOptions {
  */
 export function useCursorPassthrough({
   isDraggingRef,
+  forceInteractive = false,
 }: UseCursorPassthroughOptions): void {
   useEffect(() => {
     let raf = 0;
@@ -55,7 +57,7 @@ export function useCursorPassthrough({
       if (cancelled) return;
 
       // While dragging, keep interaction enabled — never pass through.
-      if (isDraggingRef.current) {
+      if (isDraggingRef.current || forceInteractive) {
         await setPassthrough(false);
         raf = requestAnimationFrame(() => void tick());
         return;
@@ -117,5 +119,5 @@ export function useCursorPassthrough({
       document.removeEventListener("contextmenu", handleContextMenu, true);
       tauriOverlay.setIgnoreCursorEvents(false).catch(console.error);
     };
-  }, [isDraggingRef]);
+  }, [forceInteractive, isDraggingRef]);
 }

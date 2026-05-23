@@ -4181,10 +4181,11 @@ dependencies = [
 
 [[package]]
 name = "scribeshade-frontend"
-version = "2.1.0"
+version = "2.1.24"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "core-graphics 0.25.0",
  "cpal",
  "dotenvy",
  "futures-util",
