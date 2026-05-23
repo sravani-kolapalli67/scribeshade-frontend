@@ -9,8 +9,7 @@ import { ChevronDown } from "lucide-react";
 
 const DEFAULT_UPDATES_MANIFEST_URL =
   "https://pub-992f115513ba42f681595c2ca5fac628.r2.dev/tauri-updates/latest.json";
-const UPDATES_MANIFEST_URL =
-  import.meta.env.VITE_UPDATER_MANIFEST_URL || DEFAULT_UPDATES_MANIFEST_URL;
+const UPDATES_MANIFEST_URL = DEFAULT_UPDATES_MANIFEST_URL;
 
 type DownloadArtifact = {
   url: string;
@@ -50,7 +49,9 @@ async function openLatestDesktopDownload(
   try {
     res = await fetch(UPDATES_MANIFEST_URL, { cache: "no-store" });
   } catch (err) {
-    alert("Network error: could not reach the update manifest. Please try again.");
+    alert(
+      "Could not load the Cloudflare update manifest. Please try again. If this continues, Cloudflare R2 CORS may be blocking browser access.",
+    );
     console.error("[download] fetch failed:", err);
     return;
   }
