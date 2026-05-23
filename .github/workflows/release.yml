@@ -6,12 +6,18 @@ on:
       - release
       - release-*
 
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   precheck-release:
     name: Precheck existing release tag
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     outputs:
       release_exists: ${{ steps.check.outputs.release_exists }}
       release_tag: ${{ steps.check.outputs.release_tag }}
@@ -23,8 +29,7 @@ jobs:
         id: check
         shell: bash
         env:
-          GH_RELEASE_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
-          GITHUB_TOKEN_DEFAULT: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN_DEFAULT: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -32,12 +37,7 @@ jobs:
           TAG="v${VERSION}"
           echo "release_tag=${TAG}" >> "$GITHUB_OUTPUT"
 
-          TOKEN="${GH_RELEASE_TOKEN:-$GITHUB_TOKEN_DEFAULT}"
-          if [ -z "${TOKEN:-}" ]; then
-            echo "No GitHub token available for precheck; build will proceed."
-            echo "release_exists=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          TOKEN="${GITHUB_TOKEN_DEFAULT}"
 
           HTTP_STATUS=$(curl -sS -o /tmp/release_check.json -w "%{http_code}" \
             -H "Authorization: Bearer ${TOKEN}" \
@@ -91,8 +91,6 @@ jobs:
   publish-tauri:
     needs: precheck-release
     if: needs.precheck-release.outputs.release_exists != 'true'
-    permissions:
-      contents: write
 
     strategy:
       fail-fast: false
@@ -177,8 +175,6 @@ jobs:
           VITE_DEEPGRAM_API_KEY: ${{ secrets.VITE_DEEPGRAM_API_KEY }}
           VITE_CLERK_PUBLISHABLE_KEY: ${{ secrets.VITE_CLERK_PUBLISHABLE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          GH_RELEASE_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
-          GITHUB_TOKEN_DEFAULT: ${{ secrets.GITHUB_TOKEN }}
         run: |
           fail=0
           check() {
@@ -192,20 +188,12 @@ jobs:
           check VITE_DEEPGRAM_API_KEY "$VITE_DEEPGRAM_API_KEY"
           check VITE_CLERK_PUBLISHABLE_KEY "$VITE_CLERK_PUBLISHABLE_KEY"
           check TAURI_SIGNING_PRIVATE_KEY "$TAURI_SIGNING_PRIVATE_KEY"
-          if [ -n "$GH_RELEASE_TOKEN" ]; then
-            echo "OK: GH_RELEASE_TOKEN is present (preferred for release API)."
-          elif [ -n "$GITHUB_TOKEN_DEFAULT" ]; then
-            echo "OK: falling back to default GITHUB_TOKEN."
-          else
-            echo "ERROR: no GitHub token available for release API." >&2
-            fail=1
-          fi
           exit $fail
 
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_RELEASE_TOKEN != '' && secrets.GH_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           VITE_BACKEND_URL: "https://test.backend.scribeshade.org"
@@ -330,19 +318,14 @@ jobs:
         if: needs.publish-tauri.result == 'skipped'
         shell: bash
         env:
-          GH_RELEASE_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
-          GITHUB_TOKEN_DEFAULT: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN_DEFAULT: ${{ github.token }}
           REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.precheck-release.outputs.release_tag }}
         run: |
           set -euo pipefail
           mkdir -p r2-upload
 
-          TOKEN="${GH_RELEASE_TOKEN:-$GITHUB_TOKEN_DEFAULT}"
-          if [ -z "${TOKEN:-}" ]; then
-            echo "ERROR: No GitHub token available to download release assets." >&2
-            exit 1
-          fi
+          TOKEN="${GITHUB_TOKEN_DEFAULT}"
 
           API_URL="https://api.github.com/repos/${REPO}/releases/tags/${RELEASE_TAG}"
           curl -fsSL \
@@ -459,7 +442,7 @@ jobs:
           echo "Found latest.json and updater files."
           find r2-upload -type f | sed -n '1,250p'
 
-      - name: Upload updater files to temporary R2 prefix
+      - name: Replace live R2 updater prefix from local bundle
         shell: bash
         env:
           CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
@@ -470,45 +453,11 @@ jobs:
         run: |
           set -euo pipefail
           ENDPOINT="https://${CLOUDFLARE_R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          TMP_PREFIX="tauri-updates-tmp/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          echo "Using temporary prefix: ${TMP_PREFIX}"
-          aws s3 rm "s3://${CLOUDFLARE_R2_BUCKET}/${TMP_PREFIX}/" \
-            --recursive \
-            --endpoint-url "$ENDPOINT" || true
-          aws s3 sync r2-upload/ "s3://${CLOUDFLARE_R2_BUCKET}/${TMP_PREFIX}/" \
-            --endpoint-url "$ENDPOINT"
-
-      - name: Replace live R2 updater prefix with temporary artifacts
-        shell: bash
-        env:
-          CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
-          CLOUDFLARE_R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-        run: |
-          set -euo pipefail
-          ENDPOINT="https://${CLOUDFLARE_R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          TMP_PREFIX="tauri-updates-tmp/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          aws s3 sync "s3://${CLOUDFLARE_R2_BUCKET}/${TMP_PREFIX}/" "s3://${CLOUDFLARE_R2_BUCKET}/tauri-updates/" \
+          # Keep local->R2 sync only (no S3->S3 copy), to avoid
+          # GetObjectTagging NotImplemented on Cloudflare R2.
+          aws s3 sync r2-upload/ "s3://${CLOUDFLARE_R2_BUCKET}/tauri-updates/" \
             --delete \
             --endpoint-url "$ENDPOINT"
-
-      - name: Clean up temporary R2 prefix
-        shell: bash
-        env:
-          CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
-          CLOUDFLARE_R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-        run: |
-          set -euo pipefail
-          ENDPOINT="https://${CLOUDFLARE_R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          TMP_PREFIX="tauri-updates-tmp/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          aws s3 rm "s3://${CLOUDFLARE_R2_BUCKET}/${TMP_PREFIX}/" \
-            --recursive \
-            --endpoint-url "$ENDPOINT" || true
 
       - name: List uploaded updater files
         shell: bash
