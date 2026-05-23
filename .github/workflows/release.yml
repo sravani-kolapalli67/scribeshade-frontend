@@ -200,6 +200,9 @@ jobs:
     needs: publish-tauri
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download matrix updater artifacts
         uses: actions/download-artifact@v4
         with:
