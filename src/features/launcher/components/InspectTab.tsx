@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getVersion } from "@tauri-apps/api/app";
 import { Activity, Wifi, WifiOff, LayoutDashboard, History, CreditCard, ExternalLink, Loader2, Cpu, Tag, RefreshCw } from "lucide-react";
-import { checkForUpdates } from "@/lib/updater";
+import { checkForUpdates, getPendingUpdate, restartToApplyDownloadedUpdate } from "@/lib/updater";
 import { cn } from "@/lib/utils";
 import { useInspectAuth } from "@/features/launcher/components/InspectAuthContext";
 import { BACKEND_URL, FRONTEND_URL, APP_NAME } from "@/features/launcher/constants";
@@ -59,9 +59,21 @@ export function InspectTab() {
   const { balance, isLoading: isLoadingBalance } = useInspectCredits(token);
   const health = useBackendHealth();
   const [appVersion, setAppVersion] = useState<string>("…");
+  const [pendingUpdateVersion, setPendingUpdateVersion] = useState<string | null>(null);
+  const [isRestarting, setIsRestarting] = useState(false);
 
   useEffect(() => {
     getVersion().then(setAppVersion).catch(() => setAppVersion("—"));
+  }, []);
+
+  useEffect(() => {
+    const syncPending = () => {
+      const pending = getPendingUpdate();
+      setPendingUpdateVersion(pending?.availableVersion ?? null);
+    };
+    syncPending();
+    window.addEventListener("updater:pending-changed", syncPending);
+    return () => window.removeEventListener("updater:pending-changed", syncPending);
   }, []);
 
   const credits = balance
@@ -121,6 +133,28 @@ export function InspectTab() {
               </button>
             </div>
           </div>
+
+          {pendingUpdateVersion && (
+            <div className={row}>
+              <span className={key}>
+                <RefreshCw className="w-3.5 h-3.5 text-amber-500" />
+                Update Ready
+              </span>
+              <div className="flex items-center gap-2">
+                <span className={cn(val, "text-amber-700")}>v{pendingUpdateVersion} downloaded</span>
+                <button
+                  onClick={() => {
+                    setIsRestarting(true);
+                    restartToApplyDownloadedUpdate().catch(() => setIsRestarting(false));
+                  }}
+                  className="px-2 py-0.5 rounded-md text-[11px] font-semibold bg-amber-100 text-amber-700 hover:bg-amber-200 transition-colors"
+                  disabled={isRestarting}
+                >
+                  {isRestarting ? "Restarting…" : "Restart"}
+                </button>
+              </div>
+            </div>
+          )}
 
         </div>
       </section>

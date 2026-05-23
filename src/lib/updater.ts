@@ -5,8 +5,16 @@ export type UpdaterCheckResult =
   | { status: "not_tauri" }
   | { status: "up_to_date"; currentVersion: string }
   | { status: "update_installed"; currentVersion: string; availableVersion: string }
+  | { status: "update_installed_restart_pending"; currentVersion: string; availableVersion: string }
   | { status: "update_available_skipped"; currentVersion: string; availableVersion: string }
   | { status: "error"; currentVersion: string; error: string };
+
+const PENDING_UPDATE_KEY = "scribeshade.pending_update";
+
+type PendingUpdateInfo = {
+  availableVersion: string;
+  installedAt: string;
+};
 
 function logUpdater(event: string, payload?: Record<string, unknown>): void {
   if (payload) {
@@ -14,6 +22,42 @@ function logUpdater(event: string, payload?: Record<string, unknown>): void {
     return;
   }
   console.log(`[updater] ${event}`);
+}
+
+function emitPendingUpdateChanged(): void {
+  window.dispatchEvent(new Event("updater:pending-changed"));
+}
+
+function setPendingUpdate(info: PendingUpdateInfo): void {
+  localStorage.setItem(PENDING_UPDATE_KEY, JSON.stringify(info));
+  emitPendingUpdateChanged();
+}
+
+function clearPendingUpdate(): void {
+  localStorage.removeItem(PENDING_UPDATE_KEY);
+  emitPendingUpdateChanged();
+}
+
+export function getPendingUpdate(): PendingUpdateInfo | null {
+  try {
+    const raw = localStorage.getItem(PENDING_UPDATE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PendingUpdateInfo>;
+    if (!parsed.availableVersion || !parsed.installedAt) return null;
+    return {
+      availableVersion: parsed.availableVersion,
+      installedAt: parsed.installedAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function restartToApplyDownloadedUpdate(): Promise<void> {
+  if (!isTauri()) return;
+  const { relaunch } = await import("@tauri-apps/plugin-process");
+  clearPendingUpdate();
+  await relaunch();
 }
 
 /**
@@ -39,6 +83,19 @@ export async function checkForUpdates(onUserClick = false): Promise<UpdaterCheck
 
   try {
     currentVersion = await getVersion().catch(() => "unknown");
+    const pending = getPendingUpdate();
+    if (!onUserClick && pending) {
+      logUpdater("pendingUpdateAlreadyInstalled", {
+        currentVersion,
+        availableVersion: pending.availableVersion,
+      });
+      return {
+        status: "update_installed_restart_pending",
+        currentVersion,
+        availableVersion: pending.availableVersion,
+      };
+    }
+
     logUpdater("updaterCheckStarted", { onUserClick });
     logUpdater("currentVersion", { currentVersion });
 
@@ -93,6 +150,7 @@ export async function checkForUpdates(onUserClick = false): Promise<UpdaterCheck
       logUpdater("installStarted", { availableVersion: update.version, mode: "manual" });
       logUpdater("installCompleted", { availableVersion: update.version, mode: "manual" });
       logUpdater("relaunchRequested", { reason: "manual_update" });
+      clearPendingUpdate();
       await relaunch();
       return {
         status: "update_installed",
@@ -123,7 +181,18 @@ export async function checkForUpdates(onUserClick = false): Promise<UpdaterCheck
 
     if (restartNow) {
       logUpdater("relaunchRequested", { reason: "background_update" });
+      clearPendingUpdate();
       await relaunch();
+    } else {
+      setPendingUpdate({
+        availableVersion: update.version,
+        installedAt: new Date().toISOString(),
+      });
+      return {
+        status: "update_installed_restart_pending",
+        currentVersion,
+        availableVersion: update.version,
+      };
     }
 
     return {
