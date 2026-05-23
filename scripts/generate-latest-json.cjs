@@ -40,7 +40,12 @@ function readSigForArtifact(fileName) {
 
 const platformArtifacts = {
   "darwin-universal": findFirst([/\.app\.tar\.gz$/i]),
-  "windows-x86_64": findFirst([/\.msi\.zip$/i, /setup\.nsis\.zip$/i]),
+  "windows-x86_64": findFirst([
+    /\.msi\.zip$/i,
+    /setup\.nsis\.zip$/i,
+    /\.msi$/i,
+    /setup\.exe$/i,
+  ]),
   "linux-x86_64": findFirst([/\.AppImage\.tar\.gz$/i]),
 };
 
