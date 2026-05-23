@@ -68,12 +68,9 @@ jobs:
               echo "Release ${TAG} has required updater assets. Skipping rebuild."
               echo "release_exists=true" >> "$GITHUB_OUTPUT"
             else
-              echo "ERROR: Release ${TAG} exists but required updater artifact pairs are incomplete." >&2
-              echo "ERROR: Expected pairs:" >&2
-              echo "  macOS: *.app.tar.gz + *.app.tar.gz.sig" >&2
-              echo "  Linux: *.AppImage.tar.gz + *.AppImage.tar.gz.sig" >&2
-              echo "  Windows: (*.msi.zip + *.msi.zip.sig) OR (*setup.nsis.zip + *setup.nsis.zip.sig)" >&2
-              exit 1
+              echo "WARNING: Release ${TAG} exists but required updater artifact pairs are incomplete."
+              echo "WARNING: Falling back to full rebuild to repair release assets."
+              echo "release_exists=false" >> "$GITHUB_OUTPUT"
             fi
           elif [ "$HTTP_STATUS" = "404" ]; then
             echo "Release ${TAG} not found."
