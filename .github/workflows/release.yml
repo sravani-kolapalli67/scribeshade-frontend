@@ -53,10 +53,15 @@ jobs:
               const has = (re) => [...names].some(n => re.test(n));
 
               const macPair = has(/\.app\.tar\.gz$/i) && has(/\.app\.tar\.gz\.sig$/i);
-              const linuxPair = has(/\.AppImage\.tar\.gz$/i) && has(/\.AppImage\.tar\.gz\.sig$/i);
+              const linuxTarPair = has(/\.AppImage\.tar\.gz$/i) && has(/\.AppImage\.tar\.gz\.sig$/i);
+              const linuxRawPair = has(/\.AppImage$/i) && has(/\.AppImage\.sig$/i);
+              const linuxPair = linuxTarPair || linuxRawPair;
+
               const winMsiZipPair = has(/\.msi\.zip$/i) && has(/\.msi\.zip\.sig$/i);
               const winNsisZipPair = has(/setup\.nsis\.zip$/i) && has(/setup\.nsis\.zip\.sig$/i);
-              const windowsPair = winMsiZipPair || winNsisZipPair;
+              const winMsiPair = has(/\.msi$/i) && has(/\.msi\.sig$/i);
+              const winExePair = has(/\.exe$/i) && has(/\.exe\.sig$/i);
+              const windowsPair = winMsiZipPair || winNsisZipPair || winMsiPair || winExePair;
 
               if (macPair && linuxPair && windowsPair) {
                 process.stdout.write("complete");
@@ -68,9 +73,12 @@ jobs:
               echo "Release ${TAG} has required updater assets. Skipping rebuild."
               echo "release_exists=true" >> "$GITHUB_OUTPUT"
             else
-              echo "WARNING: Release ${TAG} exists but required updater artifact pairs are incomplete."
-              echo "WARNING: Falling back to full rebuild to repair release assets."
-              echo "release_exists=false" >> "$GITHUB_OUTPUT"
+              echo "ERROR: Release ${TAG} exists but required updater artifact pairs are incomplete." >&2
+              echo "ERROR: Expected pairs:" >&2
+              echo "  macOS: *.app.tar.gz + *.app.tar.gz.sig" >&2
+              echo "  Linux: (*.AppImage + *.AppImage.sig) OR (*.AppImage.tar.gz + *.AppImage.tar.gz.sig)" >&2
+              echo "  Windows: (*.msi.zip + *.msi.zip.sig) OR (*setup.nsis.zip + *setup.nsis.zip.sig) OR (*.msi + *.msi.sig) OR (*.exe + *.exe.sig)" >&2
+              exit 1
             fi
           elif [ "$HTTP_STATUS" = "404" ]; then
             echo "Release ${TAG} not found."
@@ -230,22 +238,38 @@ jobs:
         run: |
           set -euo pipefail
           echo "Scanning updater artifacts..."
-          find src-tauri/target -name "*.sig" | sed -n '1,120p'
+          find src-tauri/target -type f \( -name "*.sig" -o -name "*.AppImage" -o -name "*.msi" -o -name "*.exe" -o -name "*.app.tar.gz" \) | sed -n '1,160p'
 
           if [ "${{ matrix.platform }}" = "windows-latest" ]; then
-            test -n "$(find src-tauri/target -name '*.msi.sig' -print -quit)" || \
-            test -n "$(find src-tauri/target -name '*.exe.sig' -print -quit)" || \
-            test -n "$(find src-tauri/target -name '*.msi.zip.sig' -print -quit)" || \
-            test -n "$(find src-tauri/target -name '*setup.nsis.zip.sig' -print -quit)"
+            if test -n "$(find src-tauri/target -name '*.msi.zip' -print -quit)" && test -n "$(find src-tauri/target -name '*.msi.zip.sig' -print -quit)"; then
+              echo "OK: Windows MSI zip updater pair found"
+            elif test -n "$(find src-tauri/target -name '*setup.nsis.zip' -print -quit)" && test -n "$(find src-tauri/target -name '*setup.nsis.zip.sig' -print -quit)"; then
+              echo "OK: Windows NSIS zip updater pair found"
+            elif test -n "$(find src-tauri/target -name '*.msi' -print -quit)" && test -n "$(find src-tauri/target -name '*.msi.sig' -print -quit)"; then
+              echo "OK: Windows MSI updater pair found"
+            elif test -n "$(find src-tauri/target -name '*.exe' -print -quit)" && test -n "$(find src-tauri/target -name '*.exe.sig' -print -quit)"; then
+              echo "OK: Windows EXE updater pair found"
+            else
+              echo "ERROR: Windows updater artifact pair missing"
+              exit 1
+            fi
           fi
 
           if [ "${{ matrix.platform }}" = "macos-latest" ]; then
+            test -n "$(find src-tauri/target -name '*.app.tar.gz' -print -quit)"
             test -n "$(find src-tauri/target -name '*.app.tar.gz.sig' -print -quit)"
+            echo "OK: macOS updater pair found"
           fi
 
           if [ "${{ matrix.platform }}" = "ubuntu-22.04" ]; then
-            test -n "$(find src-tauri/target -name '*.AppImage.tar.gz' -print -quit)"
-            test -n "$(find src-tauri/target -name '*.AppImage.tar.gz.sig' -print -quit)"
+            if test -n "$(find src-tauri/target -name '*.AppImage' -print -quit)" && test -n "$(find src-tauri/target -name '*.AppImage.sig' -print -quit)"; then
+              echo "OK: Linux AppImage updater pair found"
+            elif test -n "$(find src-tauri/target -name '*.AppImage.tar.gz' -print -quit)" && test -n "$(find src-tauri/target -name '*.AppImage.tar.gz.sig' -print -quit)"; then
+              echo "OK: Linux AppImage tar updater pair found"
+            else
+              echo "ERROR: Linux updater artifact pair missing"
+              exit 1
+            fi
           fi
 
       - name: Collect updater artifacts for R2 publish

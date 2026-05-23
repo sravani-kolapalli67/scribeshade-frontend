@@ -46,7 +46,7 @@ const platformArtifacts = {
     /\.msi$/i,
     /setup\.exe$/i,
   ]),
-  "linux-x86_64": findFirst([/\.AppImage\.tar\.gz$/i]),
+  "linux-x86_64": findFirst([/\.AppImage\.tar\.gz$/i, /\.AppImage$/i]),
 };
 
 const platforms = {};
