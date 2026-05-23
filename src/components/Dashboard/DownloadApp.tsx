@@ -7,10 +7,35 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { ChevronDown } from "lucide-react";
 
-const BACKEND_UPDATES_MANIFEST_URL = `${import.meta.env.VITE_BACKEND_URL}/api/updates/latest.json`;
+const DEFAULT_UPDATES_MANIFEST_URL =
+  "https://pub-992f115513ba42f681595c2ca5fac628.r2.dev/tauri-updates/latest.json";
+const UPDATES_MANIFEST_URL =
+  import.meta.env.VITE_UPDATER_MANIFEST_URL || DEFAULT_UPDATES_MANIFEST_URL;
+
+type DownloadArtifact = {
+  url: string;
+  signature?: string;
+};
 
 type UpdateManifest = {
-  platforms?: Record<string, { url: string; signature?: string }>;
+  platforms?: Record<string, DownloadArtifact>;
+  downloads?: {
+    mac?: {
+      dmg?: DownloadArtifact;
+      appTarGz?: DownloadArtifact;
+    };
+    windows?: {
+      exe?: DownloadArtifact;
+      msi?: DownloadArtifact;
+      msiZip?: DownloadArtifact;
+      nsisZip?: DownloadArtifact;
+    };
+    linux?: {
+      appImage?: DownloadArtifact;
+      deb?: DownloadArtifact;
+      rpm?: DownloadArtifact;
+    };
+  };
 };
 
 /**
@@ -23,61 +48,73 @@ async function openLatestDesktopDownload(
 ) {
   let res: Response;
   try {
-    res = await fetch(BACKEND_UPDATES_MANIFEST_URL, { cache: "no-store" });
+    res = await fetch(UPDATES_MANIFEST_URL, { cache: "no-store" });
   } catch (err) {
-    alert("Network error: could not reach the update server. Please try again.");
+    alert("Network error: could not reach the update manifest. Please try again.");
     console.error("[download] fetch failed:", err);
     return;
   }
 
   if (!res.ok) {
-    alert(`Download server returned an error (${res.status}). Please try again later.`);
+    alert(`Update manifest returned an error (${res.status}). Please try again later.`);
     return;
   }
 
   const manifest = (await res.json()) as UpdateManifest;
   const platforms = manifest.platforms ?? {};
+  const downloads = manifest.downloads ?? {};
   const entries = Object.entries(platforms);
 
-  let match: [string, { url: string; signature?: string }] | undefined;
+  let url: string | undefined;
 
   if (platform === "mac") {
-    // Keys look like "darwin-x86_64", "darwin-aarch64", etc.
-    match = entries.find(([key]) => key.startsWith("darwin"));
+    // Preferred web installers: DMG, then updater tarball.
+    url = downloads.mac?.dmg?.url;
+    if (!url) {
+      url = downloads.mac?.appTarGz?.url;
+    }
+    if (!url) {
+      const match = entries.find(([key]) => key.startsWith("darwin"));
+      url = match?.[1]?.url;
+    }
   } else if (platform === "windows") {
     if (format === "msi") {
-      match = entries.find(([key]) => key === "windows-x86_64-msi");
+      url = downloads.windows?.msi?.url || downloads.windows?.msiZip?.url;
     } else if (format === "exe") {
-      match = entries.find(([key]) => key === "windows-x86_64-nsis");
+      url = downloads.windows?.exe?.url || downloads.windows?.nsisZip?.url;
     }
-    // Generic fallback for Windows (e.g. "windows-x86_64")
-    if (!match) {
-      match = entries.find(([key]) => key.startsWith("windows"));
+
+    // Fallback to updater windows entry if explicit installer not present.
+    if (!url) {
+      const match = entries.find(([key]) => key.startsWith("windows"));
+      url = match?.[1]?.url;
     }
   } else if (platform === "linux") {
     if (format === "appimage") {
-      match = entries.find(([key]) => key === "linux-x86_64-appimage");
+      url = downloads.linux?.appImage?.url;
     } else if (format === "deb") {
-      match = entries.find(([key]) => key === "linux-x86_64-deb");
+      url = downloads.linux?.deb?.url;
     } else if (format === "rpm") {
-      match = entries.find(([key]) => key === "linux-x86_64-rpm");
+      url = downloads.linux?.rpm?.url;
     }
-    // Generic fallback
-    if (!match) {
-      match = entries.find(([key]) => key.startsWith("linux"));
+
+    // Only AppImage is allowed to fallback to updater linux key.
+    if (!url && format === "appimage") {
+      const match = entries.find(([key]) => key.startsWith("linux"));
+      url = match?.[1]?.url;
     }
   }
 
-  const url = match?.[1]?.url;
-
   if (!url) {
-    // ← KEY FIX: never redirect to the manifest JSON on failure
     alert(
-      `No ${platform}${format ? ` (${format.toUpperCase()})` : ""} download is available yet. Please check back soon.`,
+      `No ${platform}${format ? ` (${format.toUpperCase()})` : ""} download is available for this release yet.`,
     );
     console.error(
       `[download] No matching URL for platform="${platform}" format="${format}". Available keys:`,
-      Object.keys(platforms),
+      {
+        platforms: Object.keys(platforms),
+        downloads,
+      },
     );
     return;
   }

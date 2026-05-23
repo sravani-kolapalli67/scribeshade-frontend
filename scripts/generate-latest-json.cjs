@@ -38,19 +38,36 @@ function readSigForArtifact(fileName) {
   return fs.readFileSync(sigPath, "utf8").trim();
 }
 
-const platformArtifacts = {
-  "darwin-universal": findFirst([/\.app\.tar\.gz$/i]),
-  "windows-x86_64": findFirst([
-    /\.msi\.zip$/i,
-    /setup\.nsis\.zip$/i,
-    /\.msi$/i,
-    /setup\.exe$/i,
-  ]),
-  "linux-x86_64": findFirst([/\.AppImage\.tar\.gz$/i, /\.AppImage$/i]),
-};
+function artifactInfo(fileName) {
+  if (!fileName) return null;
+  return {
+    url: `${baseUrl}/${fileName}`,
+    signature: readSigForArtifact(fileName) || undefined,
+  };
+}
+
+const macUpdaterArtifact = findFirst([/\.app\.tar\.gz$/i]);
+const windowsUpdaterArtifact = findFirst([
+  /\.msi\.zip$/i,
+  /setup\.nsis\.zip$/i,
+  /\.msi$/i,
+  /setup\.exe$/i,
+]);
+const linuxUpdaterArtifact = findFirst([/\.AppImage\.tar\.gz$/i, /\.AppImage$/i]);
+
+const platformArtifacts = [
+  // Keep universal key and also provide arch keys expected by Tauri fallback logic.
+  ["darwin-aarch64", macUpdaterArtifact],
+  ["darwin-x86_64", macUpdaterArtifact],
+  ["darwin-universal", macUpdaterArtifact],
+  ["windows-x86_64", windowsUpdaterArtifact],
+  // Keep canonical key and an explicit appimage alias for consumers.
+  ["linux-x86_64", linuxUpdaterArtifact],
+  ["linux-x86_64-appimage", linuxUpdaterArtifact],
+];
 
 const platforms = {};
-for (const [platform, fileName] of Object.entries(platformArtifacts)) {
+for (const [platform, fileName] of platformArtifacts) {
   if (!fileName) continue;
   const signature = readSigForArtifact(fileName);
   if (!signature || signature.length < 20) continue;
@@ -59,6 +76,24 @@ for (const [platform, fileName] of Object.entries(platformArtifacts)) {
     url: `${baseUrl}/${fileName}`,
   };
 }
+
+const downloads = {
+  mac: {
+    dmg: artifactInfo(findFirst([/\.dmg$/i])),
+    appTarGz: artifactInfo(findFirst([/\.app\.tar\.gz$/i])),
+  },
+  windows: {
+    exe: artifactInfo(findFirst([/setup\.exe$/i, /\.exe$/i])),
+    msi: artifactInfo(findFirst([/\.msi$/i])),
+    msiZip: artifactInfo(findFirst([/\.msi\.zip$/i])),
+    nsisZip: artifactInfo(findFirst([/setup\.nsis\.zip$/i])),
+  },
+  linux: {
+    appImage: artifactInfo(findFirst([/\.AppImage$/i, /\.AppImage\.tar\.gz$/i])),
+    deb: artifactInfo(findFirst([/\.deb$/i])),
+    rpm: artifactInfo(findFirst([/\.rpm$/i])),
+  },
+};
 
 if (Object.keys(platforms).length === 0) {
   console.error(
@@ -72,6 +107,7 @@ const manifest = {
   notes: `ScribeShade ${version}`,
   pub_date: new Date().toISOString(),
   platforms,
+  downloads,
 };
 
 const outPath = path.join(uploadDir, "latest.json");
@@ -82,4 +118,26 @@ console.log("[latest-json] generated", {
   version,
   baseUrl,
   platforms: Object.keys(platforms),
+  updaterArtifacts: {
+    mac: macUpdaterArtifact || null,
+    windows: windowsUpdaterArtifact || null,
+    linux: linuxUpdaterArtifact || null,
+  },
+  discoveredArtifacts: {
+    mac: {
+      dmg: downloads.mac.dmg?.url || null,
+      appTarGz: downloads.mac.appTarGz?.url || null,
+    },
+    windows: {
+      exe: downloads.windows.exe?.url || null,
+      msi: downloads.windows.msi?.url || null,
+      msiZip: downloads.windows.msiZip?.url || null,
+      nsisZip: downloads.windows.nsisZip?.url || null,
+    },
+    linux: {
+      appImage: downloads.linux.appImage?.url || null,
+      deb: downloads.linux.deb?.url || null,
+      rpm: downloads.linux.rpm?.url || null,
+    },
+  },
 });
