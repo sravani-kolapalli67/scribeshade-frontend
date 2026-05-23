@@ -143,20 +143,158 @@ jobs:
         run: |
           set -euo pipefail
           echo "Scanning updater artifacts..."
-          find src-tauri/target -name "latest.json" -o -name "*.sig" | sed -n '1,80p'
+          find src-tauri/target -name "*.sig" | sed -n '1,120p'
 
           if [ "${{ matrix.platform }}" = "windows-latest" ]; then
-            test -n "$(find src-tauri/target -name 'latest.json' -print -quit)"
-            test -n "$(find src-tauri/target -name 'windows-x86_64*' -name '*.sig' -print -quit)" || test -n "$(find src-tauri/target -name '*.msi.sig' -print -quit)"
+            test -n "$(find src-tauri/target -name '*.msi.zip.sig' -print -quit)" || test -n "$(find src-tauri/target -name '*setup.nsis.zip.sig' -print -quit)"
           fi
 
           if [ "${{ matrix.platform }}" = "macos-latest" ]; then
-            test -n "$(find src-tauri/target -name 'latest.json' -print -quit)"
-            test -n "$(find src-tauri/target -name '*darwin-aarch64*' -name '*.sig' -print -quit)" || test -n "$(find src-tauri/target -name '*.app.tar.gz.sig' -print -quit)"
-            test -n "$(find src-tauri/target -name '*darwin-x86_64*' -name '*.sig' -print -quit)" || test -n "$(find src-tauri/target -name '*.app.tar.gz.sig' -print -quit)"
+            test -n "$(find src-tauri/target -name '*.app.tar.gz.sig' -print -quit)"
           fi
 
           if [ "${{ matrix.platform }}" = "ubuntu-22.04" ]; then
-            test -n "$(find src-tauri/target -name 'latest.json' -print -quit)"
-            test -n "$(find src-tauri/target -name 'linux-x86_64*' -name '*.sig' -print -quit)" || true
+            test -n "$(find src-tauri/target -name '*.AppImage.tar.gz.sig' -print -quit)" || true
           fi
+
+      - name: Collect updater artifacts for R2 publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT_DIR="ci-updater/${{ matrix.platform }}"
+          rm -rf "$OUT_DIR"
+          mkdir -p "$OUT_DIR"
+
+          while IFS= read -r file; do
+            cp "$file" "${OUT_DIR}/$(basename "$file")"
+          done < <(
+            find src-tauri/target -type f \
+              \( -name "*.sig" \
+              -o -name "*.tar.gz" \
+              -o -name "*.zip" \
+              -o -name "*.msi" \
+              -o -name "*.exe" \
+              -o -name "*.dmg" \
+              -o -name "*.AppImage" \
+              -o -name "*.deb" \
+              -o -name "*.rpm" \)
+          )
+
+          echo "Collected files:"
+          find "$OUT_DIR" -type f | sed -n '1,200p'
+
+      - name: Upload updater artifacts bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-updater-${{ matrix.platform }}
+          path: ci-updater/${{ matrix.platform }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-updater-to-r2:
+    name: Publish updater artifacts to Cloudflare R2
+    runs-on: ubuntu-latest
+    needs: publish-tauri
+
+    steps:
+      - name: Download matrix updater artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: tauri-updater-*
+          merge-multiple: true
+          path: r2-upload
+
+      - name: Remove non-updater files from upload folder
+        shell: bash
+        run: |
+          set -euo pipefail
+          find r2-upload -type f \
+            ! -name "*.sig" \
+            ! -name "*.app.tar.gz" \
+            ! -name "*.AppImage.tar.gz" \
+            ! -name "*.msi.zip" \
+            ! -name "*setup.nsis.zip" \
+            -delete
+
+      - name: Generate latest.json for public R2 URL
+        shell: bash
+        env:
+          UPDATER_PUBLIC_BASE_URL: https://pub-992f115513ba42f681595c2ca5fac628.r2.dev/tauri-updates
+        run: |
+          set -euo pipefail
+          node scripts/generate-latest-json.cjs r2-upload
+
+      - name: Verify R2 secrets are present
+        shell: bash
+        env:
+          CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
+          CLOUDFLARE_R2_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          CLOUDFLARE_R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+          CLOUDFLARE_R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          fail=0
+          check() {
+            if [ -z "$2" ]; then
+              echo "ERROR: $1 is empty or missing" >&2
+              fail=1
+            else
+              echo "OK: $1 is present"
+            fi
+          }
+          check CLOUDFLARE_R2_ACCOUNT_ID "$CLOUDFLARE_R2_ACCOUNT_ID"
+          check CLOUDFLARE_R2_ACCESS_KEY_ID "$CLOUDFLARE_R2_ACCESS_KEY_ID"
+          check CLOUDFLARE_R2_SECRET_ACCESS_KEY "$CLOUDFLARE_R2_SECRET_ACCESS_KEY"
+          check CLOUDFLARE_R2_BUCKET "$CLOUDFLARE_R2_BUCKET"
+          exit $fail
+
+      - name: Ensure latest.json exists in upload bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$(find r2-upload -type f -name latest.json -print -quit)"
+          echo "Found latest.json and updater files."
+          find r2-upload -type f | sed -n '1,250p'
+
+      - name: Configure AWS CLI credentials for R2
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+          aws-region: auto
+
+      - name: Purge old updater files from R2 prefix
+        shell: bash
+        env:
+          CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
+          CLOUDFLARE_R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          ENDPOINT="https://${CLOUDFLARE_R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          aws s3 rm "s3://${CLOUDFLARE_R2_BUCKET}/tauri-updates/" \
+            --recursive \
+            --endpoint-url "$ENDPOINT"
+
+      - name: Upload fresh updater files to R2
+        shell: bash
+        env:
+          CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
+          CLOUDFLARE_R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          ENDPOINT="https://${CLOUDFLARE_R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          aws s3 sync r2-upload/ "s3://${CLOUDFLARE_R2_BUCKET}/tauri-updates/" \
+            --delete \
+            --endpoint-url "$ENDPOINT"
+
+      - name: List uploaded updater files
+        shell: bash
+        env:
+          CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
+          CLOUDFLARE_R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          ENDPOINT="https://${CLOUDFLARE_R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          aws s3 ls "s3://${CLOUDFLARE_R2_BUCKET}/tauri-updates/" \
+            --recursive \
+            --endpoint-url "$ENDPOINT"

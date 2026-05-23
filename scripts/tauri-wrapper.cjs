@@ -56,7 +56,7 @@ const result = spawnSync(tauriBin, args, {
   shell: true,
 });
 
-if (args[0] === "build" && (result.status ?? 1) === 0) {
+if (args[0] === "build" && (result.status ?? 1) === 0 && !process.env.CI) {
   const patchResult = spawnSync(
     "node",
     [path.join("scripts", "update-updater-manifest.cjs")],
