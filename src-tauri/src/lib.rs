@@ -495,7 +495,7 @@ fn remove_window_border(hwnd: windows::Win32::Foundation::HWND) {
 #[tauri::command]
 fn toggle_floating(app: AppHandle) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("floating") {
-        win.close().map_err(|e| e.to_string())?;
+        win.hide().map_err(|e| e.to_string())?;
     } else {
         WebviewWindowBuilder::new(&app, "floating", WebviewUrl::App("floating.html".into()))
             .title("Mini Overlay")
@@ -2564,6 +2564,7 @@ fn open_microphone_settings(app: tauri::AppHandle) -> Result<(), String> {
 
 #[command]
 fn set_session_active(app: AppHandle, active: bool) {
+    println!("[Session][Native] set_session_active start active={active}");
     SESSION_ACTIVE.store(active, Ordering::SeqCst);
     if active {
         let _ = apply_overlay_policy_for_label(&app, "mini", OverlayMode::FullscreenOverlay);
@@ -2573,14 +2574,17 @@ fn set_session_active(app: AppHandle, active: bool) {
     if !active {
         stop_all_audio_transcription();
     }
+    println!("[Session][Native] set_session_active complete active={active}");
 }
 
 #[tauri::command]
 fn stop_all_audio_transcription() {
+    println!("[Session][Native] stop_all_audio_transcription start");
     stop_mic_transcription();
     stop_system_audio_transcription();
     stop_display_audio_stream();
     stop_audio_stream();
+    println!("[Session][Native] stop_all_audio_transcription complete");
 }
 
 /// Toggle content protection (screen-capture block) at runtime across all
@@ -2609,6 +2613,10 @@ async fn toggle_content_protection(app: AppHandle, protected: bool) -> Result<()
 
 #[command]
 fn handle_launcher_click(app: AppHandle) -> Result<(), String> {
+    println!(
+        "[Session][Native] handle_launcher_click start session_active={}",
+        SESSION_ACTIVE.load(Ordering::SeqCst)
+    );
     if SESSION_ACTIVE.load(Ordering::SeqCst) {
         let _ = apply_overlay_policy_for_label(&app, "mini", OverlayMode::FullscreenOverlay);
         if let Some(mini) = app.get_webview_window("mini") {
@@ -2641,6 +2649,7 @@ fn handle_launcher_click(app: AppHandle) -> Result<(), String> {
             }
         }
     }
+    println!("[Session][Native] handle_launcher_click complete");
     Ok(())
 }
 
@@ -2871,7 +2880,7 @@ fn set_cursor_passthrough(window: Window, passthrough: bool) -> Result<(), Strin
                 unsafe {
                     if let Ok(ns_win) = win_for_thread.ns_window() {
                         let ptr = ns_win as *mut objc2::runtime::AnyObject;
-                        let _: () = objc2::msg_send![ptr, setIgnoresMouseEvents: passthrough];
+                        let _: () = objc2::msg_send![ptr, setIgnoresMouseEvents: false];
                     }
                 }
             })
@@ -2931,11 +2940,25 @@ pub fn run() {
 
     if deepgram_key.is_empty() {
         eprintln!("[startup] VITE_DEEPGRAM_API_KEY is not set - STT will fail.");
-        #[cfg(not(debug_assertions))]
-        panic!("Release build is missing VITE_DEEPGRAM_API_KEY - aborting to prevent silent STT failure.");
     }
 
-    tauri::Builder::default()
+    let run_result = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(main) = app.get_webview_window("main") {
+                let _ = main.show();
+                let _ = main.unminimize();
+                let _ = main.set_focus();
+                return;
+            }
+
+            if let Some(widget) = app.get_webview_window("launcher") {
+                let _ = apply_overlay_policy_to_window(&widget, OverlayMode::FullscreenOverlay);
+                let _ = widget.show();
+                let _ = widget.unminimize();
+                let _ = widget.set_focus();
+                set_overlay_passthrough(&widget);
+            }
+        }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
@@ -3080,28 +3103,35 @@ pub fn run() {
                 mini_win.on_window_event(move |event| {
                     match event {
                         tauri::WindowEvent::Resized(_) => {
-                            let mini = mini_handle.get_webview_window("mini").unwrap();
-                            if mini.is_minimized().unwrap_or(false) {
-                                let _ = mini.hide();
-                                if !SESSION_ACTIVE.load(Ordering::SeqCst) {
-                                    if let Some(widget) = mini_handle.get_webview_window("launcher") {
-                                        let _ = apply_overlay_policy_to_window(
-                                            &widget,
-                                            OverlayMode::FullscreenOverlay,
-                                        );
-                                        #[cfg(target_os = "macos")]
-                                        {
-                                            let _ = apply_macos_overlay_policy(&widget, true);
-                                            set_overlay_passthrough(&widget);
-                                        }
-                                        #[cfg(not(target_os = "macos"))]
-                                        {
-                                            let _ = widget.show();
-                                            let _ = widget.set_focus();
-                                            set_overlay_passthrough(&widget);
+                            if let Some(mini) = mini_handle.get_webview_window("mini") {
+                                let minimized = mini.is_minimized().unwrap_or(false);
+                                println!("[Tauri][WindowLifecycle] mini resized; minimized={}", minimized);
+                                if minimized {
+                                    let _ = mini.hide();
+                                    println!("[Tauri][WindowLifecycle] mini hidden after minimize event");
+                                    if !SESSION_ACTIVE.load(Ordering::SeqCst) {
+                                        if let Some(widget) = mini_handle.get_webview_window("launcher") {
+                                            let _ = apply_overlay_policy_to_window(
+                                                &widget,
+                                                OverlayMode::FullscreenOverlay,
+                                            );
+                                            #[cfg(target_os = "macos")]
+                                            {
+                                                let _ = apply_macos_overlay_policy(&widget, true);
+                                                set_overlay_passthrough(&widget);
+                                            }
+                                            #[cfg(not(target_os = "macos"))]
+                                            {
+                                                let _ = widget.show();
+                                                let _ = widget.set_focus();
+                                                set_overlay_passthrough(&widget);
+                                            }
+                                            println!("[Tauri][WindowLifecycle] launcher restored after mini minimize");
                                         }
                                     }
                                 }
+                            } else {
+                                println!("[Tauri][WindowLifecycle] mini handle missing on resize event");
                             }
                         }
                         // BUG FIX: Intercept close requests on the mini overlay.
@@ -3119,6 +3149,9 @@ pub fn run() {
                             api.prevent_close();
                             if let Some(win) = mini_handle.get_webview_window("mini") {
                                 let _ = win.hide();
+                                println!("[Tauri][WindowLifecycle] mini close requested -> hide");
+                            } else {
+                                println!("[Tauri][WindowLifecycle] mini close requested but handle missing");
                             }
                         }
                         _ => {}
@@ -3270,6 +3303,8 @@ pub fn run() {
             auth_get_persisted_session, auth_set_persisted_session,
             auth_clear_persisted_session, auth_emit_state_changed,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .run(tauri::generate_context!());
+    if let Err(err) = run_result {
+        eprintln!("[startup] tauri runtime error: {err}");
+    }
 }

@@ -22,6 +22,8 @@ export interface ActiveQuestionDetectionPayload {
 
 export interface AIAnswerRequestPayload {
   transcript: string;
+  requestId?: string;
+  sessionId?: string;
   currentQuestion?: string;
   patchedTranscript?: string;
   recentTranscriptWindow?: string[];
@@ -133,6 +135,8 @@ export function sanitizeAIAnswerPayload(
 
   return {
     transcript,
+    ...(payload.requestId ? { requestId: payload.requestId } : {}),
+    ...(payload.sessionId ? { sessionId: payload.sessionId } : {}),
     ...(currentQuestion ? { currentQuestion } : {}),
     ...(patchedTranscript ? { patchedTranscript } : {}),
     ...(recentTranscriptWindow.length > 0 ? { recentTranscriptWindow } : {}),

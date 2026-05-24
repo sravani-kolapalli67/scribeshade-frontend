@@ -28,8 +28,9 @@ export const AIAnswerButton = ({
         <Button
           onClick={onClick}
           disabled={disabled || isLoading}
+          aria-disabled={disabled || isLoading}
           className={cn(
-            "flex-1 h-10 rounded-xl text-xs font-bold flex items-center justify-center gap-2 relative overflow-hidden group transition-all duration-300 disabled:opacity-50",
+            "flex-1 h-10 rounded-xl text-xs font-bold flex items-center justify-center gap-2 relative overflow-hidden group transition-all duration-300 disabled:opacity-50 disabled:pointer-events-none",
             isFullscreen
               ? "bg-white/10 hover:bg-white/20 text-white border border-white/20 backdrop-blur-xl"
               : "bg-[#1a1c23] hover:bg-[#252830] text-white shadow-[0_8px_16px_-4px_rgba(69,143,255,0.15)]",
@@ -42,7 +43,7 @@ export const AIAnswerButton = ({
           ) : (
             <Sparkles className="h-4 w-4 text-brand fill-brand group-hover:scale-110 transition-transform" />
           )}
-          AI Answer
+          {isLoading ? "Generating..." : "AI Answer"}
         </Button>
       </TooltipTrigger>
       <TooltipContent

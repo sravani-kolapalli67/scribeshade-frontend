@@ -80,6 +80,42 @@ interface AIDisplayResponse {
   question?: string;
 }
 
+type AnswerAreaBoundaryProps = {
+  children: React.ReactNode;
+};
+
+type AnswerAreaBoundaryState = {
+  hasError: boolean;
+};
+
+class AnswerAreaErrorBoundary extends React.Component<
+  AnswerAreaBoundaryProps,
+  AnswerAreaBoundaryState
+> {
+  state: AnswerAreaBoundaryState = {
+    hasError: false,
+  };
+
+  static getDerivedStateFromError(): AnswerAreaBoundaryState {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: unknown) {
+    console.error("[AnswerArea] render error caught by boundary", error);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="p-4 text-sm text-amber-300/90">
+          Answer render failed, retry/regenerate.
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 const getLanguageCode = (lang: string): string => {
   const mapping: Record<string, string> = {
     English: "en",
@@ -252,24 +288,12 @@ const InlineCopyButton: React.FC<{ text: string; label?: string }> = ({ text, la
  * Safe to apply to fully-completed text too (no-op on valid markdown).
  */
 function sanitizeStreamingMarkdown(text: string): string {
-  return (
-    normalizeBulletParagraphs(
-      text
-        // Strip trailing lone ***/** / * or ___ / __ / _
-        .replace(/(\*{1,3}|_{1,3})$/, "")
-        // Strip trailing backtick sequences
-        .replace(/`{1,3}$/, "")
-        // Strip lone ** or * that appear on their own line (orphaned bold/italic markers)
-        .replace(/^\s*\*{1,3}\s*$/gm, "")
-        // Strip orphaned ** at the very beginning of the string before any word char
-        .replace(/^\*{1,3}(?=\s|\n|$)/, "")
-        // Collapse `**QUESTION:** ** Foo` → `**QUESTION:** Foo`
-        .replace(/(\*\*\s*(?:QUESTION|ANSWER)\s*:?\s*\*\*)\s*\*{1,3}\s*/gi, "$1 ")
-        // Drop the ===NEXT_QUESTION=== marker if it leaks through to the renderer
-        .replace(/\n?={3,}NEXT_QUESTION={3,}\n?/g, "\n")
-        .trimStart(),
-    )
-  );
+  return text
+    // Drop the marker if it leaks through to the renderer.
+    .replace(/\n?={3,}NEXT_QUESTION={3,}\n?/g, "\n")
+    // Keep stream raw-first; only trim catastrophic trailing partial tokens.
+    .replace(/(\*{1,3}|_{1,3})$/, "")
+    .replace(/`{1,3}$/, "");
 }
 
 /**
@@ -305,17 +329,108 @@ function normalizeBulletParagraphs(text: string): string {
     .join("\n\n");
 }
 
-function applyDeterministicHighlighting(markdown: string): string {
-  if (!markdown?.trim()) return markdown;
+function enforceHierarchicalAnswerMarkdown(answer: string): string {
+  const raw = (answer || "").trim();
+  if (!raw) return raw;
+  // Keep model-authored structure when present.
+  if (/^\s*[-*]\s+/m.test(raw) || /^\s*\d+\.\s+/m.test(raw)) return raw;
+  if (/\*\*🔹/.test(raw) || /\n\s*\*\*[^*\n]+:\*\*/.test(raw)) return raw;
+
+  const paragraphs = raw
+    .split(/\n{2,}/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (paragraphs.length === 0) return raw;
+
+  const splitSentences = (text: string): string[] =>
+    (text.match(/[^.!?]+(?:[.!?](?=\s|$)|$)/g) || [])
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+  const deriveLabel = (paragraph: string): { label?: string; body: string } => {
+    const forMatch = paragraph.match(/^For\s+([^,:.\n]{3,60})\s*[:,]\s*([\s\S]*)$/i);
+    if (forMatch) {
+      return {
+        label: forMatch[1].trim(),
+        body: (forMatch[2] || "").trim(),
+      };
+    }
+    const headed = paragraph.match(/^([A-Z][A-Za-z0-9/&+\-\s]{3,60})\s*:\s*([\s\S]*)$/);
+    if (headed) {
+      return {
+        label: headed[1].trim(),
+        body: (headed[2] || "").trim(),
+      };
+    }
+    return { body: paragraph };
+  };
+
+  const first = paragraphs[0];
+  const firstSentences = splitSentences(first);
+  const summary = firstSentences[0] || first;
+  const detailsFromFirst = firstSentences.slice(1);
+
+  const sections: string[] = [];
+  const keyBullets: string[] = [];
+  for (const detail of detailsFromFirst) {
+    if (detail.length > 2) keyBullets.push(`- ${detail}`);
+  }
+
+  for (const paragraph of paragraphs.slice(1)) {
+    const { label, body } = deriveLabel(paragraph);
+    const sentences = splitSentences(body || paragraph);
+    if (sentences.length === 0) continue;
+
+    if (label) {
+      sections.push(`**🔹 ${label}:**`);
+      for (const sentence of sentences) {
+        if (sentence.length > 2) sections.push(`- ${sentence}`);
+      }
+      sections.push("");
+    } else {
+      for (const sentence of sentences) {
+        if (sentence.length > 2) keyBullets.push(`- ${sentence}`);
+      }
+    }
+  }
+
+  if (keyBullets.length > 0) {
+    sections.unshift("**🔹 Key Points:**", ...keyBullets, "");
+  }
+
+  return sections.length > 0 ? `${summary}\n\n${sections.join("\n").trim()}` : raw;
+}
+
+function applyDeterministicHighlighting(markdown: unknown): string {
+  const markdownText =
+    typeof markdown === "string"
+      ? markdown
+      : markdown == null
+      ? ""
+      : String(markdown);
+  if (!markdownText.trim()) return markdownText;
 
   const wrapIfNotBold = (text: string, pattern: RegExp) =>
-    text.replace(pattern, (match, p1, p2, p3) => {
-      const before = p1 || "";
-      const token = p2 || match;
-      const after = p3 || "";
-      if (before.endsWith("**") || after.startsWith("**")) return match;
-      return `${before}**${token}**${after}`;
-    });
+    text.replace(
+      pattern,
+      (
+        match: string,
+        ...args: Array<string | number | Record<string, unknown> | undefined>
+      ) => {
+        const before = typeof args[0] === "string" ? args[0] : "";
+        const token = typeof args[1] === "string" ? args[1] : match;
+        const offsetCandidate = args[2];
+        const source = typeof args[args.length - 2] === "string" ? (args[args.length - 2] as string) : "";
+        const offset = typeof offsetCandidate === "number" ? offsetCandidate : source.indexOf(match);
+        const after =
+          typeof source === "string" && offset >= 0
+            ? source.slice(offset + match.length)
+            : "";
+
+        if (before.endsWith("**") || after.startsWith("**")) return match;
+        return `${before}**${token}**`;
+      },
+    );
 
   const processPlain = (plain: string) => {
     let out = plain;
@@ -325,7 +440,7 @@ function applyDeterministicHighlighting(markdown: string): string {
     return out;
   };
 
-  const segments = markdown.split(/(```[\s\S]*?```)/g);
+  const segments = markdownText.split(/(```[\s\S]*?```)/g);
   return segments
     .map((seg) => (seg.startsWith("```") ? seg : processPlain(seg)))
     .join("");
@@ -444,10 +559,8 @@ const AnswerArea: React.FC<{
       className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-4 scroll-smooth no-scrollbar"
     >
       {responses.map((resp) => {
-        // Apply streaming sanitizer to prevent raw markdown syntax during generation
-        const displayText = resp.isStreaming
-          ? sanitizeStreamingMarkdown(resp.text)
-          : resp.text;
+        // Render raw markdown as-is from the stream/result. Do not mutate content.
+        const displayText = resp.text ?? "";
         const parsed = parseAIResponse(displayText);
 
         // The question comes from the message's `.question` field (set by
@@ -455,12 +568,7 @@ const AnswerArea: React.FC<{
         // cleaned question and should be the source of truth. Fallback to
         // re-parsing only if the message field is not set.
         const finalQuestion = parsed.question || resp.question?.trim() || "";
-        const answerMarkdown = applyDeterministicHighlighting(
-          normalizeProjectAnswerMarkdown(
-          finalQuestion,
-          parsed.answer,
-          ),
-        );
+        const answerMarkdown = parsed.answer;
 
         // Universal "Copy All" payload — always includes the question (when
         // present) followed by the answer, so users can paste a self-contained
@@ -810,6 +918,7 @@ const FloatingApp: React.FC = () => {
   handleAnalyzeScreenCaptureRef.current = handleAnalyzeScreenCapture;
 
   useEffect(() => {
+    console.log("[Tauri][WindowLifecycle] keyboard listener register count=1");
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
@@ -817,6 +926,10 @@ const FloatingApp: React.FC = () => {
       if (!mod) return;
       if (e.key.toLowerCase() === "g") {
         e.preventDefault();
+        if (session.isAnswering) {
+          console.log("[AI Answer][Dedup] keyboard shortcut ignored while request active");
+          return;
+        }
         handleAiAnswerClickRef.current();
       } else if (e.key.toLowerCase() === "k") {
         e.preventDefault();
@@ -824,7 +937,10 @@ const FloatingApp: React.FC = () => {
       }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      console.log("[Tauri][WindowLifecycle] keyboard listener unregister count=1");
+    };
   }, []);
 
   // ── Layer 1 + Layer 2 layout ──────────────────────────────────────────────
@@ -1330,19 +1446,21 @@ const FloatingApp: React.FC = () => {
 
                 {session.isResponsesExpanded && session.aiResponses.length > 0 && (
                   <div className="border-t border-white/10 max-h-120 overflow-y-auto overflow-x-auto no-scrollbar">
-                    <AnswerArea
-                      responses={[
-                        {
-                          messageId: currentResponse?.id ?? "",
-                          text: currentResponse?.text ?? "",
-                          question: currentResponse?.question ?? "",
-                          isStreaming:
-                            safeIndex === session.aiResponses.length - 1 &&
-                            (session.isAnswering || session.isAnalyzing),
-                        },
-                      ].filter((r) => r.messageId)}
-                      isStreaming={session.isAnswering || session.isAnalyzing}
-                    />
+                    <AnswerAreaErrorBoundary>
+                      <AnswerArea
+                        responses={[
+                          {
+                            messageId: currentResponse?.id ?? "",
+                            text: currentResponse?.text ?? "",
+                            question: currentResponse?.question ?? "",
+                            isStreaming:
+                              safeIndex === session.aiResponses.length - 1 &&
+                              (session.isAnswering || session.isAnalyzing),
+                          },
+                        ].filter((r) => r.messageId)}
+                        isStreaming={session.isAnswering || session.isAnalyzing}
+                      />
+                    </AnswerAreaErrorBoundary>
                   </div>
                 )}
               </>
@@ -1352,15 +1470,27 @@ const FloatingApp: React.FC = () => {
           {session.isResponsesExpanded &&
             (session.isAnswering || session.isAnalyzing || isCapturePhase) &&
             session.aiResponses.length === 0 && (
-              <div className="flex items-center justify-center py-8 gap-2 text-blue-400/70">
-                <Loader2 size={16} className="animate-spin" />
-                <span className="text-[13px] font-medium">
-                  {isCapturePhase
-                    ? "Capturing screen..."
-                    : session.isAnalyzing
-                      ? "Analyzing screen..."
-                      : "Generating response..."}
-                </span>
+              <div className="px-4 pb-4">
+                <div className="relative overflow-hidden rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                  <span className="pointer-events-none absolute inset-0 overflow-hidden rounded-xl">
+                    <span className="absolute inset-y-[-60%] -left-[20%] w-1/3 h-[220%] bg-gradient-to-r from-transparent via-blue-400/20 to-transparent animate-[ai-sweep_1.2s_cubic-bezier(0.25,0.46,0.45,0.94)_infinite]" />
+                  </span>
+                  <div className="relative z-10 flex items-center gap-2 text-blue-400/80 mb-3">
+                    <Loader2 size={16} className="animate-spin" />
+                    <span className="text-[13px] font-medium">
+                      {isCapturePhase
+                        ? "Capturing screen..."
+                        : session.isAnalyzing
+                          ? "Analyzing screen..."
+                          : "Generating response..."}
+                    </span>
+                  </div>
+                  <div className="relative z-10 space-y-2 animate-pulse">
+                    <div className="h-2.5 w-[92%] rounded bg-white/10" />
+                    <div className="h-2.5 w-[80%] rounded bg-white/10" />
+                    <div className="h-2.5 w-[86%] rounded bg-white/10" />
+                  </div>
+                </div>
               </div>
             )}
         </div>

@@ -25,6 +25,10 @@ export function useCursorPassthrough({
     let cachedScale = 1;
     let cachedWinPos = { x: 0, y: 0 };
     let lastCacheUpdate = 0;
+    const ua = navigator.userAgent.toLowerCase();
+    const isMac = ua.includes("mac");
+    const isWindows = ua.includes("windows");
+    const pollIntervalMs = isWindows ? 42 : 16;
 
     async function setPassthrough(p: boolean) {
       if (p === lastPassthrough) return;
@@ -64,9 +68,9 @@ export function useCursorPassthrough({
       }
 
       try {
-        // Refresh window position cache every ~250ms
+        // Refresh window position cache less often to keep drag smooth.
         const now = performance.now();
-        if (now - lastCacheUpdate > 250) {
+        if (now - lastCacheUpdate > 500) {
           lastCacheUpdate = now;
           const [pos, scale] = await Promise.all([
             tauriOverlay.getOuterPosition(),
@@ -86,18 +90,18 @@ export function useCursorPassthrough({
         const localLogicalX = gx - cachedWinPos.x;
         const localLogicalY = gy - cachedWinPos.y;
 
-        const over =
-          isPointInInteractiveRegion(localPhysicalX, localPhysicalY) ||
-          isPointInInteractiveRegion(localLogicalX, localLogicalY);
+        const over = isMac
+          ? isPointInInteractiveRegion(localPhysicalX, localPhysicalY) ||
+            isPointInInteractiveRegion(localLogicalX, localLogicalY)
+          : isPointInInteractiveRegion(localPhysicalX, localPhysicalY);
 
         await setPassthrough(!over);
       } catch (e) {
         console.debug("[passthrough] tick error", e);
       }
 
-      // ~30 fps polling
       raf = requestAnimationFrame(() => {
-        setTimeout(() => void tick(), 16);
+        setTimeout(() => void tick(), pollIntervalMs);
       });
     }
 

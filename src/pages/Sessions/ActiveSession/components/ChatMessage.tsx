@@ -120,6 +120,59 @@ export const ChatMessage = ({
 }: ChatMessageProps) => {
   const isAI = message.sender !== "User";
 
+  const enforceHierarchicalAnswerMarkdown = (answer: string): string => {
+    const raw = (answer || "").trim();
+    if (!raw) return raw;
+    if (/^\s*[-*]\s+/m.test(raw) || /^\s*\d+\.\s+/m.test(raw)) return raw;
+    if (/\*\*🔹/.test(raw) || /\n\s*\*\*[^*\n]+:\*\*/.test(raw)) return raw;
+
+    const paragraphs = raw
+      .split(/\n{2,}/)
+      .map((p) => p.trim())
+      .filter(Boolean);
+    if (paragraphs.length === 0) return raw;
+
+    const splitSentences = (text: string): string[] =>
+      (text.match(/[^.!?]+(?:[.!?](?=\s|$)|$)/g) || [])
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+    const first = paragraphs[0];
+    const firstSentences = splitSentences(first);
+    const summary = firstSentences[0] || first;
+    const sections: string[] = [];
+    const keyBullets: string[] = [];
+
+    for (const s of firstSentences.slice(1)) {
+      if (s.length > 2) keyBullets.push(`- ${s}`);
+    }
+
+    for (const paragraph of paragraphs.slice(1)) {
+      const forMatch = paragraph.match(/^For\s+([^,:.\n]{3,60})\s*[:,]\s*([\s\S]*)$/i);
+      const label = forMatch?.[1]?.trim();
+      const body = (forMatch?.[2] || paragraph).trim();
+      const sentences = splitSentences(body);
+      if (sentences.length === 0) continue;
+
+      if (label) {
+        sections.push(`**🔹 ${label}:**`);
+        for (const sentence of sentences) {
+          if (sentence.length > 2) sections.push(`- ${sentence}`);
+        }
+        sections.push("");
+      } else {
+        for (const sentence of sentences) {
+          if (sentence.length > 2) keyBullets.push(`- ${sentence}`);
+        }
+      }
+    }
+
+    if (keyBullets.length > 0) {
+      sections.unshift("**🔹 Key Points:**", ...keyBullets, "");
+    }
+    return sections.length > 0 ? `${summary}\n\n${sections.join("\n").trim()}` : raw;
+  };
+
   const sanitize = (raw: string): string => {
     if (!raw) return raw;
     let out = raw;
@@ -173,7 +226,11 @@ export const ChatMessage = ({
 
   // The answer is what parseAnswerContent returned — already stripped of labels.
   // Apply the markdown sanitizer to clean up stray asterisks / bullet chars.
-  const displayAnswer = sanitize(parsedAnswer);
+  const displayAnswer = sanitize(
+    isStreaming
+      ? baseText
+      : enforceHierarchicalAnswerMarkdown(parsedAnswer),
+  );
 
   if (!isAI) {
     return (

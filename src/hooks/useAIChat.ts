@@ -9,6 +9,10 @@ import {
 } from "@/types/ai-answer";
 import { isTauri } from "@/lib/utils";
 import {
+  createSessionOperationRegistry,
+  type SessionOperationKind,
+} from "@/features/session/runtime/sessionRuntime";
+import {
   type ConversationContinuityState,
   type ConversationMode,
   extractTopicAndEntities,
@@ -469,13 +473,14 @@ async function consumeSegmentedStream(
         const snapMatch = rawText.match(/===SNAPSHOT_ID=([a-f0-9\-]+)===/i);
         if (snapMatch) {
           snapshotId = snapMatch[1];
-          rawText = rawText.replace(/===SNAPSHOT_ID=([a-f0-9\-]+)===/gi, "").trim();
+          rawText = rawText.replace(/===SNAPSHOT_ID=([a-f0-9\-]+)===/gi, "");
         }
 
         // Extract structured question + answer from raw backend response.
         // We do this BEFORE stripping so we can populate the `question` field
         // on new segment cards (mirroring what handleAiAnswerSingle does).
-        const { question: extractedQuestion, answer: displayText } = parseAnswerContent(rawText);
+        const { question: extractedQuestion } = parseAnswerContent(rawText);
+        const displayText = rawText;
 
         const idx = next.findIndex((m) => m.id === sid);
         if (idx >= 0) {
@@ -583,7 +588,7 @@ async function consumeSegmentedStream(
     }
 
     for (let i = 0; i < renderable; i++) {
-      segmentTexts[i] = parts[i + leadingSkip].trim();
+      segmentTexts[i] = parts[i + leadingSkip];
     }
 
     flushToState();
@@ -610,10 +615,16 @@ export const useAIChat = () => {
   const [inputMessage, setInputMessage] = useState("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isAnswering, setIsAnswering] = useState(false);
+  const isMountedRef = useRef(true);
 
   // Stream isolation management
   const activeAbortControllerRef = useRef<AbortController | null>(null);
   const activeRequestIdRef = useRef<string | null>(null);
+  const operationRegistryRef = useRef(
+    createSessionOperationRegistry((event) => {
+      console.log("[Session][Operation]", event);
+    }),
+  );
   // Track all loading-state setters for the current request so we can always
   // reset them even when a new request supersedes the old one.
   const pendingLoadingResetRef = useRef<(() => void) | null>(null);
@@ -733,19 +744,36 @@ export const useAIChat = () => {
     ) => Promise<void>
   >(() => Promise.resolve());
 
-  const startNewRequest = useCallback(() => {
-    // Abort previous active request and immediately execute its pending loading reset
-    // so isAnswering/isAnalyzing never get stuck when a new request fires before
-    // the previous one's finally block runs.
-    if (activeAbortControllerRef.current) {
-      console.log(`[useAIChat] startNewRequest: Aborting active request ID: ${activeRequestIdRef.current}`);
-      activeAbortControllerRef.current.abort();
-    }
-    if (pendingLoadingResetRef.current) {
-      pendingLoadingResetRef.current();
-      pendingLoadingResetRef.current = null;
-    }
+  const safeSetAiChat = useCallback(
+    (updater: React.SetStateAction<Message[]>) => {
+      if (!isMountedRef.current) return;
+      setAiChat(updater);
+    },
+    [],
+  );
 
+  const createRequestId = useCallback(() => {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+    return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+      if (activeAbortControllerRef.current) {
+        activeAbortControllerRef.current.abort();
+      }
+      if (pendingLoadingResetRef.current) {
+        pendingLoadingResetRef.current();
+        pendingLoadingResetRef.current = null;
+      }
+      operationRegistryRef.current.clear();
+    };
+  }, []);
+
+  const startNewRequest = useCallback(() => {
     const controller = new AbortController();
     activeAbortControllerRef.current = controller;
 
@@ -754,6 +782,18 @@ export const useAIChat = () => {
 
     console.log(`[useAIChat] startNewRequest: Initialized new request ID: ${reqId}`);
     return { controller, reqId };
+  }, []);
+
+  const cancelActiveRequest = useCallback((reason: string) => {
+    console.log(`[AI Answer][Abort] cancelActiveRequest invoked`, { reason, activeRequestId: activeRequestIdRef.current });
+    if (activeAbortControllerRef.current) {
+      activeAbortControllerRef.current.abort();
+    }
+    if (pendingLoadingResetRef.current) {
+      pendingLoadingResetRef.current();
+      pendingLoadingResetRef.current = null;
+    }
+    operationRegistryRef.current.clear();
   }, []);
 
   const applyQuestionGuardrail = useCallback(
@@ -847,7 +887,7 @@ export const useAIChat = () => {
       };
 
       console.log(`[useAIChat] handleAnalyzeScreen: Spawning temporary card messageId: ${messageId}`);
-      setAiChat((prev) => [...prev, newAiMessage]);
+      safeSetAiChat((prev) => [...prev, newAiMessage]);
 
       try {
         conversationContinuityRef.current = {
@@ -891,7 +931,7 @@ export const useAIChat = () => {
 
         if (analyzeSentinel) {
           console.log(`[useAIChat] handleAnalyzeScreen: Sentinel-only response. Showing no-question message on card ${messageId}.`);
-          setAiChat((prev) =>
+          safeSetAiChat((prev) =>
             prev.map((msg) =>
               msg.id === messageId
                 ? { ...msg, text: NO_QUESTION_MESSAGE, question: "" }
@@ -927,7 +967,7 @@ export const useAIChat = () => {
         );
 
         // Fallback: if the stream produced no renderable cards, show a helpful message
-        setAiChat((prev) => {
+        safeSetAiChat((prev) => {
           if (renderedIds.length > 0) {
             const allHaveText = renderedIds.every((rid) =>
               prev.find((m) => m.id === rid)?.text?.trim(),
@@ -994,11 +1034,11 @@ export const useAIChat = () => {
           console.log(`[useAIChat] handleAnalyzeScreen: finally block for request ID: ${reqId}. Resetting isAnalyzing.`);
           pendingLoadingResetRef.current = null;
           setIsAnalyzing(false);
-          setAiChat((prev) => prev.filter((m) => m.sender !== "AI" || m.text.trim() !== ""));
+        safeSetAiChat((prev) => prev.filter((m) => m.sender !== "AI" || m.text.trim() !== ""));
         } else {
           console.log(`[useAIChat] handleAnalyzeScreen: request ID mismatch in finally block (already superseded). Active: ${activeRequestIdRef.current}, Current: ${reqId}`);
           // Loading was already reset by startNewRequest — just clean empty cards.
-          setAiChat((prev) => prev.filter((m) => m.sender !== "AI" || m.text.trim() !== ""));
+          safeSetAiChat((prev) => prev.filter((m) => m.sender !== "AI" || m.text.trim() !== ""));
         }
       }
     },
@@ -1043,8 +1083,11 @@ export const useAIChat = () => {
       }
       recentQuestionsRef.current = [...recent, { q: dedupeKey, t: now }].slice(-10);
 
+      const requestId = createRequestId();
       const normalizedPayload = sanitizeAIAnswerPayload({
         ...basePayload,
+        requestId,
+        sessionId,
         currentQuestion: normalizedQuestion,
       });
       if (import.meta.env.DEV) {
@@ -1149,6 +1192,21 @@ export const useAIChat = () => {
       if (!resolvedQuestion.trim()) return;
 
       const { controller, reqId } = startNewRequest();
+      const requestId = payload.requestId || createRequestId();
+      const opAcquire = operationRegistryRef.current.acquire(
+        sessionId,
+        "ai-answer",
+        requestId,
+        controller,
+      );
+      if (!opAcquire.acquired) {
+        console.warn("[AI Answer][Dedup] Ignored duplicate AI answer call while request is active", {
+          sessionId,
+          requestId,
+          operationKind: "ai-answer",
+        });
+        return;
+      }
       console.log(`[useAIChat] handleAiAnswerSingle: Assigned request ID: ${reqId}`);
       setIsAnswering(true);
       setIsAnalyzing(false);
@@ -1176,11 +1234,11 @@ export const useAIChat = () => {
       };
 
       console.log(`[useAIChat] handleAiAnswer: Spawning temporary card messageId: ${messageId}`);
-      setAiChat((prev) => [...prev, newAiMessage]);
+      safeSetAiChat((prev) => [...prev, newAiMessage]);
 
       try {
         const targetUrl = `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionId}/ai-answer`;
-        const requestBody = { ...payload, aiModel };
+        const requestBody = { ...payload, requestId, sessionId, aiModel };
         if (import.meta.env.DEV) {
           console.log("[AI Answer Debug][FE] POST /ai-answer body:", requestBody);
         }
@@ -1191,6 +1249,8 @@ export const useAIChat = () => {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
+              "x-request-id": requestId,
+              "x-session-id": sessionId,
             },
             body: JSON.stringify(requestBody),
             signal: controller.signal,
@@ -1226,7 +1286,7 @@ export const useAIChat = () => {
           // Backend cleanly said there was no interview question in the input.
           // Remove the temporary placeholder card silently — no error message.
           console.log(`[useAIChat] handleAiAnswer: Sentinel-only response. Removing placeholder card ${messageId}.`);
-          setAiChat((prev) => prev.filter((m) => m.id !== messageId));
+          safeSetAiChat((prev) => prev.filter((m) => m.id !== messageId));
           return;
         }
 
@@ -1235,7 +1295,7 @@ export const useAIChat = () => {
         commitContinuityFromAnswer(resolvedQuestion, answerText, "button");
 
         // Genuine empty response (model returned nothing useful) — show fallback.
-        setAiChat((prev) => {
+        safeSetAiChat((prev) => {
           const target = prev.find((msg) => msg.id === messageId);
           if (target?.text?.trim()) return prev;
           console.log(`[useAIChat] handleAiAnswer: Stream finished but card ID: ${messageId} is empty. Showing fallback.`);
@@ -1257,7 +1317,7 @@ export const useAIChat = () => {
 
         if (controller.signal.aborted) return;
 
-        setAiChat((prev) =>
+        safeSetAiChat((prev) =>
           prev.map((msg) =>
             msg.id === messageId
               ? {
@@ -1272,14 +1332,15 @@ export const useAIChat = () => {
           console.log(`[useAIChat] handleAiAnswerSingle: finally block for request ID: ${reqId}. Resetting isAnswering.`);
           pendingLoadingResetRef.current = null;
           setIsAnswering(false);
-          setAiChat((prev) => prev.filter((m) => m.sender !== "AI" || m.text.trim() !== ""));
+          safeSetAiChat((prev) => prev.filter((m) => m.sender !== "AI" || m.text.trim() !== ""));
         } else {
           console.log(`[useAIChat] handleAiAnswerSingle: request ID mismatch (already superseded). Active: ${activeRequestIdRef.current}, Current: ${reqId}`);
-          setAiChat((prev) => prev.filter((m) => m.sender !== "AI" || m.text.trim() !== ""));
+          safeSetAiChat((prev) => prev.filter((m) => m.sender !== "AI" || m.text.trim() !== ""));
         }
+        operationRegistryRef.current.release(sessionId, "ai-answer", requestId);
       }
     },
-    [commitContinuityFromAnswer, startNewRequest],
+    [commitContinuityFromAnswer, createRequestId, safeSetAiChat, startNewRequest],
   );
   // Keep the ref in sync so handleAiAnswer always calls the latest callback.
   handleAiAnswerSingleRef.current = handleAiAnswerSingle;
@@ -1300,6 +1361,19 @@ export const useAIChat = () => {
       }
 
       const { controller, reqId } = startNewRequest();
+      const customOp = operationRegistryRef.current.acquire(
+        sessionId,
+        "ai-answer",
+        reqId,
+        controller,
+      );
+      if (!customOp.acquired) {
+        console.warn("[AI Answer][Dedup] Ignored duplicate manual query while request is active", {
+          sessionId,
+          requestId: reqId,
+        });
+        return;
+      }
       console.log(`[useAIChat] handleCustomQuery: Assigned request ID: ${reqId}`);
       setIsAnswering(true);
       setIsAnalyzing(false);
@@ -1415,6 +1489,7 @@ export const useAIChat = () => {
       generationGuardRef.current.lockGeneration(segmentId, decision.groupedTranscript);
 
       try {
+        const requestId = createRequestId();
         const targetUrl = `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionId}/ai-answer`;
         console.log(`[useAIChat] handleCustomQuery: Dispatching POST to ${targetUrl} for streaming custom answer.`);
         const response = await fetch(
@@ -1423,9 +1498,13 @@ export const useAIChat = () => {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
+              "x-request-id": requestId,
+              "x-session-id": sessionId,
             },
             body: JSON.stringify({
               ...sanitizeAIAnswerPayload({
+                requestId,
+                sessionId,
                 transcript: enrichedQuery,
                 currentQuestion: resolvedQuery,
                 previousAiAnswer: previousAiAnswer || undefined,
@@ -1498,6 +1577,7 @@ export const useAIChat = () => {
         );
       } finally {
         generationGuardRef.current.releaseGeneration(segmentId);
+        operationRegistryRef.current.release(sessionId, "ai-answer", reqId);
         if (activeRequestIdRef.current === reqId) {
           console.log(`[useAIChat] handleCustomQuery: finally block for request ID: ${reqId}. Resetting isAnswering.`);
           pendingLoadingResetRef.current = null;
@@ -1509,7 +1589,7 @@ export const useAIChat = () => {
         }
       }
     },
-    [applyContinuityToQuestion, commitContinuityFromAnswer, startNewRequest],
+    [applyContinuityToQuestion, commitContinuityFromAnswer, createRequestId, startNewRequest],
   );
 
   const handleRegenerate = useCallback(
@@ -1576,6 +1656,19 @@ export const useAIChat = () => {
       });
 
       const { controller, reqId } = startNewRequest();
+      const regenOp = operationRegistryRef.current.acquire(
+        sessionId,
+        "ai-answer",
+        reqId,
+        controller,
+      );
+      if (!regenOp.acquired) {
+        console.warn("[AI Answer][Dedup] Ignored duplicate regenerate while request is active", {
+          sessionId,
+          requestId: reqId,
+        });
+        return;
+      }
       console.log(`[useAIChat] handleRegenerate: Assigned request ID: ${reqId}`);
       setIsAnswering(true);
       setIsAnalyzing(false);
@@ -1605,9 +1698,12 @@ export const useAIChat = () => {
       generationGuardRef.current.lockGeneration(segmentId, decision.groupedTranscript);
 
       try {
+        const requestId = replayPayload.requestId || createRequestId();
         const targetUrl = `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionId}/ai-answer`;
         const requestBody = {
           ...replayPayload,
+          requestId,
+          sessionId,
           isRegenerate: true,
           regenerate: true,
           regenerateTargetAnswerId: messageId,
@@ -1619,7 +1715,11 @@ export const useAIChat = () => {
         console.log(`[useAIChat] handleRegenerate: Dispatching POST to ${targetUrl} with body:`, requestBody);
         const response = await fetch(targetUrl, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "x-request-id": requestId,
+            "x-session-id": sessionId,
+          },
           body: JSON.stringify(requestBody),
           signal: controller.signal,
         });
@@ -1677,6 +1777,7 @@ export const useAIChat = () => {
         );
       } finally {
         generationGuardRef.current.releaseGeneration(segmentId);
+        operationRegistryRef.current.release(sessionId, "ai-answer", reqId);
         if (activeRequestIdRef.current === reqId) {
           console.log(`[useAIChat] handleRegenerate: finally block for request ID: ${reqId}. Resetting isAnswering.`);
           pendingLoadingResetRef.current = null;
@@ -1688,7 +1789,7 @@ export const useAIChat = () => {
         }
       }
     },
-    [applyContinuityToQuestion, commitContinuityFromAnswer, startNewRequest],
+    [applyContinuityToQuestion, commitContinuityFromAnswer, createRequestId, startNewRequest],
   );
 
   return {
@@ -1702,6 +1803,7 @@ export const useAIChat = () => {
     handleAiAnswer,
     handleCustomQuery,
     handleRegenerate,
+    cancelActiveRequest,
     normalizeSttTranscript,
   };
 };

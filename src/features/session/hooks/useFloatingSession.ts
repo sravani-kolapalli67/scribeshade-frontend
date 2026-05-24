@@ -57,6 +57,11 @@ import {
 import { isScenarioBased, extractContextFromMessages, buildDynamicTranscriptWindow } from "@/semantic";
 import { detectActiveQuestion } from "@/features/session/detection/activeQuestionDetector";
 import {
+  createSessionOperationRegistry,
+  createSessionTransitionGuard,
+  type SessionLifecycleState,
+} from "@/features/session/runtime/sessionRuntime";
+import {
   type AIAnswerRequestPayload,
   extractCodeBlocks,
   normalizeSpeakerType,
@@ -862,7 +867,21 @@ export function useFloatingSession() {
 
   // ── Mutual exclusion refs for AI operations ─────────────────────────────────
   const isEmittingRef = useRef(false);
+  const isAiAnswerRunningRef = useRef(false);
   const isAnalyzeEmittingRef = useRef(false);
+  const [isAiAnswerUiLocked, setIsAiAnswerUiLocked] = useState(false);
+  const sessionStateRef = useRef<SessionLifecycleState>("idle");
+  const transitionGuardRef = useRef(
+    createSessionTransitionGuard("idle", (event) => {
+      console.log("[Session][Transition]", event);
+      if (event.allowed) sessionStateRef.current = event.to;
+    }),
+  );
+  const operationRegistryRef = useRef(
+    createSessionOperationRegistry((event) => {
+      console.log("[Session][Operation]", event);
+    }),
+  );
 
   // ── AI Chat hook (streaming state lives here, not in Redux) ─────────────────
   const {
@@ -874,9 +893,27 @@ export function useFloatingSession() {
     handleAnalyzeScreen,
     handleCustomQuery,
     handleRegenerate,
+    cancelActiveRequest,
   } = useAIChat();
 
   const aiResponses = aiChat.filter((m) => m.sender === "AI");
+
+  useEffect(() => {
+    if (!sessionInfo?.sessionId) {
+      transitionGuardRef.current.transition("cleanup", "session_missing_or_reset");
+      cancelActiveRequest("session_missing_or_reset");
+      operationRegistryRef.current.clear();
+      isAiAnswerRunningRef.current = false;
+      isEmittingRef.current = false;
+      setIsAiAnswerUiLocked(false);
+      transitionGuardRef.current.transition("idle", "cleanup_completed");
+      return;
+    }
+    if (sessionStateRef.current === "idle") {
+      transitionGuardRef.current.transition("initializing", "session_detected", sessionInfo.sessionId);
+      transitionGuardRef.current.transition("recording", "session_ready", sessionInfo.sessionId);
+    }
+  }, [cancelActiveRequest, sessionInfo?.sessionId]);
 
   // ── Deduplication helpers ───────────────────────────────────────────────────
 
@@ -1469,6 +1506,7 @@ export function useFloatingSession() {
     let unlistenTx: (() => void) | undefined;
     let unlistenSt: (() => void) | undefined;
     let unlistenHealth: (() => void) | undefined;
+    console.log("[Tauri][WindowLifecycle] stt system listeners register count=3");
 
     listen<{ text: string; is_final: boolean }>("stt:system-audio", (event) => {
       const { text, is_final } = event.payload;
@@ -1587,6 +1625,7 @@ export function useFloatingSession() {
       unlistenTx?.();
       unlistenSt?.();
       unlistenHealth?.();
+      console.log("[Tauri][WindowLifecycle] stt system listeners unregister count=3");
     };
   }, []);
 
@@ -1895,7 +1934,12 @@ export function useFloatingSession() {
   // ── AI action handlers ──────────────────────────────────────────────────────
 
   const handleAiAnswerClick = useCallback(async () => {
-    console.log("[useFloatingSession] handleAiAnswerClick clicked.");
+    console.log("[AI Answer][Click] received", {
+      hasSession: !!sessionInfoRef.current?.sessionId,
+      isRefLocked: isAiAnswerRunningRef.current,
+      isEmitting: isEmittingRef.current,
+      isAnswering,
+    });
 
     // Validation: Ensure a valid model is selected
     const currentModel = selectedModelRef.current;
@@ -1906,8 +1950,16 @@ export function useFloatingSession() {
       return;
     }
 
-    if (isEmittingRef.current) {
-      console.log("[useFloatingSession] handleAiAnswerClick: Suppressed click (isEmittingRef is true).");
+    if (isAiAnswerRunningRef.current || isEmittingRef.current || isAnswering || isAiAnswerUiLocked) {
+      console.log("[AI Answer][Dedup] duplicate click ignored", {
+        reason: isAiAnswerRunningRef.current
+          ? "ref_locked"
+          : isEmittingRef.current
+            ? "emitting"
+            : isAiAnswerUiLocked
+              ? "ui_locked"
+              : "isAnswering_state",
+      });
       return;
     }
     const info = sessionInfoRef.current;
@@ -1915,7 +1967,27 @@ export function useFloatingSession() {
       console.log("[useFloatingSession] handleAiAnswerClick: Suppressed click (no sessionInfo available).");
       return;
     }
+    const opRequestId =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const opAcquire = operationRegistryRef.current.acquire(
+      info.sessionId,
+      "ai-answer",
+      opRequestId,
+    );
+    if (!opAcquire.acquired) {
+      console.log("[AI Answer][Dedup] duplicate ai-answer ignored (operation registry)", {
+        sessionId: info.sessionId,
+        requestId: opRequestId,
+      });
+      return;
+    }
     isEmittingRef.current = true;
+    isAiAnswerRunningRef.current = true;
+    setIsAiAnswerUiLocked(true);
+    transitionGuardRef.current.transition("processing", "ai_answer_click", info.sessionId);
+    transitionGuardRef.current.transition("answering", "ai_answer_dispatch", info.sessionId);
     try {
 
     // 1) Apply semantic debounce before locking active question snapshot.
@@ -1975,8 +2047,10 @@ export function useFloatingSession() {
       selectedAnswerId: selectedAiMessageForDetection?.id,
     });
 
-    const question = detection.cleanedQuestion.trim();
+    let question = detection.cleanedQuestion.trim();
     const source = detection.source;
+    let effectiveDetection = detection;
+    let forcedByExplicitClick = false;
     const stableQuestionHash =
       preDebounceDetection.cleanedQuestion.trim().toLowerCase() ===
       question.toLowerCase();
@@ -1984,24 +2058,103 @@ export function useFloatingSession() {
       (preDebounceDetection.confidenceScore || 0) - (detection.confidenceScore || 0),
     );
     const semanticallyStable = stableQuestionHash && confidenceDelta <= 0.2;
-    if (!question || detection.ignoredNoise || detection.confidenceScore < ACTIVE_QUESTION_CONFIDENCE_THRESHOLD) {
-      console.log("[useFloatingSession] handleAiAnswerClick: No confident active question after debounce.", {
+    const failedConfidenceGate =
+      !question ||
+      detection.ignoredNoise ||
+      detection.confidenceScore < ACTIVE_QUESTION_CONFIDENCE_THRESHOLD;
+
+    if (failedConfidenceGate) {
+      const fallbackResolved = resolveQuestionFromContext(
+        liveInterviewerTextSnapshot,
+        msgsSnapshot,
+        lastMessage,
+        lastAnswerTimestampRef.current,
+      );
+      const fallbackQuestion = (
+        fallbackResolved?.question?.trim() ||
+        preDebounceDetection.cleanedQuestion.trim() ||
+        question
+      ).trim();
+
+      if (fallbackQuestion && !isFillerPhrase(fallbackQuestion)) {
+        forcedByExplicitClick = true;
+        question = fallbackQuestion;
+        effectiveDetection = {
+          ...detection,
+          activeQuestion: fallbackQuestion,
+          cleanedQuestion: fallbackQuestion,
+          confidenceScore: Math.max(
+            detection.confidenceScore || 0,
+            ACTIVE_QUESTION_CONFIDENCE_THRESHOLD,
+          ),
+          ignoredNoise: false,
+        };
+        console.log("[AI Answer][Click] low-confidence detection recovered via explicit-click fallback", {
+          originalDetection: detection,
+          fallbackSource: fallbackResolved?.source || "pre_debounce",
+          fallbackQuestion,
+        });
+      } else {
+        console.log("[useFloatingSession] handleAiAnswerClick: No confident active question after debounce.", {
+          evolving,
+          detection,
+          preDebounceDetection,
+          semanticallyStable,
+          snapshotTimestamp,
+        });
+        return;
+      }
+    }
+
+    const preNormalizedQuestion = normalizeTranscriptText(
+      preDebounceDetection.cleanedQuestion || "",
+    );
+    const postNormalizedQuestion = normalizeTranscriptText(
+      effectiveDetection.cleanedQuestion || question,
+    );
+    const preTokens = new Set(
+      preNormalizedQuestion.split(" ").map((t) => t.trim()).filter(Boolean),
+    );
+    const postTokens = new Set(
+      postNormalizedQuestion.split(" ").map((t) => t.trim()).filter(Boolean),
+    );
+    const overlapCount = [...postTokens].filter((t) => preTokens.has(t)).length;
+    const overlapRatio = postTokens.size > 0 ? overlapCount / postTokens.size : 0;
+    const minorQuestionEvolution =
+      (preNormalizedQuestion &&
+        postNormalizedQuestion &&
+        (preNormalizedQuestion.includes(postNormalizedQuestion) ||
+          postNormalizedQuestion.includes(preNormalizedQuestion))) ||
+      overlapRatio >= 0.72;
+    const shouldAllowEvolvingFollowup =
+      minorQuestionEvolution &&
+      effectiveDetection.confidenceScore >= ACTIVE_QUESTION_CONFIDENCE_THRESHOLD;
+
+    if (
+      evolving &&
+      !semanticallyStable &&
+      !forcedByExplicitClick &&
+      !shouldAllowEvolvingFollowup
+    ) {
+      console.log("[useFloatingSession] handleAiAnswerClick: Transcript still semantically evolving, skip this click.", {
         evolving,
-        detection,
+        detection: effectiveDetection,
         preDebounceDetection,
         semanticallyStable,
+        overlapRatio,
+        minorQuestionEvolution,
         snapshotTimestamp,
       });
       return;
     }
-    if (evolving && !semanticallyStable) {
-      console.log("[useFloatingSession] handleAiAnswerClick: Transcript still semantically evolving, skip this click.", {
-        preDebounceDetection,
-        detection,
-        confidenceDelta,
-        snapshotTimestamp,
+
+    if (evolving && !semanticallyStable && shouldAllowEvolvingFollowup) {
+      console.log("[AI Answer][Click] allowing semantically-evolving followup due to high overlap", {
+        evolving,
+        overlapRatio,
+        preQuestion: preDebounceDetection.cleanedQuestion,
+        postQuestion: effectiveDetection.cleanedQuestion,
       });
-      return;
     }
 
     console.log("[useFloatingSession] handleAiAnswerClick: Resolved question from", source, ":", question);
@@ -2077,7 +2230,9 @@ export function useFloatingSession() {
       selectedAnswerTopic,
     });
 
-    const payload: AIAnswerRequestPayload = {
+      const payload: AIAnswerRequestPayload = {
+      requestId: opRequestId,
+      sessionId: info.sessionId,
       transcript:
         recentTranscriptWindow.length > 0
           ? recentTranscriptWindow.join("\n")
@@ -2099,19 +2254,27 @@ export function useFloatingSession() {
       activeQuestionDetection: {
         activeQuestion: question,
         cleanedQuestion: effectiveCurrentQuestion,
-        isFollowUp: detection.isFollowUp,
-        topicChanged: detection.topicChanged,
-        confidenceScore: detection.confidenceScore,
-        ignoredNoise: detection.ignoredNoise,
-        ...(detection.referencedHistoryTurnId
-          ? { referencedHistoryTurnId: detection.referencedHistoryTurnId }
+        isFollowUp: effectiveDetection.isFollowUp,
+        topicChanged: effectiveDetection.topicChanged,
+        confidenceScore: effectiveDetection.confidenceScore,
+        ignoredNoise: effectiveDetection.ignoredNoise,
+        ...(effectiveDetection.referencedHistoryTurnId
+          ? { referencedHistoryTurnId: effectiveDetection.referencedHistoryTurnId }
           : {}),
       },
       answerMode: "auto",
       sourcePlatform: "tauri",
     };
 
+      console.log("[AI Answer][Request] start", {
+        sessionId: info.sessionId,
+        requestId: payload.requestId,
+      });
       await handleAiAnswer(info.sessionId, payload, selectedModelRef.current);
+      console.log("[AI Answer][Request] complete", {
+        sessionId: info.sessionId,
+        requestId: payload.requestId,
+      });
 
       // Save pre-advance cutoff so regenerate can widen the window back to
       // include any transcript that arrived after an early accidental click.
@@ -2131,8 +2294,21 @@ export function useFloatingSession() {
         answeredQuestionsHistoryRef.current = answeredQuestionsHistoryRef.current.slice(-50);
       }
       console.log("[useFloatingSession] handleAiAnswerClick: Successfully answered question.");
+      transitionGuardRef.current.transition("completed", "ai_answer_success", info.sessionId);
+      transitionGuardRef.current.transition("recording", "resume_recording_after_answer", info.sessionId);
+    } catch (error: any) {
+      if (error?.name === "AbortError") {
+        console.log("[AI Answer][Abort] request aborted", { error: String(error) });
+        transitionGuardRef.current.transition("failed", "ai_answer_aborted", info.sessionId);
+      } else {
+        console.error("[AI Answer][Request] failed", error);
+        transitionGuardRef.current.transition("failed", "ai_answer_failed", info.sessionId);
+      }
     } finally {
+      operationRegistryRef.current.release(info.sessionId, "ai-answer", opRequestId);
+      isAiAnswerRunningRef.current = false;
       isEmittingRef.current = false;
+      setIsAiAnswerUiLocked(false);
     }
   }, [
     handleAiAnswer,
@@ -2141,6 +2317,8 @@ export function useFloatingSession() {
     aiChat,
     aiResponses,
     currentResponseIndex,
+    isAnswering,
+    isAiAnswerUiLocked,
   ]);
 
   const handleAnalyzeScreenClick = useCallback(
@@ -2240,6 +2418,13 @@ export function useFloatingSession() {
 
   useEffect(() => {
     return () => {
+      const sid = sessionInfoRef.current?.sessionId;
+      if (sid) {
+        transitionGuardRef.current.transition("stopping", "floating_unmount", sid);
+        transitionGuardRef.current.transition("cleanup", "floating_unmount", sid);
+      }
+      operationRegistryRef.current.clear();
+      cancelActiveRequest("floating_unmount");
       const hasActiveSession = !!sessionInfoRef.current?.sessionId;
       if (hasActiveSession) {
         if (import.meta.env.DEV) {
@@ -2251,8 +2436,9 @@ export function useFloatingSession() {
         return;
       }
       void audioControllerRef.current.destroyAudioSession("floating_unmount");
+      transitionGuardRef.current.forceSet("idle");
     };
-  }, []);
+  }, [cancelActiveRequest]);
 
   const handleClearTranscript = useCallback(() => {
     setMicInterimTranscript("");
@@ -2362,6 +2548,7 @@ export function useFloatingSession() {
   const lastTranscriptLine = lastMessage?.text ?? "";
   const lastTranscriptSender = lastMessage?.sender ?? null;
   const interimTranscript = micInterimTranscript || tabInterimTranscript;
+  const isAiAnswerRunning = isAnswering || isAiAnswerRunningRef.current || isAiAnswerUiLocked;
   const isTabActive = tabStatus === "transcribing";
   const isTabConnecting = tabStatus === "connecting";
   const captureStatus =
@@ -2391,7 +2578,7 @@ export function useFloatingSession() {
     aiChat,
     aiResponses,
     isAnalyzing,
-    isAnswering,
+    isAnswering: isAiAnswerRunning,
 
     // ── Hardware / ephemeral state ───────────────────────────────────────────
     isMicActive,
