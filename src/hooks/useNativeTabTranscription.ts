@@ -131,8 +131,8 @@ export function useNativeTabTranscription({
       `&interim_results=true` +
       `&language=${languageRef.current}` +
       `&smart_format=true` +
-      `&endpointing=1500` +
-      `&utterance_end_ms=2000` +
+      `&endpointing=500` +
+      `&utterance_end_ms=1000` +
       `&vad_events=true` +
       `&encoding=linear16` +
       `&sample_rate=${meta.sampleRate}` +

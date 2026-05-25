@@ -175,6 +175,7 @@ const REGENERATE_CONTEXT_LOOKBACK_MS = 15000;
 const FALLBACK_MSG_COUNT = 12;
 const NEAR_DUPLICATE_GAP_MS = 2500;
 const STT_INTERIM_FALLBACK_MS = 1500;
+const SYSTEM_STT_INTERIM_FALLBACK_MS = 700;
 const MIN_INCLUDE_DUPLICATE_LEN = 20;
 const SYSTEM_EMPTY_FINAL_STORM_COUNT = 6;
 const SYSTEM_EMPTY_FINAL_STORM_WINDOW_MS = 10_000;
@@ -1143,7 +1144,7 @@ export function useFloatingSession() {
             sourcePlatform: "tauri",
           });
         }
-      }, STT_INTERIM_FALLBACK_MS);
+      }, source === "system" ? SYSTEM_STT_INTERIM_FALLBACK_MS : STT_INTERIM_FALLBACK_MS);
     },
     [clearSttSourceTimer, commitTranscriptMessage, senderForSource],
   );

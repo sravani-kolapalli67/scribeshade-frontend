@@ -47,6 +47,7 @@ import {
   extractCodeBlocks,
   normalizeSpeakerType,
 } from "@/types/ai-answer";
+import { detectActiveQuestion } from "@/features/session/detection/activeQuestionDetector";
 
 /**
  * Segments a single transcript chunk into individual interview questions.
@@ -105,6 +106,8 @@ function normalizeLineForDedup(text: string): string {
 }
 
 const NEAR_DUPLICATE_GAP_MS = 2500;
+const SYSTEM_INTERIM_COMMIT_MS = 700;
+const SYSTEM_FINAL_RECONCILE_WINDOW_MS = 8000;
 const MIN_INCLUDE_DUPLICATE_LEN = 20;
 const OVERLAY_TRANSCRIPT_MAX_MESSAGES = 60;
 const OVERLAY_TRANSCRIPT_MAX_CHARS = 6000;
@@ -715,6 +718,8 @@ export default function ActiveSession() {
   // questions (since speakers pause >1.8 s between distinct topics).
   const pendingTranscriptRef = useRef<string[]>([]);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const systemInterimCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestSystemInterimRef = useRef("");
   const DEBOUNCE_MS = 1200;
 
   // Stabilizer-based auto-answer pipeline
@@ -728,6 +733,10 @@ export default function ActiveSession() {
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
         debounceTimerRef.current = null;
+      }
+      if (systemInterimCommitTimerRef.current) {
+        clearTimeout(systemInterimCommitTimerRef.current);
+        systemInterimCommitTimerRef.current = null;
       }
       Object.values(patchPersistTimersRef.current).forEach((timer) =>
         clearTimeout(timer),
@@ -768,11 +777,15 @@ export default function ActiveSession() {
           // React StrictMode double-renders from suppressing valid new messages.
           // StrictMode renders the component twice in dev; the second render with
           // the same input should add the message, not suppress it.
+          const sameSenderDedupeWindow =
+            sender === "Interviewer"
+              ? SYSTEM_FINAL_RECONCILE_WINDOW_MS
+              : NEAR_DUPLICATE_GAP_MS;
           let sameSenderNearIdx = -1;
           for (let i = prev.length - 1; i >= 0; i--) {
             const m = prev[i];
             if (m.sender !== sender) continue;
-            if (!m.timestamp || now - m.timestamp > NEAR_DUPLICATE_GAP_MS) continue;
+            if (!m.timestamp || now - m.timestamp > sameSenderDedupeWindow) continue;
             if (areNearDuplicateTexts(m.text, cleanText)) {
               sameSenderNearIdx = i;
               break;
@@ -933,11 +946,41 @@ export default function ActiveSession() {
     [handleTranscript],
   );
 
+  const clearSystemInterimCommitTimer = useCallback(() => {
+    if (systemInterimCommitTimerRef.current) {
+      clearTimeout(systemInterimCommitTimerRef.current);
+      systemInterimCommitTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleSystemInterimCommit = useCallback(
+    (text: string) => {
+      const trimmed = (text || "").trim();
+      if (!trimmed) return;
+      latestSystemInterimRef.current = trimmed;
+      clearSystemInterimCommitTimer();
+      systemInterimCommitTimerRef.current = setTimeout(() => {
+        systemInterimCommitTimerRef.current = null;
+        const latest = latestSystemInterimRef.current.trim();
+        if (!latest) return;
+        latestSystemInterimRef.current = "";
+        handleTranscript("Interviewer", latest, true);
+      }, SYSTEM_INTERIM_COMMIT_MS);
+    },
+    [clearSystemInterimCommitTimer, handleTranscript],
+  );
+
   const onInterviewerTranscript = useCallback(
     (text: string, isFinal: boolean) => {
-      handleTranscript("Interviewer", text, isFinal);
+      if (isFinal) {
+        clearSystemInterimCommitTimer();
+        latestSystemInterimRef.current = "";
+        handleTranscript("Interviewer", text, true);
+        return;
+      }
+      scheduleSystemInterimCommit(text);
     },
-    [handleTranscript],
+    [clearSystemInterimCommitTimer, handleTranscript, scheduleSystemInterimCommit],
   );
 
   const micTranscription = useDeepgram({
@@ -1093,6 +1136,7 @@ export default function ActiveSession() {
         onInterviewerTranscriptRef.current(text, true);
       } else {
         setTauriTabInterim(text);
+        onInterviewerTranscriptRef.current(text, false);
       }
     }).then((fn) => { unlistenSysTx = fn; }).catch(() => {});
 
@@ -1744,6 +1788,30 @@ export default function ActiveSession() {
     );
     const effectiveCurrentQuestion =
       followupReconstruction.reconstructedCurrentQuestion || bestCurrentQuestion;
+    const activeDetection = detectActiveQuestion({
+      liveInterimText: interviewerInterim || "",
+      allMessages: messagesSnapshot
+        .filter(
+          (m) =>
+            (m.sender === "User" || m.sender === "Interviewer") &&
+            !!m.text?.trim(),
+        )
+        .map((m) => ({
+          sender: m.sender as "User" | "Interviewer",
+          text: m.text.trim(),
+          timestamp: m.timestamp,
+        })),
+      cutoffTimestamp: snapshotTimestamp - CONTEXT_WINDOW_MS,
+      selectedAnswerQuestion,
+      selectedAnswerId: selectedAiMessage?.id,
+    });
+    const effectiveDetection = {
+      ...activeDetection,
+      activeQuestion: bestCurrentQuestion,
+      cleanedQuestion: effectiveCurrentQuestion,
+      isFollowUp:
+        activeDetection.isFollowUp || followupReconstruction.weakFollowupDetected,
+    };
     console.log("[AI Answer] followupQuestionReconstruction", {
       originalCurrentQuestion: bestCurrentQuestion,
       weakFollowupDetected: followupReconstruction.weakFollowupDetected,
@@ -1768,6 +1836,17 @@ export default function ActiveSession() {
         ? { selectedAnswerCodeBlocks }
         : {}),
       ...(selectedAnswerTopic ? { selectedAnswerTopic } : {}),
+      activeQuestionDetection: {
+        activeQuestion: effectiveDetection.activeQuestion,
+        cleanedQuestion: effectiveDetection.cleanedQuestion,
+        isFollowUp: effectiveDetection.isFollowUp,
+        topicChanged: effectiveDetection.topicChanged,
+        confidenceScore: effectiveDetection.confidenceScore,
+        ignoredNoise: effectiveDetection.ignoredNoise,
+        ...(effectiveDetection.referencedHistoryTurnId
+          ? { referencedHistoryTurnId: effectiveDetection.referencedHistoryTurnId }
+          : {}),
+      },
       answerMode: "auto",
       sourcePlatform: isTauri() ? "tauri" : "web",
     };

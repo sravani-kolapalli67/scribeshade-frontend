@@ -137,6 +137,11 @@ pub struct DeepgramConfig {
     pub language: String,
     pub sample_rate: u32,
     pub channels: u32,
+    /// Optional Deepgram endpointing latency in milliseconds.
+    /// Leave unset for mic so the existing mic behavior stays unchanged.
+    pub endpointing_ms: Option<u32>,
+    /// Optional utterance-end latency. Deepgram requires values >= 1000 ms.
+    pub utterance_end_ms: Option<u32>,
     /// A short identifier appended as `&tag=` in the Deepgram URL — useful for
     /// distinguishing requests in Deepgram's usage dashboard.
     pub tag: &'static str,
@@ -279,17 +284,27 @@ pub async fn run_session(
     //
     // Values are URL-encoded with `url::form_urlencoded` so model/language/tag
     // strings with spaces or special chars cannot corrupt the query string.
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("model", model)
-        .append_pair("language", language)
-        .append_pair("encoding", "linear16")
-        .append_pair("sample_rate", &cfg.sample_rate.to_string())
-        .append_pair("channels", &cfg.channels.to_string())
-        .append_pair("punctuate", "true")
-        .append_pair("interim_results", "true")
-        .append_pair("smart_format", "true")
-        .append_pair("tag", cfg.tag)
-        .finish();
+    let endpointing = cfg.endpointing_ms.map(|v| v.max(10).to_string());
+    let utterance_end = cfg.utterance_end_ms.map(|v| v.max(1000).to_string());
+    let query = {
+        let mut query_builder = url::form_urlencoded::Serializer::new(String::new());
+        query_builder
+            .append_pair("model", model)
+            .append_pair("language", language)
+            .append_pair("encoding", "linear16")
+            .append_pair("sample_rate", &cfg.sample_rate.to_string())
+            .append_pair("channels", &cfg.channels.to_string())
+            .append_pair("punctuate", "true")
+            .append_pair("interim_results", "true")
+            .append_pair("smart_format", "true");
+        if let Some(v) = endpointing.as_deref() {
+            query_builder.append_pair("endpointing", v);
+        }
+        if let Some(v) = utterance_end.as_deref() {
+            query_builder.append_pair("utterance_end_ms", v);
+        }
+        query_builder.append_pair("tag", cfg.tag).finish()
+    };
     let dg_url = format!("wss://api.deepgram.com/v1/listen?{query}");
 
     let _ = app.emit(

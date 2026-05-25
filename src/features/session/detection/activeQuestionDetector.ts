@@ -19,11 +19,12 @@ type TranscriptEntry = {
 };
 
 const FOLLOWUP_SIGNAL_RE =
-  /\b(how exactly|explain more|you mentioned|same thing|continue|what about that|why did|why was|why was that|why that)\b/i;
-const WEAK_DEICTIC_RE = /^(that|it|this|continue|same thing)\??$/i;
+  /\b(how exactly|explain more|explain this|explain that|explain the code|explain this code|explain that code|explain the code again|you mentioned|you said|same thing|continue|continue from|what about that|why did|why was|why was that|why that|why this is used|optimi[sz]e this|debug this|fix this|previous answer|above answer|the code|that code|the query|that query|database part|architecture part)\b/i;
+const WEAK_DEICTIC_RE =
+  /^(that|it|this|continue|continue from .{1,80}|same thing|explain it|explain this|explain that|explain the code|why|why this is used|optimi[sz]e this|debug this)\??$/i;
 
 const CONNECTOR_RE = /\b(and|then|also|plus|because|so)\s*$/i;
-const TECH_TOPIC_RE = /\b(databricks|pyspark|spark|adf|azure devops|azure|sql|mongodb|node|react|api)\b/i;
+const TECH_TOPIC_RE = /\b(databricks|pyspark|spark|adf|azure devops|azure|sql|postgres|postgresql|mongodb|node|react|api|code|query|database|architecture|backend|frontend)\b/i;
 const ADMIN_NOISE_RE =
   /\b(aadhaar|pan card|camera|show it|government id|audible|rejoin|wait a minute|hold)\b/i;
 
@@ -105,7 +106,8 @@ function hasSemanticDependency(text: string): boolean {
   const t = norm(text);
   if (!t) return false;
   if (FOLLOWUP_SIGNAL_RE.test(t)) return true;
-  return /\b(that approach|that code|that project|the previous answer|you said|you mentioned)\b/i.test(t);
+  if (WEAK_DEICTIC_RE.test(t)) return true;
+  return /\b(that approach|that code|that query|that project|the previous answer|the code|the query|you said|you mentioned)\b/i.test(t);
 }
 
 export function detectActiveQuestion(input: {
@@ -129,7 +131,7 @@ export function detectActiveQuestion(input: {
     const incomplete = isLikelyIncomplete(cleanedQuestion);
     const isNoise = baseNoise || isAdminNoise;
     const semanticDependency = hasSemanticDependency(cleanedQuestion);
-    const isFollowUp = semanticDependency && !WEAK_DEICTIC_RE.test(cleanedQuestion);
+    const isFollowUp = semanticDependency;
     const currentTopic = deriveTopic(cleanedQuestion);
     const previousTopic = deriveTopic(selectedQuestion);
     const topicChanged =
@@ -178,7 +180,7 @@ export function detectActiveQuestion(input: {
       score:
         (isLikelyIncomplete(p) ? 0 : 2) +
         (isQuestionLike(p) ? 2 : 0) +
-        (p.match(/\b(databricks|pyspark|spark|adf|azure devops|experience|role)\b/gi)?.length || 0),
+        (p.match(/\b(databricks|pyspark|spark|adf|azure devops|experience|role|code|query|database|architecture|postgres|postgresql|mongodb)\b/gi)?.length || 0),
     }));
     const bestByScore = scoredParts.sort((a, b) => b.score - a.score)[0]?.part || interviewerMerged;
     let mostComplete =
