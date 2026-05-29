@@ -153,6 +153,75 @@ pnpm build:mac   # macOS universal binary → src-tauri/target/universal-apple-d
 pnpm build:win   # Windows installer → src-tauri/target/x86_64-pc-windows-msvc/release/bundle/
 ```
 
+### macOS local self-signed release build
+
+This local flow does not require an Apple Developer Program membership.
+It is not notarized and is not equivalent to Apple Developer ID signing/notarization.
+
+Expected behavior for self-signed local builds:
+
+- Gatekeeper warning is expected.
+- User may need right-click `ScribeShade.app` -> `Open`.
+- Or remove quarantine manually:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/ScribeShade.app
+```
+
+- Install path should be stable:
+  `/Applications/ScribeShade.app`
+- After enabling Screen Recording / Screen & System Audio Recording, user must fully quit and reopen the app.
+
+Bundle/signing expectations for this local mode:
+
+- Bundle identifier stays: `com.hiddenmindsolutions.scribeshade-frontend`
+- Persistent signing identity (example): `ScribeShade Local Code Signing`
+- Same `entitlements.plist` and `Info.plist` usage descriptions
+
+Create the self-signed certificate (one-time on your Mac):
+
+- Open `Keychain Access`
+- `Certificate Assistant` -> `Create a Certificate`
+- Name: `ScribeShade Local Code Signing`
+- Identity Type: `Self Signed Root`
+- Certificate Type: `Code Signing`
+- Set trust: `Trust` -> `Code Signing` -> `Always Trust`
+
+Build command:
+
+```bash
+pnpm build:mac:selfsigned
+```
+
+Install and launch:
+
+```bash
+cp -R src-tauri/target/universal-apple-darwin/release/bundle/macos/ScribeShade.app /Applications/ScribeShade.app
+xattr -dr com.apple.quarantine /Applications/ScribeShade.app
+open /Applications/ScribeShade.app
+```
+
+Verification helper:
+
+```bash
+pnpm mac:verify
+```
+
+For clean testing only (do not run in normal builds):
+
+```bash
+pnpm mac:tcc:reset
+```
+
+Optional (separate) Apple notarization path is still available:
+
+```bash
+export APPLE_ID="..."
+export APPLE_TEAM_ID="..."
+export APPLE_APP_SPECIFIC_PASSWORD="..."
+pnpm mac:notarize-dmg /absolute/path/to/ScribeShade.dmg
+```
+
 ---
 
 ## Related

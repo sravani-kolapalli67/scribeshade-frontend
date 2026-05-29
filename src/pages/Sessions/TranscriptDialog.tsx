@@ -46,6 +46,42 @@ const highlightKeywords = (text: string) => {
     );
 };
 
+const AI_TRANSCRIPT_MARKDOWN_COMPONENTS = {
+  p: ({ children }: any) => <p className="my-0 text-[15px] leading-7 text-slate-900">{children}</p>,
+  ul: ({ children }: any) => <ul className="my-2 list-disc space-y-1.5 pl-5 text-slate-900">{children}</ul>,
+  ol: ({ children }: any) => <ol className="my-2 list-decimal space-y-1.5 pl-5 text-slate-900">{children}</ol>,
+  li: ({ children }: any) => <li className="text-[15px] leading-7">{children}</li>,
+  strong: ({ children }: any) => <strong className="font-extrabold text-black">{children}</strong>,
+  code({ inline, className, children, ...props }: any) {
+    const match = /language-(\w+)/.exec(className || "");
+    if (!inline && match) {
+      return (
+        <SyntaxHighlighter
+          style={oneDark}
+          language={match[1]}
+          PreTag="div"
+          customStyle={{
+            marginTop: "0.5rem",
+            marginBottom: "0.5rem",
+            borderRadius: "0.5rem",
+            padding: "0.85rem",
+            fontSize: "12px",
+            lineHeight: "1.6",
+          }}
+          {...props}
+        >
+          {String(children).replace(/\n$/, "")}
+        </SyntaxHighlighter>
+      );
+    }
+    return (
+      <code className="rounded bg-slate-100 px-1 py-0.5 text-[13px] text-slate-800" {...props}>
+        {children}
+      </code>
+    );
+  },
+};
+
 
 // --- Types ---
 
@@ -64,6 +100,17 @@ interface Interaction {
   answer: string;
   timestamp: string;
   index: number;
+}
+
+interface TranscriptEntry {
+  id: string;
+  role: "USER" | "INTERVIEWER" | "AI_ASSISTANT";
+  label: string;
+  text: string;
+  time: string;
+  timestampMs: number;
+  aiQuestion?: string;
+  aiAnswer?: string;
 }
 
 interface SessionNotes {
@@ -416,6 +463,79 @@ export function TranscriptDialog({
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const interactionRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
+  const resolveRole = (value: unknown): "USER" | "INTERVIEWER" | "AI_ASSISTANT" => {
+    if (value === "USER") return "USER";
+    if (value === "INTERVIEWER") return "INTERVIEWER";
+    return "AI_ASSISTANT";
+  };
+
+  const resolveRoleLabel = (role: TranscriptEntry["role"]): string => {
+    if (role === "USER") return "You";
+    if (role === "INTERVIEWER") return "Interviewer";
+    return "AI Assistant";
+  };
+
+  const resolveTime = (message: any, index: number): { time: string; timestampMs: number } => {
+    const rawTimestamp = message?.timestamp || message?.createdAt;
+    if (rawTimestamp) {
+      const parsed = new Date(rawTimestamp);
+      if (!Number.isNaN(parsed.getTime())) {
+        return {
+          time: parsed.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          timestampMs: parsed.getTime(),
+        };
+      }
+    }
+
+    const fallbackTime = typeof message?.time === "string" && message.time.trim()
+      ? message.time
+      : "00:00";
+
+    return { time: fallbackTime, timestampMs: index };
+  };
+
+  const resolveTranscriptText = (message: any, role: TranscriptEntry["role"]): string => {
+    if (role === "AI_ASSISTANT") {
+      const aiAnswer = typeof message?.answer === "string" ? message.answer.trim() : "";
+      const aiContent = typeof message?.content === "string" ? message.content.trim() : "";
+      const aiQuestion = typeof message?.question === "string" ? message.question.trim() : "";
+      return aiAnswer || aiContent || aiQuestion;
+    }
+
+    const patchedText = typeof message?.patchedText === "string" ? message.patchedText.trim() : "";
+    const questionText = typeof message?.question === "string" ? message.question.trim() : "";
+    const contentText = typeof message?.content === "string" ? message.content.trim() : "";
+    const answerText = typeof message?.answer === "string" ? message.answer.trim() : "";
+    return patchedText || questionText || contentText || answerText;
+  };
+
+  const parseAiQuestionAnswer = (message: any): { question: string; answer: string } => {
+    const directQuestion = typeof message?.question === "string" ? message.question.trim() : "";
+    const rawBody = resolveTranscriptText(message, "AI_ASSISTANT");
+    if (!rawBody) {
+      return { question: directQuestion || "Generated response", answer: "" };
+    }
+
+    const questionMatch = rawBody.match(/\*\*QUESTION:\*\*\s*([\s\S]*?)(?=\*\*ANSWER:\*\*|ANSWER:)/i);
+    const answerMatch = rawBody.match(/\*\*ANSWER:\*\*\s*([\s\S]*)/i);
+
+    const parsedQuestion = questionMatch?.[1]?.replace(/\*\*/g, "").trim() || "";
+    const parsedAnswer = answerMatch?.[1]?.trim() || "";
+
+    if (parsedAnswer) {
+      return {
+        question: parsedQuestion || directQuestion || "Generated response",
+        answer: parsedAnswer,
+      };
+    }
+
+    const firstSegment = rawBody.split(/===NEXT_QUESTION===/gi)[0]?.trim() || rawBody;
+    return {
+      question: directQuestion || "Generated response",
+      answer: firstSegment,
+    };
+  };
+
 
   useEffect(() => {
     if (isOpen && sessionId) {
@@ -426,7 +546,9 @@ export function TranscriptDialog({
           if (res.ok) {
             const data = await res.json();
             const sessionData = data.data ?? data;
-            setMessages(sessionData.messages || []);
+            const storedMessages = Array.isArray(sessionData.messages) ? sessionData.messages : [];
+            const storedTranscript = Array.isArray(sessionData.transcript) ? sessionData.transcript : [];
+            setMessages(storedMessages.length > 0 ? storedMessages : storedTranscript);
             setUserId(sessionData.userId || "");
             setIsEphemeral(sessionData.saveTranscription === false);
 
@@ -490,117 +612,50 @@ export function TranscriptDialog({
 
 
   /**
-   * Enhanced Parsing Architecture
-   * Splits transcript into individual structured interactions strictly by ===NEXT_QUESTION===
+   * Build a chronological transcript stream from persisted session messages.
    */
-  const parseInteractions = useMemo(() => {
-    const interactions: Interaction[] = [];
+  const parsedTranscript = useMemo<TranscriptEntry[]>(() => {
+    const transcriptRows: TranscriptEntry[] = [];
 
-    let questionCounter = 0;
-
-    messages.forEach((msg, msgIdx) => {
-      const isAI =
-        msg.role === "AI" ||
-        msg.role === "AI_ASSISTANT";
-
-      if (!isAI) return;
-
-      /**
-       * CRITICAL FIX:
-       * Database stores transcript in answer field,
-       * not content field.
-       */
-      const rawText =
-        msg.answer ||
-        msg.content ||
-        "";
-
-      if (!rawText.trim()) return;
-
-      /**
-       * Split ONLY by NEXT_QUESTION marker
-       */
-      const segments = rawText
-        .split(/===NEXT_QUESTION===/gi)
-        .map((s) => s.trim())
-        .filter(Boolean);
-
-      segments.forEach((segment, segIdx) => {
-        let question = "";
-        let answer = "";
-
-        /**
-         * FIRST BLOCK SPECIAL CASE
-         *
-         * First AI message often contains:
-         * - msg.question
-         * - raw answer directly
-         *
-         * without QUESTION/ANSWER labels.
-         */
-        const hasQuestionMarker =
-          /\*\*QUESTION:\*\*|QUESTION:/i.test(segment);
-
-        if (!hasQuestionMarker && segIdx === 0 && msg.question) {
-          question = msg.question.trim();
-          answer = segment.trim();
-        } else {
-          /**
-           * NORMAL STRUCTURED BLOCK
-           */
-
-          const questionMatch = segment.match(
-            /\*\*QUESTION:\*\*\s*([\s\S]*?)(?=\*\*ANSWER:\*\*|ANSWER:)/i
-          );
-
-          const answerMatch = segment.match(
-            /\*\*ANSWER:\*\*\s*([\s\S]*)/i
-          );
-
-          question =
-            questionMatch?.[1]?.trim() ||
-            "Question";
-
-          answer =
-            answerMatch?.[1]?.trim() ||
-            segment.trim();
-        }
-
-        /**
-         * Cleanup leaked markdown
-         */
-        question = question
-          .replace(/\*\*/g, "")
-          .replace(/^QUESTION:/i, "")
-          .trim();
-
-        answer = answer
-          .replace(/^\*\*ANSWER:\*\*/i, "")
-          .replace(/===NEXT_QUESTION===/gi, "")
-          .trim();
-
-        interactions.push({
-          id: `${msgIdx}-${segIdx}`,
-          question,
-          answer,
-          timestamp: msg.timestamp
-            ? new Date(msg.timestamp).toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-              })
-            : "00:00",
-          index: questionCounter++,
+    messages.forEach((msg: Message, index: number) => {
+      const role = resolveRole((msg as any).role);
+      const { time, timestampMs } = resolveTime(msg, index);
+      if (role === "AI_ASSISTANT") {
+        const ai = parseAiQuestionAnswer(msg);
+        if (!ai.answer) return;
+        transcriptRows.push({
+          id: (msg.id || (msg as any).messageId || `msg-${index}`) as string,
+          role,
+          label: resolveRoleLabel(role),
+          text: ai.answer,
+          aiQuestion: ai.question,
+          aiAnswer: ai.answer,
+          time,
+          timestampMs,
         });
+        return;
+      }
+
+      const text = resolveTranscriptText(msg, role);
+      if (!text) return;
+
+      transcriptRows.push({
+        id: (msg.id || (msg as any).messageId || `msg-${index}`) as string,
+        role,
+        label: resolveRoleLabel(role),
+        text,
+        time,
+        timestampMs,
       });
     });
 
-    return interactions;
+    return transcriptRows.sort((a, b) => a.timestampMs - b.timestampMs);
   }, [messages]);
 
   const downloadTranscript = () => {
-    const content = parseInteractions.map(inter => {
-      return `### Question ${inter.index + 1}: ${inter.question}\n\n**AI Answer:**\n${inter.answer}\n\n*Time: ${inter.timestamp}*`;
-    }).join("\n\n---\n\n");
+    const content = parsedTranscript
+      .map((entry) => `[${entry.time}] ${entry.label}: ${entry.text}`)
+      .join("\n\n");
 
     const blob = new Blob([`# Session Transcript\nSession ID: ${sessionId}\n\n` + content], { type: "text/markdown" });
     const url = URL.createObjectURL(blob);
@@ -634,7 +689,7 @@ export function TranscriptDialog({
                   className="rounded-lg text-[12px] font-bold gap-2.5 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm transition-all"
                 >
                   <FileText className="size-4" />
-                  Timeline
+                  Transcript
                 </TabsTrigger>
                 <TabsTrigger
                   value="ai-notes"
@@ -663,31 +718,78 @@ export function TranscriptDialog({
                         <Brain className="size-4 text-indigo-500 absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" />
                       </div>
                       <p className="text-[12px] text-muted-foreground font-black uppercase tracking-[0.2em]">
-                        Parsing Timeline...
+                        Loading Transcript...
                       </p>
                     </div>
-                  ) : parseInteractions.length === 0 ? (
+                  ) : parsedTranscript.length === 0 ? (
                     <EmptyState
-                      title="No interactions recorded"
-                      description="AI-generated answers and extracted questions will appear here once the session starts."
+                      title="No transcript available"
+                      description="Transcript messages will appear here after interviewer and user conversation is captured."
                       icon={AlertCircle}
                     />
                   ) : (
-                    <div 
-                      ref={scrollContainerRef}
-                      className="space-y-10 py-4"
-                    >
-                      {parseInteractions.map((inter, idx) => (
-                        <div 
-                          key={inter.id} 
-                          ref={el => { interactionRefs.current[inter.id] = el; }}
-                          className="scroll-mt-20 transition-all duration-500 rounded-2xl"
-                        >
-                          <InteractionCard
-                            interaction={inter}
-                            onCopy={handleCopy}
-                            copiedId={copiedId}
-                          />
+                    <div ref={scrollContainerRef} className="space-y-2 py-1">
+                      {parsedTranscript.map((entry) => (
+                        <div key={entry.id} ref={el => { interactionRefs.current[entry.id] = el; }}>
+                          {entry.role === "AI_ASSISTANT" ? (
+                            <div className="scroll-mt-20 rounded-xl border border-amber-200/70 bg-white px-4 py-3 shadow-sm">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleCopy(
+                                    entry.id,
+                                    `Question: ${entry.aiQuestion || ""}\n\nAnswer:\n${entry.aiAnswer || ""}`,
+                                  )
+                                }
+                                className="float-right mt-0.5 text-slate-400 hover:text-slate-600 transition-colors"
+                                aria-label="Copy AI answer"
+                                title="Copy"
+                              >
+                                {copiedId === entry.id ? <Check className="size-4 text-emerald-500" /> : <Copy className="size-4" />}
+                              </button>
+
+                              <p className="m-0 pr-7 text-[18px] leading-[1.45] text-slate-900">
+                                <span className="font-extrabold">Question:</span>{" "}
+                                {entry.aiQuestion || "Generated response"}
+                              </p>
+
+                              <div className="my-3 h-px bg-slate-200" />
+
+                              <p className="m-0 text-[18px] font-extrabold leading-none text-slate-900">Answer:</p>
+                              <div className="mt-2 prose prose-slate max-w-none">
+                                <ReactMarkdown remarkPlugins={[remarkGfm]} components={AI_TRANSCRIPT_MARKDOWN_COMPONENTS as any}>
+                                  {entry.aiAnswer || ""}
+                                </ReactMarkdown>
+                              </div>
+                              <div className="mt-3 text-[10px] font-semibold text-slate-500">
+                                AI Answer · {entry.time}
+                              </div>
+                            </div>
+                          ) : (
+                            <div
+                              className={cn(
+                                "scroll-mt-20 transition-all duration-300 flex flex-col gap-1",
+                                entry.role === "USER" ? "items-end" : "items-start",
+                              )}
+                            >
+                              <div
+                                className={cn(
+                                  "max-w-[82%] rounded-xl bg-slate-100/80 px-3.5 py-2 text-[18px] leading-[1.45] text-slate-900",
+                                  entry.role === "USER" ? "rounded-tr-md" : "rounded-tl-md",
+                                )}
+                              >
+                                <p className="m-0 whitespace-pre-wrap">{entry.text}</p>
+                              </div>
+                              <div
+                                className={cn(
+                                  "text-[10px] font-semibold text-slate-500",
+                                  entry.role === "USER" ? "text-right" : "text-left",
+                                )}
+                              >
+                                {entry.label} · {entry.time}
+                              </div>
+                            </div>
+                          )}
                         </div>
                       ))}
                     </div>

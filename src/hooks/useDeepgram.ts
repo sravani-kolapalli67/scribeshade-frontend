@@ -4,6 +4,7 @@ interface UseDeepgramProps {
   apiKey: string;
   model?: string;
   language?: string;
+  keyterms?: string[];
   onTranscript?: (text: string, isFinal: boolean) => void;
   inputStream?: MediaStream | null;
 }
@@ -19,6 +20,7 @@ export const useDeepgram = ({
   apiKey,
   model = "nova-3",
   language = "en",
+  keyterms = [],
   onTranscript,
   inputStream,
 }: UseDeepgramProps) => {
@@ -267,6 +269,13 @@ export const useDeepgram = ({
         smart_format: "true",
         tag: "scribeshade",
       });
+      if (model.toLowerCase().startsWith("nova-3")) {
+        for (const term of keyterms) {
+          const normalized = (term || "").trim();
+          if (!normalized) continue;
+          params.append("keyterm", normalized);
+        }
+      }
       const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
 
       // Browser WebSocket cannot set custom headers, so Deepgram's
@@ -418,7 +427,7 @@ export const useDeepgram = ({
   // isTranscribing intentionally removed from deps — use isTranscribingRef.current
   // for the guard so retry closures always read the live value, not a stale snapshot.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiKey, model, language, onTranscript, inputStream]);
+  }, [apiKey, model, language, keyterms, onTranscript, inputStream]);
 
   // Keep a stable ref to the latest startTranscription so retry timers created
   // inside stale onclose closures always call the current version.

@@ -85,6 +85,15 @@ export function useSessionCreation(): UseSessionCreationReturn {
       return false;
     }
 
+    if (sessionInfo.projectIds.length > 2) {
+      toast.error("You can select up to 2 projects only.");
+      return false;
+    }
+    if (sessionInfo.projectIds.length === 2 && !sessionInfo.primaryProjectId) {
+      toast.error("Please select a primary project.");
+      return false;
+    }
+
     // 1. Create session
     const formData = new FormData();
     formData.append("userId", userId);
@@ -101,6 +110,9 @@ export function useSessionCreation(): UseSessionCreationReturn {
     formData.append("saveTranscript", sessionInfo.saveTranscript.toString());
     if (sessionInfo.projectIds.length > 0) {
       formData.append("projectIds", JSON.stringify(sessionInfo.projectIds));
+    }
+    if (sessionInfo.primaryProjectId) {
+      formData.append("primaryProjectId", sessionInfo.primaryProjectId);
     }
 
     const createRes = await fetch(`${BACKEND_URL}/api/session/create-session`, {
@@ -123,7 +135,8 @@ export function useSessionCreation(): UseSessionCreationReturn {
           }
         }
       }
-      throw new Error("Failed to create session");
+      const errorData = await safeJson<{ error?: string; message?: string }>(createRes);
+      throw new Error(errorData?.error || errorData?.message || "Failed to create session");
     }
 
     const createData = await safeJson<{ id?: string; sessionId?: string }>(createRes);

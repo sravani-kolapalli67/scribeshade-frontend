@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "@clerk/clerk-react";
-import { Sparkles, Briefcase, CheckCircle2, Circle, Loader2, FolderOpen, AlertCircle } from "lucide-react";
+import { Sparkles, Briefcase, CheckCircle2, Circle, Loader2, FolderOpen, AlertCircle, Star } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ENDPOINTS } from "@/lib/endpoints";
 
@@ -15,14 +15,22 @@ interface AIProjectRecord {
 
 interface Step4AIProjectsProps {
   selectedProjectIds: string[];
+  primaryProjectId: string;
   onChange: (ids: string[]) => void;
+  onPrimaryChange: (id: string) => void;
 }
 
-export function Step4_AIProjects({ selectedProjectIds, onChange }: Step4AIProjectsProps) {
+export function Step4_AIProjects({
+  selectedProjectIds,
+  primaryProjectId,
+  onChange,
+  onPrimaryChange,
+}: Step4AIProjectsProps) {
   const { getToken } = useAuth();
   const [projects, setProjects] = useState<AIProjectRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [selectionError, setSelectionError] = useState<string>("");
 
   useEffect(() => {
     let cancelled = false;
@@ -49,9 +57,26 @@ export function Step4_AIProjects({ selectedProjectIds, onChange }: Step4AIProjec
 
   const toggle = (id: string) => {
     if (selectedProjectIds.includes(id)) {
-      onChange(selectedProjectIds.filter((p) => p !== id));
+      const next = selectedProjectIds.filter((p) => p !== id);
+      onChange(next);
+      if (next.length === 1 && primaryProjectId !== next[0]) {
+        onPrimaryChange(next[0]);
+      }
+      if (next.length === 0) {
+        onPrimaryChange("");
+      }
+      setSelectionError("");
     } else {
-      onChange([...selectedProjectIds, id]);
+      if (selectedProjectIds.length >= 2) {
+        setSelectionError("You can select up to 2 projects. Unselect one to choose another.");
+        return;
+      }
+      const next = [...selectedProjectIds, id];
+      onChange(next);
+      if (next.length === 1) {
+        onPrimaryChange(id);
+      }
+      setSelectionError("");
     }
   };
 
@@ -102,6 +127,7 @@ export function Step4_AIProjects({ selectedProjectIds, onChange }: Step4AIProjec
         <div className="grid gap-2.5 max-h-[320px] overflow-y-auto pr-0.5">
           {projects.map((project) => {
             const selected = isSelected(project.id);
+            const isPrimary = primaryProjectId === project.id;
             const projectCount = Array.isArray(project.projects) ? project.projects.length : 0;
             return (
               <button
@@ -133,6 +159,34 @@ export function Step4_AIProjects({ selectedProjectIds, onChange }: Step4AIProjec
                       <span className="text-sm font-semibold text-foreground truncate">
                         {project.position}
                       </span>
+                      {selected && (
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onPrimaryChange(project.id);
+                            setSelectionError("");
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              onPrimaryChange(project.id);
+                              setSelectionError("");
+                            }
+                          }}
+                          className={cn(
+                            "inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border",
+                            isPrimary
+                              ? "border-amber-400 bg-amber-100 text-amber-800"
+                              : "border-border bg-background text-muted-foreground",
+                          )}
+                        >
+                          <Star className={cn("h-3 w-3", isPrimary ? "fill-amber-500 text-amber-500" : "text-zinc-400")} />
+                          {isPrimary ? "Primary" : "Set Primary"}
+                        </span>
+                      )}
                       {project.experienceLevel && (
                         <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
                           {project.experienceLevel}
@@ -176,10 +230,20 @@ export function Step4_AIProjects({ selectedProjectIds, onChange }: Step4AIProjec
       )}
 
       {selectedProjectIds.length > 0 && (
-        <p className="text-xs text-primary font-medium flex items-center gap-1.5">
-          <CheckCircle2 className="h-3.5 w-3.5" />
-          {selectedProjectIds.length} project{selectedProjectIds.length !== 1 ? "s" : ""} selected
-        </p>
+        <div className="space-y-1">
+          <p className="text-xs text-primary font-medium flex items-center gap-1.5">
+            <CheckCircle2 className="h-3.5 w-3.5" />
+            {selectedProjectIds.length}/2 selected
+          </p>
+          {selectedProjectIds.length === 2 && !primaryProjectId && (
+            <p className="text-xs text-amber-600">
+              Select one project as primary before continuing.
+            </p>
+          )}
+        </div>
+      )}
+      {selectionError && (
+        <p className="text-xs text-destructive">{selectionError}</p>
       )}
     </div>
   );

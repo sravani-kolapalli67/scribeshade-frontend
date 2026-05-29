@@ -22,6 +22,7 @@ import { useFreeSessionTimer } from "@/hooks/useFreeSessionTimer";
 import { useSessionHeartbeat } from "@/hooks/useSessionHeartbeat";
 import { useSessionEvents } from "@/hooks/useSessionEvents";
 import { createAudioSessionController } from "@/features/session/audio/audioSessionController";
+import { extractInterviewKeywordsFromParts } from "@/utils/keywordExtractor";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
   initSession,
@@ -68,6 +69,15 @@ import {
 } from "@/types/ai-answer";
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "";
+const DEEPGRAM_API_KEY = import.meta.env.VITE_DEEPGRAM_API_KEY || "";
+
+function deepgramKeyFingerprint(key: string): string {
+  const trimmed = (key || "").trim();
+  if (!trimmed) return "empty";
+  const prefix = trimmed.slice(0, 4);
+  const suffix = trimmed.slice(-4);
+  return `len=${trimmed.length} ${prefix}…${suffix}`;
+}
 
 function normalizeTranscriptText(text: string): string {
   return text.toLowerCase().replace(/\s+/g, " ").trim();
@@ -141,7 +151,7 @@ function getLanguageCode(lang: string): string {
 // Fallback window (ms) used only when no AI answer has been given yet in this
 // session. Covers a multi-question interviewer monologue at the very start.
 const FIRST_ANSWER_WINDOW_MS = 120_000;
-const ACTIVE_QUESTION_DEBOUNCE_MS = 2000;
+const ACTIVE_QUESTION_DEBOUNCE_MS = 600;
 const ACTIVE_QUESTION_CONFIDENCE_THRESHOLD = 0.58;
 
 // When regenerate is clicked we intentionally wait a bit so additional
@@ -174,8 +184,8 @@ const REGENERATE_CONTEXT_LOOKBACK_MS = 15000;
  */
 const FALLBACK_MSG_COUNT = 12;
 const NEAR_DUPLICATE_GAP_MS = 2500;
-const STT_INTERIM_FALLBACK_MS = 1500;
-const SYSTEM_STT_INTERIM_FALLBACK_MS = 700;
+const STT_INTERIM_FALLBACK_MS = 600;
+const SYSTEM_STT_INTERIM_FALLBACK_MS = 300;
 const MIN_INCLUDE_DUPLICATE_LEN = 20;
 const SYSTEM_EMPTY_FINAL_STORM_COUNT = 6;
 const SYSTEM_EMPTY_FINAL_STORM_WINDOW_MS = 10_000;
@@ -186,6 +196,15 @@ const SYSTEM_RESTART_MAX_PER_WINDOW = 3;
 const SYSTEM_RESTART_WINDOW_MS = 60_000;
 const SYSTEM_RESTART_BUDGET_RESET_MS = 75_000;
 const EMPTY_FINAL_LOG_THRESHOLDS = [3, 6, 10] as const;
+const isDeepgramAuthFailureMessage = (value: string | null | undefined): boolean => {
+  if (!value) return false;
+  const normalized = value.toLowerCase();
+  return (
+    normalized.includes("http 401")
+    || normalized.includes("invalid_auth")
+    || normalized.includes("invalid credentials")
+  );
+};
 type TranscriptInsertSource =
   | "stt:user"
   | "stt:interviewer"
@@ -734,6 +753,8 @@ export function useFloatingSession() {
   const [captureArmed, setCaptureArmed] = useState(false);
   const [isSystemStale, setIsSystemStale] = useState(false);
   const systemStartIssuedForSessionRef = useRef<string | null>(null);
+  const systemStartInFlightRef = useRef(false);
+  const micStartInFlightRef = useRef(false);
   const systemHealthIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const systemReacquireInFlightRef = useRef(false);
   const lastLoggedHealthAtRef = useRef(0);
@@ -1395,31 +1416,68 @@ export function useFloatingSession() {
     return false;
   }, [getMacIdentity, logMacPermission]);
 
+  const buildDeepgramKeyterms = useCallback((): string[] => {
+    const info = sessionInfoRef.current;
+    const transcriptHints = messagesRef.current
+      .slice(-24)
+      .map((m) => m.text)
+      .join(" ");
+
+    return extractInterviewKeywordsFromParts([
+      info?.companyName,
+      info?.language,
+      transcriptHints,
+    ]);
+  }, []);
+
   const startSystemAudio = useCallback(async () => {
     if (!sessionInfoRef.current) return;
+    if (systemStartInFlightRef.current) return;
+    systemStartInFlightRef.current = true;
     const lang = getLanguageCode(sessionInfoRef.current.language ?? "English");
-    setTabError(null);
-    setTabErrorPermissionType(null);
-    setPermissionRequiresRestart(false);
-    const allowed = await preflightSystemPermission(false);
-    if (!allowed) {
-      setTabStatus("error");
-      return;
-    }
-    setIsSystemStale(false);
-    setTabStatus("connecting");
-    audioControllerRef.current.startAudioSession("system", "start_system_audio");
+    const keyterms = buildDeepgramKeyterms();
     try {
-      await invoke("start_system_audio_transcription", { language: lang, model: "nova-3" });
-    } catch (e: unknown) {
-      const msg = String(e);
-      setTabError(msg);
-      setTabStatus("error");
+      setTabError(null);
+      setTabErrorPermissionType(null);
+      setPermissionRequiresRestart(false);
+      const allowed = await preflightSystemPermission(false);
+      if (!allowed) {
+        setTabStatus("error");
+        return;
+      }
+      setIsSystemStale(false);
+      setTabStatus("connecting");
+      audioControllerRef.current.startAudioSession("system", "start_system_audio");
+      try {
+        if (import.meta.env.DEV) {
+          console.log("[audio-lifecycle] deepgramKeyFingerprint", {
+            source: "floating_invoke_system",
+            fingerprint: deepgramKeyFingerprint(DEEPGRAM_API_KEY),
+          });
+        }
+        await invoke("start_system_audio_transcription", {
+          language: lang,
+          model: "nova-3",
+          keyterms,
+          apiKey: DEEPGRAM_API_KEY,
+        });
+      } catch (e: unknown) {
+        const msg = String(e);
+        setTabError(msg);
+        setTabStatus("error");
+      }
+    } finally {
+      systemStartInFlightRef.current = false;
     }
-  }, [preflightSystemPermission]);
+  }, [buildDeepgramKeyterms, preflightSystemPermission]);
 
   const retrySystemAudio = useCallback(async () => {
     if (!sessionInfoRef.current) return;
+    if (systemStartInFlightRef.current) return;
+    if (isDeepgramAuthFailureMessage(tabError)) {
+      setTabStatus("error");
+      return;
+    }
     setTabError(null);
     setTabErrorPermissionType(null);
     setIsSystemStale(false);
@@ -1436,7 +1494,7 @@ export function useFloatingSession() {
     }
     await new Promise((resolve) => setTimeout(resolve, 300));
     await startSystemAudio();
-  }, [preflightSystemPermission, startSystemAudio]);
+  }, [preflightSystemPermission, startSystemAudio, tabError]);
 
   const reacquireSystemAudio = useCallback(async (reason: string) => {
     if (systemReacquireInFlightRef.current) return;
@@ -1585,6 +1643,11 @@ export function useFloatingSession() {
       }
       if (status === "error" && error) {
         setTabError(error);
+        if (isDeepgramAuthFailureMessage(error)) {
+          // Explicit auth failures are non-retryable until the key changes.
+          setPermissionRequiresRestart(false);
+          setTabErrorPermissionType(null);
+        }
       } else if (status === "transcribing") {
         setTabError(null);
       }
@@ -1694,6 +1757,7 @@ export function useFloatingSession() {
       const health = systemHealthRef.current;
       const sessionActive = !!sessionInfoRef.current?.sessionId && captureArmed;
       if (!sessionActive || tabStatus === "error") return;
+      if (isDeepgramAuthFailureMessage(tabError)) return;
 
       if (health.lastHealthyAt && now - health.lastHealthyAt >= SYSTEM_RESTART_BUDGET_RESET_MS) {
         health.systemRestartCount = 0;
@@ -1756,7 +1820,7 @@ export function useFloatingSession() {
         systemHealthIntervalRef.current = null;
       }
     };
-  }, [captureArmed, sessionInfo?.sessionId, tabStatus, reacquireSystemAudio]);
+  }, [captureArmed, sessionInfo?.sessionId, tabStatus, tabError, reacquireSystemAudio]);
 
   // Mic STT listeners
   useEffect(() => {
@@ -2200,6 +2264,23 @@ export function useFloatingSession() {
       .reverse()
       .find((m) => m.sender === "AI" && m.text?.trim())?.text
       ?.trim();
+
+    const recentAiAnswersForContext = [...aiChat]
+      .filter((m) => m.sender === "AI" && m.text?.trim())
+      .slice(-2);
+    const contextPreamble =
+      recentAiAnswersForContext.length > 0
+        ? recentAiAnswersForContext
+            .map((m, i) => {
+              const q = m.question?.trim() || "";
+              const a = m.text?.trim() ?? "";
+              return q
+                ? `[Prior answer ${i + 1}]\nQ: ${q}\nA: ${a.slice(0, 600)}${a.length > 600 ? "..." : ""}`
+                : `[Prior answer ${i + 1}]\n${a.slice(0, 600)}${a.length > 600 ? "..." : ""}`;
+            })
+            .join("\n\n")
+        : "";
+
     const safeResponseIndex =
       aiResponses.length > 0
         ? Math.min(currentResponseIndex, aiResponses.length - 1)
@@ -2231,13 +2312,18 @@ export function useFloatingSession() {
       selectedAnswerTopic,
     });
 
+    const rawTranscript =
+      recentTranscriptWindow.length > 0
+        ? recentTranscriptWindow.join("\n")
+        : question;
+    const enrichedTranscript = contextPreamble
+      ? `${contextPreamble}\n\n[Current interview transcript]\n${rawTranscript}`
+      : rawTranscript;
+
       const payload: AIAnswerRequestPayload = {
       requestId: opRequestId,
       sessionId: info.sessionId,
-      transcript:
-        recentTranscriptWindow.length > 0
-          ? recentTranscriptWindow.join("\n")
-          : question,
+      transcript: enrichedTranscript,
       currentQuestion: effectiveCurrentQuestion,
       recentTranscriptWindow,
       speakerSeparatedTranscript,
@@ -2392,30 +2478,45 @@ export function useFloatingSession() {
   // ── Mic toggle ──────────────────────────────────────────────────────────────
 
   const handleToggleMic = useCallback(async () => {
+    if (micStartInFlightRef.current) return;
     if (isMicActive || isMicConnecting) {
       await audioControllerRef.current.stopAudioSession("mic", "mic_toggle_off");
       setIsMicActive(false);
       setIsMicConnecting(false);
       setMicInterimTranscript("");
     } else if (sessionInfoRef.current) {
-      const allowed = await preflightMicPermission(false);
-      if (!allowed) {
-        setIsMicConnecting(false);
-        return;
-      }
-      audioControllerRef.current.startAudioSession("mic", "mic_toggle_on");
-      setIsMicConnecting(true);
       try {
-        await invoke("start_mic_transcription", {
-          language: getLanguageCode(sessionInfoRef.current.language ?? "English"),
-          model: "nova-3",
-        });
-      } catch (e: unknown) {
-        toast.error(`Mic: ${String(e)}`);
-        setIsMicConnecting(false);
+        micStartInFlightRef.current = true;
+        const allowed = await preflightMicPermission(false);
+        if (!allowed) {
+          setIsMicConnecting(false);
+          return;
+        }
+        audioControllerRef.current.startAudioSession("mic", "mic_toggle_on");
+        setIsMicConnecting(true);
+        const keyterms = buildDeepgramKeyterms();
+        try {
+          if (import.meta.env.DEV) {
+            console.log("[audio-lifecycle] deepgramKeyFingerprint", {
+              source: "floating_invoke_mic",
+              fingerprint: deepgramKeyFingerprint(DEEPGRAM_API_KEY),
+            });
+          }
+          await invoke("start_mic_transcription", {
+            language: getLanguageCode(sessionInfoRef.current.language ?? "English"),
+            model: "nova-3",
+            keyterms,
+            apiKey: DEEPGRAM_API_KEY,
+          });
+        } catch (e: unknown) {
+          toast.error(`Mic: ${String(e)}`);
+          setIsMicConnecting(false);
+        }
+      } finally {
+        micStartInFlightRef.current = false;
       }
     }
-  }, [isMicActive, isMicConnecting, preflightMicPermission]);
+  }, [buildDeepgramKeyterms, isMicActive, isMicConnecting, preflightMicPermission]);
 
   useEffect(() => {
     return () => {
@@ -2552,6 +2653,7 @@ export function useFloatingSession() {
   const isAiAnswerRunning = isAnswering || isAiAnswerRunningRef.current || isAiAnswerUiLocked;
   const isTabActive = tabStatus === "transcribing";
   const isTabConnecting = tabStatus === "connecting";
+  const isSystemAuthError = tabStatus === "error" && isDeepgramAuthFailureMessage(tabError);
   const captureStatus =
     tabStatus === "error"
       ? "Error"
@@ -2601,6 +2703,7 @@ export function useFloatingSession() {
     interimTranscript,
     isTabActive,
     isTabConnecting,
+    isSystemAuthError,
     captureStatus,
     formattedTime,
 

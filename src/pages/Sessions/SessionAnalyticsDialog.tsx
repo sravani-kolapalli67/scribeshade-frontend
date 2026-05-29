@@ -30,6 +30,8 @@ import {
   Check,
   ChevronUp,
   ChevronDown,
+  Gauge,
+  Target,
 } from "lucide-react";
 
 interface Message {
@@ -72,6 +74,20 @@ export function SessionAnalyticsDialog({
   const [isGenerating, setIsGenerating] = useState(false);
   const [isFeedbackOpen, setIsFeedbackOpen] = useState(true);
 
+  const companyLabel = useMemo(() => {
+    const nameFromCompanyName =
+      typeof session?.companyName === "string" ? session.companyName.trim() : "";
+    if (nameFromCompanyName) return nameFromCompanyName;
+
+    if (typeof session?.company === "string" && session.company.trim()) {
+      return session.company.trim();
+    }
+
+    const nestedName =
+      typeof session?.company?.name === "string" ? session.company.name.trim() : "";
+    return nestedName || "Unknown Company";
+  }, [session]);
+
   useEffect(() => {
     if (isOpen && session?.id) {
       const load = async () => {
@@ -88,7 +104,7 @@ export function SessionAnalyticsDialog({
           if (sessionRes.ok) {
             const data = await sessionRes.json();
             const sessionData = data.data ?? data;
-            setMessages(sessionData.messages || []);
+            setMessages(Array.isArray(sessionData.messages) ? sessionData.messages : []);
             if (sessionData.feedback) resolvedFeedback = sessionData.feedback;
           }
 
@@ -234,6 +250,128 @@ export function SessionAnalyticsDialog({
     };
   }, [messages, session]);
 
+  const interviewSignals = useMemo(() => {
+    if (!feedback) return null;
+
+    const toNumber = (value: unknown): number => {
+      if (typeof value === "number" && Number.isFinite(value)) return value;
+      if (typeof value === "string") {
+        const parsed = Number(value);
+        if (Number.isFinite(parsed)) return parsed;
+      }
+      return 0;
+    };
+
+    const clamp = (value: number): number => Math.max(0, Math.min(100, Math.round(value)));
+
+    const score = toNumber(feedback.score);
+    const confidence = toNumber(feedback.confidence);
+    const communication = toNumber(feedback.communication);
+    const interactivity = toNumber(feedback.interactivity);
+    const technicalDepth = toNumber(feedback.technicalDepth);
+    const conciseness = toNumber(feedback.conciseness);
+    const moodText =
+      typeof feedback.interviewerMood === "string" && feedback.interviewerMood.trim().length > 0
+        ? feedback.interviewerMood.trim()
+        : "No interviewer mood signal available for this session.";
+
+    const lowerMood = moodText.toLowerCase();
+    const positiveMoodWords = [
+      "satisfied",
+      "positive",
+      "engaged",
+      "receptive",
+      "encouraging",
+      "impressed",
+      "calm",
+      "patient",
+      "friendly",
+    ];
+    const negativeMoodWords = [
+      "frustrated",
+      "annoyed",
+      "impatient",
+      "dismissive",
+      "skeptical",
+      "confused",
+      "negative",
+      "stressed",
+      "disappointed",
+      "concerned",
+    ];
+
+    let moodScore = 50;
+    positiveMoodWords.forEach((word) => {
+      if (lowerMood.includes(word)) moodScore += 7;
+    });
+    negativeMoodWords.forEach((word) => {
+      if (lowerMood.includes(word)) moodScore -= 8;
+    });
+    moodScore = clamp(moodScore);
+
+    const weightedChance =
+      score * 0.28 +
+      confidence * 0.2 +
+      communication * 0.16 +
+      interactivity * 0.14 +
+      technicalDepth * 0.14 +
+      conciseness * 0.08;
+    const hiringChance = clamp(weightedChance + (moodScore - 50) * 0.3);
+
+    const chanceBand =
+      hiringChance >= 80
+        ? "High"
+        : hiringChance >= 65
+          ? "Moderate"
+          : hiringChance >= 50
+            ? "Borderline"
+            : "Low";
+
+    const factorBreakdown = [
+      { label: "Interview Score", value: score, weight: "28%" },
+      { label: "Confidence", value: confidence, weight: "20%" },
+      { label: "Communication", value: communication, weight: "16%" },
+      { label: "Interactivity", value: interactivity, weight: "14%" },
+      { label: "Technical Depth", value: technicalDepth, weight: "14%" },
+      { label: "Conciseness", value: conciseness, weight: "8%" },
+      { label: "Interviewer Mood Signal", value: moodScore, weight: "modifier" },
+    ];
+
+    const gapFactors: string[] = [];
+    if (communication < 75) {
+      gapFactors.push("Communication clarity is below target. Use tighter answer structure: context → action → impact.");
+    }
+    if (interactivity < 70) {
+      gapFactors.push("Interactivity is low. Ask 1 concise clarifying question when requirements are ambiguous.");
+    }
+    if (technicalDepth < 75) {
+      gapFactors.push("Technical depth needs stronger architecture-level reasoning and tradeoff explanations.");
+    }
+    if (conciseness < 70) {
+      gapFactors.push("Answer conciseness is weak. Lead with the direct answer, then add only the most relevant detail.");
+    }
+    if (moodScore < 50) {
+      gapFactors.push("Interviewer mood appears neutral/negative. Improve pacing and signal-checking to rebuild rapport.");
+    }
+
+    const improvementEntries: string[] = Array.isArray(feedback.improvements) ? feedback.improvements : [];
+    const orderedImprovements = [
+      ...improvementEntries.filter((item) => String(item).startsWith("[HIGH]")),
+      ...improvementEntries.filter((item) => String(item).startsWith("[MEDIUM]")),
+      ...improvementEntries.filter((item) => String(item).startsWith("[LOW]")),
+    ];
+
+    return {
+      moodText,
+      moodScore,
+      hiringChance,
+      chanceBand,
+      factorBreakdown,
+      gapFactors,
+      orderedImprovements,
+    };
+  }, [feedback]);
+
   if (!session) return null;
 
   return (
@@ -254,7 +392,7 @@ export function SessionAnalyticsDialog({
               <div className="flex flex-wrap items-center gap-4 text-muted-foreground font-medium">
                 <div className="flex items-center gap-1.5">
                   <Building2 className="size-4" />
-                  {session.company}
+                  {companyLabel}
                 </div>
                 <div className="h-1 w-1 rounded-full bg-border" />
                 <div className="flex items-center gap-1.5">
@@ -322,6 +460,98 @@ export function SessionAnalyticsDialog({
                   </Card>
                 ))}
               </div>
+
+              {/* Interview Signals */}
+              {interviewSignals && (
+                <Card className="border border-border shadow-sm bg-card rounded-lg overflow-hidden">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-lg font-bold text-foreground flex items-center gap-2">
+                      <Gauge className="size-5 text-primary" />
+                      Interview Signals
+                    </CardTitle>
+                    <CardDescription className="text-muted-foreground">
+                      Interviewer mood, hiring likelihood estimate, and focused gap analysis.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-6">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="rounded-xl border border-border bg-muted/20 p-4">
+                        <div className="text-sm font-semibold text-foreground mb-1">Interviewer Mood</div>
+                        <p className="text-sm text-muted-foreground leading-relaxed">
+                          {interviewSignals.moodText}
+                        </p>
+                        <div className="mt-2 text-xs text-muted-foreground">
+                          Mood Signal Score: <span className="font-bold text-foreground">{interviewSignals.moodScore}%</span>
+                        </div>
+                      </div>
+                      <div className="rounded-xl border border-border bg-muted/20 p-4">
+                        <div className="text-sm font-semibold text-foreground mb-1 flex items-center gap-2">
+                          <Target className="size-4 text-primary" />
+                          Hiring Chance (Estimated)
+                        </div>
+                        <div className="text-3xl font-black text-foreground leading-none">
+                          {interviewSignals.hiringChance}%
+                        </div>
+                        <div className="mt-2 text-sm text-muted-foreground">
+                          Band: <span className="font-semibold text-foreground">{interviewSignals.chanceBand}</span>
+                        </div>
+                        <p className="mt-2 text-xs text-muted-foreground">
+                          Estimate is derived from session metrics plus interviewer mood signal.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-border bg-background p-4">
+                      <div className="text-sm font-semibold text-foreground mb-3">Chance Factor Breakdown</div>
+                      <div className="space-y-2">
+                        {interviewSignals.factorBreakdown.map((factor) => (
+                          <div key={factor.label} className="flex items-center justify-between text-sm">
+                            <span className="text-muted-foreground">{factor.label}</span>
+                            <span className="font-semibold text-foreground">
+                              {factor.value}% <span className="text-xs text-muted-foreground">({factor.weight})</span>
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="rounded-xl border border-border bg-background p-4">
+                        <div className="text-sm font-semibold text-foreground mb-3">Gap Signals</div>
+                        {interviewSignals.gapFactors.length > 0 ? (
+                          <ul className="space-y-2">
+                            {interviewSignals.gapFactors.map((gap, idx) => (
+                              <li key={idx} className="text-sm text-muted-foreground leading-relaxed">
+                                • {gap}
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <p className="text-sm text-muted-foreground">
+                            No major risk signals detected from current metrics.
+                          </p>
+                        )}
+                      </div>
+                      <div className="rounded-xl border border-border bg-background p-4">
+                        <div className="text-sm font-semibold text-foreground mb-3">Improvement Priorities</div>
+                        {interviewSignals.orderedImprovements.length > 0 ? (
+                          <ul className="space-y-2">
+                            {interviewSignals.orderedImprovements.slice(0, 6).map((item, idx) => (
+                              <li key={idx} className="text-sm text-muted-foreground leading-relaxed">
+                                • {item}
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <p className="text-sm text-muted-foreground">
+                            No prioritized improvement notes available.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
 
               {/* AI Feedback Section */}
               <Card className="border border-border shadow-sm bg-card rounded-lg overflow-hidden transition-all">

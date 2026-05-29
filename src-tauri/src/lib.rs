@@ -8,7 +8,7 @@ use screenshots::Screen;
 use base64::{Engine as _, engine::general_purpose};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::{Arc, atomic::{AtomicU64, AtomicBool, AtomicU8, Ordering}};
+use std::sync::{Arc, OnceLock, atomic::{AtomicU64, AtomicBool, AtomicU8, Ordering}};
 use url::Url as NavUrl;
 
 // Deepgram realtime transport (macOS + Windows only).
@@ -1559,6 +1559,90 @@ fn stop_display_audio_stream() {}
 // Stored as managed state so commands never receive the key from the frontend.
 struct DeepgramKey(String);
 
+fn deepgram_key_fingerprint(key: &str) -> String {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return "empty".to_string();
+    }
+    let prefix: String = trimmed.chars().take(4).collect();
+    let suffix: String = trimmed
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<char>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("len={} {}…{}", trimmed.len(), prefix, suffix)
+}
+
+fn load_runtime_env_deepgram_key() -> Option<String> {
+    static RUNTIME_DEEPGRAM_KEY: OnceLock<Option<String>> = OnceLock::new();
+    RUNTIME_DEEPGRAM_KEY
+        .get_or_init(|| {
+            // In `tauri dev`, cwd may be `src-tauri`; try both roots.
+            let _ = dotenvy::from_filename(".env");
+            let _ = dotenvy::from_filename("../.env");
+            std::env::var("VITE_DEEPGRAM_API_KEY")
+                .ok()
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty())
+        })
+        .clone()
+}
+
+fn resolve_deepgram_api_key(dg_key: &DeepgramKey, api_key: Option<String>) -> String {
+    if let Some(from_invoke) = api_key
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+    {
+        eprintln!(
+            "[deepgram-key] source=invoke fingerprint={}",
+            deepgram_key_fingerprint(&from_invoke)
+        );
+        return from_invoke;
+    }
+
+    if let Some(from_runtime_env) = load_runtime_env_deepgram_key() {
+        eprintln!(
+            "[deepgram-key] source=runtime_env fingerprint={}",
+            deepgram_key_fingerprint(&from_runtime_env)
+        );
+        return from_runtime_env;
+    }
+
+    let from_managed = dg_key.0.trim().to_string();
+    eprintln!(
+        "[deepgram-key] source=managed_state fingerprint={}",
+        deepgram_key_fingerprint(&from_managed)
+    );
+    from_managed
+}
+
+fn normalize_deepgram_keyterms(model: &str, keyterms: Option<Vec<String>>) -> Vec<String> {
+    if !model.trim().starts_with("nova-3") {
+        return Vec::new();
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    for term in keyterms.unwrap_or_default() {
+        let cleaned = term.trim().to_lowercase();
+        if cleaned.len() < 3 || cleaned.len() > 64 {
+            continue;
+        }
+        if cleaned.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        if !out.iter().any(|t| t == &cleaned) {
+            out.push(cleaned);
+        }
+        if out.len() >= 20 {
+            break;
+        }
+    }
+    out
+}
+
 // ── macOS: SCKit system audio → Deepgram ─────────────────────────────────────
 #[cfg(target_os = "macos")]
 #[tauri::command]
@@ -1567,8 +1651,10 @@ async fn start_system_audio_transcription(
     dg_key: tauri::State<'_, DeepgramKey>,
     language: String,
     model: String,
+    keyterms: Option<Vec<String>>,
+    api_key: Option<String>,
 ) -> Result<(), String> {
-    let api_key = dg_key.0.clone();
+    let api_key = resolve_deepgram_api_key(&dg_key, api_key);
     use screencapturekit::prelude::*;
     use tokio::sync::broadcast;
 
@@ -1577,7 +1663,7 @@ async fn start_system_audio_transcription(
         AUDIO_STOPPED, AUDIO_STARTING, Ordering::SeqCst, Ordering::SeqCst,
     ) {
         Ok(_) => {}
-        Err(AUDIO_STARTING) => return Err("system audio STT is already starting".into()),
+        Err(AUDIO_STARTING) => return Ok(()),
         Err(_) => return Ok(()),   // already running — idempotent
     }
 
@@ -1739,6 +1825,7 @@ async fn start_system_audio_transcription(
             }
         }
     });
+    let deepgram_keyterms = normalize_deepgram_keyterms(&model, keyterms);
     let app_c = app.clone();
     tokio::spawn(async move {
         let pcm_rx = tx_arc.subscribe();
@@ -1750,6 +1837,7 @@ async fn start_system_audio_transcription(
                 language,
                 sample_rate: 48000,
                 channels: 1,
+                keyterms: deepgram_keyterms,
                 endpointing_ms: Some(500),
                 utterance_end_ms: Some(1000),
                 tag: "scribeshade-rust",
@@ -1794,8 +1882,10 @@ async fn start_mic_transcription(
     dg_key: tauri::State<'_, DeepgramKey>,
     language: String,
     model: String,
+    keyterms: Option<Vec<String>>,
+    api_key: Option<String>,
 ) -> Result<(), String> {
-    let api_key = dg_key.0.clone();
+    let api_key = resolve_deepgram_api_key(&dg_key, api_key);
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use tokio::sync::broadcast;
 
@@ -1804,7 +1894,7 @@ async fn start_mic_transcription(
         AUDIO_STOPPED, AUDIO_STARTING, Ordering::SeqCst, Ordering::SeqCst,
     ) {
         Ok(_) => {}
-        Err(AUDIO_STARTING) => return Err("mic STT is already starting".into()),
+        Err(AUDIO_STARTING) => return Ok(()),
         Err(_) => return Ok(()),   // already running — idempotent
     }
 
@@ -1897,6 +1987,7 @@ async fn start_mic_transcription(
         }
     }
 
+    let deepgram_keyterms = normalize_deepgram_keyterms(&model, keyterms);
     let app_c = app.clone();
     tokio::spawn(async move {
         let pcm_rx = tx_arc.subscribe();
@@ -1908,6 +1999,7 @@ async fn start_mic_transcription(
                 language,
                 sample_rate,
                 channels: 1,
+                keyterms: deepgram_keyterms,
                 endpointing_ms: None,
                 utterance_end_ms: None,
                 tag: "scribeshade-mic",
@@ -1944,8 +2036,10 @@ async fn start_system_audio_transcription(
     dg_key: tauri::State<'_, DeepgramKey>,
     language: String,
     model: String,
+    keyterms: Option<Vec<String>>,
+    api_key: Option<String>,
 ) -> Result<(), String> {
-    let api_key = dg_key.0.clone();
+    let api_key = resolve_deepgram_api_key(&dg_key, api_key);
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use tokio::sync::broadcast;
 
@@ -1954,7 +2048,7 @@ async fn start_system_audio_transcription(
         AUDIO_STOPPED, AUDIO_STARTING, Ordering::SeqCst, Ordering::SeqCst,
     ) {
         Ok(_) => {}
-        Err(AUDIO_STARTING) => return Err("system audio STT is already starting".into()),
+        Err(AUDIO_STARTING) => return Ok(()),
         Err(_) => return Ok(()),
     }
 
@@ -2107,6 +2201,7 @@ async fn start_system_audio_transcription(
         }
     });
 
+    let deepgram_keyterms = normalize_deepgram_keyterms(&model, keyterms);
     let app_c = app.clone();
     tokio::spawn(async move {
         let pcm_rx = tx_arc.subscribe();
@@ -2118,6 +2213,7 @@ async fn start_system_audio_transcription(
                 language,
                 sample_rate,
                 channels: 1,
+                keyterms: deepgram_keyterms,
                 endpointing_ms: Some(500),
                 utterance_end_ms: Some(1000),
                 tag: "scribeshade-rust",
@@ -2162,8 +2258,10 @@ async fn start_mic_transcription(
     dg_key: tauri::State<'_, DeepgramKey>,
     language: String,
     model: String,
+    keyterms: Option<Vec<String>>,
+    api_key: Option<String>,
 ) -> Result<(), String> {
-    let api_key = dg_key.0.clone();
+    let api_key = resolve_deepgram_api_key(&dg_key, api_key);
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use tokio::sync::broadcast;
 
@@ -2172,7 +2270,7 @@ async fn start_mic_transcription(
         AUDIO_STOPPED, AUDIO_STARTING, Ordering::SeqCst, Ordering::SeqCst,
     ) {
         Ok(_) => {}
-        Err(AUDIO_STARTING) => return Err("mic STT is already starting".into()),
+        Err(AUDIO_STARTING) => return Ok(()),
         Err(_) => return Ok(()),
     }
 
@@ -2265,6 +2363,7 @@ async fn start_mic_transcription(
         }
     }
 
+    let deepgram_keyterms = normalize_deepgram_keyterms(&model, keyterms);
     let app_c = app.clone();
     tokio::spawn(async move {
         let pcm_rx = tx_arc.subscribe();
@@ -2276,6 +2375,7 @@ async fn start_mic_transcription(
                 language,
                 sample_rate,
                 channels: 1,
+                keyterms: deepgram_keyterms,
                 endpointing_ms: None,
                 utterance_end_ms: None,
                 tag: "scribeshade-mic",
@@ -2308,7 +2408,12 @@ fn stop_mic_transcription() {
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[tauri::command]
 async fn start_system_audio_transcription(
-    _app: tauri::AppHandle, _dg_key: tauri::State<'_, DeepgramKey>, _language: String, _model: String,
+    _app: tauri::AppHandle,
+    _dg_key: tauri::State<'_, DeepgramKey>,
+    _language: String,
+    _model: String,
+    _keyterms: Option<Vec<String>>,
+    _api_key: Option<String>,
 ) -> Result<(), String> { Err("STT is macOS/Windows-only".into()) }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -2318,7 +2423,12 @@ fn stop_system_audio_transcription() {}
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[tauri::command]
 async fn start_mic_transcription(
-    _app: tauri::AppHandle, _dg_key: tauri::State<'_, DeepgramKey>, _language: String, _model: String,
+    _app: tauri::AppHandle,
+    _dg_key: tauri::State<'_, DeepgramKey>,
+    _language: String,
+    _model: String,
+    _keyterms: Option<Vec<String>>,
+    _api_key: Option<String>,
 ) -> Result<(), String> { Err("STT is macOS/Windows-only".into()) }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -2888,7 +2998,7 @@ fn set_cursor_passthrough(window: Window, passthrough: bool) -> Result<(), Strin
                 unsafe {
                     if let Ok(ns_win) = win_for_thread.ns_window() {
                         let ptr = ns_win as *mut objc2::runtime::AnyObject;
-                        let _: () = objc2::msg_send![ptr, setIgnoresMouseEvents: passthrough];
+                        let _: () = objc2::msg_send![ptr, setIgnoresMouseEvents: false];
                     }
                 }
             })
@@ -2917,8 +3027,7 @@ pub fn run() {
     //
     //   option_env!("VITE_DEEPGRAM_API_KEY") reads the env var that the CI
     //   runner exports during `pnpm tauri build`; the value is embedded as a
-    //   &'static str.  There is exactly one binary → one embed → no
-    //   possibility of the warning firing multiple times per launch.
+    //   &'static str.
     //
     // DEVELOPMENT (pnpm tauri dev):
     //   dotenvy::dotenv() loads the project-root .env file, then
@@ -2930,6 +3039,11 @@ pub fn run() {
     //   per relaunch.  Each fresh process had no .env → empty key → warning.
     //   Baking the key at compile time removes the dependency on .env at
     //   runtime, so the warning never fires in a correctly-built release.
+    //
+    // RESOLUTION ORDER:
+    //   1) Compile-time embedded env var (option_env!)
+    //   2) Runtime env var (from .env/dev shell/launcher)
+    // Keep compile-time value authoritative for bundled builds.
     dotenvy::dotenv().ok(); // dev only; silently a no-op in bundled builds
 
     let deepgram_key: String = option_env!("VITE_DEEPGRAM_API_KEY")

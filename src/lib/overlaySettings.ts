@@ -12,6 +12,8 @@
  *   scribeshade.widget.autodetect — boolean
  */
 
+import { isTauri } from "@/lib/utils";
+
 export const OPACITY_KEY   = "scribeshade.widget.opacity";
 export const ZOOM_KEY      = "scribeshade.widget.zoom";
 export const PRIVATE_KEY   = "scribeshade.widget.private";
@@ -26,6 +28,22 @@ export const ZOOM_MAX     = 1.60;
 export const ZOOM_STEP    = 0.10;
 export const ZOOM_DEFAULT = 1.00;
 
+let desktopPrivateDefaultApplied = false;
+
+function applyDesktopPrivateModeDefault(): void {
+  if (desktopPrivateDefaultApplied) {
+    return;
+  }
+
+  desktopPrivateDefaultApplied = true;
+
+  if (!isTauri()) {
+    return;
+  }
+
+  localStorage.setItem(PRIVATE_KEY, "true");
+}
+
 // ── Getters ──────────────────────────────────────────────────────────────────
 
 export function getOpacity(): number {
@@ -39,6 +57,7 @@ export function getZoom(): number {
 }
 
 export function getPrivateMode(): boolean {
+  applyDesktopPrivateModeDefault();
   return localStorage.getItem(PRIVATE_KEY) === "true";
 }
 

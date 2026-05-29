@@ -39,6 +39,7 @@ import {
   Globe,
   Settings,
   SlidersHorizontal,
+  Star,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import {
@@ -149,7 +150,7 @@ function WidgetContent() {
   const win = useMemo(() => getCurrentWindow(), []);
 
   // ── Credits ───────────────────────────────────────────────────────────────
-  const { balance, isLoading: isLoadingBalance } = useCreditsBalance();
+  const { balance, isLoading: isLoadingBalance, refresh: refreshBalance } = useCreditsBalance();
 
   // ── Safe zoom bounds ───────────────────────────────────────────────────────
   const { safeMin, safeMax, atMin, atMax } = useSafeZoom(
@@ -228,6 +229,10 @@ function WidgetContent() {
   // Tracks whether a session is currently active (launched from this window).
   // Used to lock private mode toggle during active sessions (Feature 4).
   const [isSessionActive, setIsSessionActive] = useState(false);
+  const [projectSelectionError, setProjectSelectionError] = useState<string>("");
+  const selectedProjectCount = sessionInfo.projectIds.length;
+  const requiresPrimarySelection =
+    selectedProjectCount === 2 && !sessionInfo.primaryProjectId;
 
   const handleCreateSession = useCallback(
     () => {
@@ -249,6 +254,40 @@ function WidgetContent() {
     dispatch(updateSessionInfo({ isFree }));
     dispatch(setCreationStep(1));
   }, [dispatch]);
+
+  const toggleProjectSelection = useCallback((projectId: string) => {
+    const currentlySelected = sessionInfo.projectIds;
+    const isSelected = currentlySelected.includes(projectId);
+
+    if (isSelected) {
+      const next = currentlySelected.filter((id) => id !== projectId);
+      const nextPrimary =
+        next.length === 0
+          ? ""
+          : sessionInfo.primaryProjectId === projectId
+            ? next[0]
+            : sessionInfo.primaryProjectId || next[0];
+      dispatch(updateSessionInfo({ projectIds: next, primaryProjectId: nextPrimary || "" }));
+      setProjectSelectionError("");
+      return;
+    }
+
+    if (currentlySelected.length >= 2) {
+      setProjectSelectionError("You can select up to 2 projects. Unselect one to choose another.");
+      return;
+    }
+
+    const next = [...currentlySelected, projectId];
+    const nextPrimary = next.length === 1 ? projectId : sessionInfo.primaryProjectId || "";
+    dispatch(updateSessionInfo({ projectIds: next, primaryProjectId: nextPrimary }));
+    setProjectSelectionError("");
+  }, [dispatch, sessionInfo.primaryProjectId, sessionInfo.projectIds]);
+
+  const setPrimaryProject = useCallback((projectId: string) => {
+    if (!sessionInfo.projectIds.includes(projectId)) return;
+    dispatch(updateSessionInfo({ primaryProjectId: projectId }));
+    setProjectSelectionError("");
+  }, [dispatch, sessionInfo.projectIds]);
 
   const handleClose = useCallback(
     () => win.close().catch(console.error),
@@ -351,6 +390,9 @@ function WidgetContent() {
   // ── Session ended — reset ALL state to clean defaults ─────────────────────
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let refreshTimer1: ReturnType<typeof setTimeout> | null = null;
+    let refreshTimer2: ReturnType<typeof setTimeout> | null = null;
+    let refreshTimer3: ReturnType<typeof setTimeout> | null = null;
     tauriEvents
       .onSessionReset(() => {
         // 1. Reset Redux session creation flow
@@ -368,6 +410,18 @@ function WidgetContent() {
         invoke("toggle_content_protection", { protected: storedPrivate }).catch(console.error);
         // 5. Expand the widget
         setCollapsed(false);
+        // 6. Credit deduction is async (BullMQ). Refresh now and retry shortly
+        //    after so the launcher badge reflects the final deducted balance.
+        refreshBalance();
+        refreshTimer1 = setTimeout(() => {
+          refreshBalance();
+        }, 2500);
+        refreshTimer2 = setTimeout(() => {
+          refreshBalance();
+        }, 5000);
+        refreshTimer3 = setTimeout(() => {
+          refreshBalance();
+        }, 8000);
       })
       .then((fn) => {
         unlisten = fn;
@@ -375,8 +429,11 @@ function WidgetContent() {
       .catch(console.error);
     return () => {
       unlisten?.();
+      if (refreshTimer1) clearTimeout(refreshTimer1);
+      if (refreshTimer2) clearTimeout(refreshTimer2);
+      if (refreshTimer3) clearTimeout(refreshTimer3);
     };
-  }, [dispatch, setCollapsed]);
+  }, [dispatch, refreshBalance, setCollapsed]);
 
   // ── Windows WebView2 Fallback Recovery for Collapsed Icon ─────────────────
   // When switching from a large card to a tiny icon, the WebView2 compositor
@@ -938,20 +995,13 @@ function WidgetContent() {
                                             firstTitle ||
                                             proj.position ||
                                             "AI Project";
+                                          const isPrimary =
+                                            sessionInfo.primaryProjectId === proj.id;
                                           return (
                                             <button
                                               key={proj.id}
                                               type="button"
-                                              onClick={() =>
-                                                dispatch(updateSessionInfo({ projectIds: isSelected
-                                                    ? sessionInfo.projectIds.filter(
-                                                        (id: string) => id !== proj.id,
-                                                      )
-                                                    : [
-                                                        ...sessionInfo.projectIds,
-                                                        proj.id,
-                                                      ] }))
-                                              }
+                                              onClick={() => toggleProjectSelection(proj.id)}
                                               className={cn(
                                                 "flex items-center gap-2 px-2.5 py-1.5 rounded-xl text-xs font-medium border transition-all text-left",
                                                 isSelected
@@ -986,6 +1036,32 @@ function WidgetContent() {
                                               <span className="truncate">
                                                 {label}
                                               </span>
+                                              {isSelected && (
+                                                <span
+                                                  role="button"
+                                                  tabIndex={0}
+                                                  onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    setPrimaryProject(proj.id);
+                                                  }}
+                                                  onKeyDown={(e) => {
+                                                    if (e.key === "Enter" || e.key === " ") {
+                                                      e.preventDefault();
+                                                      e.stopPropagation();
+                                                      setPrimaryProject(proj.id);
+                                                    }
+                                                  }}
+                                                  className={cn(
+                                                    "ml-1 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold",
+                                                    isPrimary
+                                                      ? "border-amber-400 bg-amber-100 text-amber-800"
+                                                      : "border-zinc-300 bg-white text-zinc-600 hover:border-amber-300",
+                                                  )}
+                                                >
+                                                  <Star className={cn("h-3 w-3", isPrimary ? "fill-amber-500 text-amber-500" : "text-zinc-400")} />
+                                                  {isPrimary ? "Primary" : "Set Primary"}
+                                                </span>
+                                              )}
                                               <span className="ml-auto flex-shrink-0 text-[10px] text-zinc-400">
                                                 {proj.projects?.length ?? 0}{" "}
                                                 project
@@ -999,6 +1075,21 @@ function WidgetContent() {
                                         })}
                                       </div>
                                     )}
+                                    <div className="pt-1 space-y-1">
+                                      <p className="text-[11px] text-zinc-500">
+                                        {selectedProjectCount}/2 selected
+                                      </p>
+                                      {requiresPrimarySelection && (
+                                        <p className="text-[11px] text-amber-600">
+                                          Select which one should be the primary project.
+                                        </p>
+                                      )}
+                                      {projectSelectionError && (
+                                        <p className="text-[11px] text-red-600">
+                                          {projectSelectionError}
+                                        </p>
+                                      )}
+                                    </div>
                                   </div>
                                 )}
                               </div>
@@ -1012,7 +1103,7 @@ function WidgetContent() {
                                 </button>
                                 <button
                                   onClick={handleCreateSession}
-                                  disabled={isCreating}
+                                  disabled={isCreating || requiresPrimarySelection}
                                   className="py-2.5 rounded-2xl bg-zinc-900 text-white text-sm font-bold hover:bg-zinc-800 transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-lg shadow-black/10"
                                 >
                                   {isCreating ? (

@@ -14,9 +14,12 @@ import { useOverlayShortcuts } from "@/hooks/useOverlayShortcuts";
 import { useSafeZoom } from "@/hooks/useSafeZoom";
 import { useCursorPassthrough } from "@/features/launcher/hooks/useCursorPassthrough";
 import {
-  getOpacity, saveOpacity,
-  getZoom, saveZoom,
-  getPrivateMode, savePrivateMode,
+  getOpacity,
+  saveOpacity,
+  getZoom,
+  saveZoom,
+  getPrivateMode,
+  savePrivateMode,
 } from "@/lib/overlaySettings";
 import {
   Send,
@@ -56,12 +59,12 @@ import { Toaster } from "sonner";
 import { store } from "@/store/store";
 
 const KEYWORD_CONFIGS = [
-  { color: "text-blue-400" },
-  { color: "text-purple-400" },
-  { color: "text-emerald-400" },
-  { color: "text-orange-400" },
-  { color: "text-rose-400" },
-  { color: "text-indigo-400" },
+  { color: "#93c5fd", bg: "rgba(59,130,246,0.25)" }, // blue-300
+  { color: "#c4b5fd", bg: "rgba(168,85,247,0.25)" }, // purple-300
+  { color: "#6ee7b7", bg: "rgba(16,185,129,0.25)" }, // emerald-300
+  { color: "#fdba74", bg: "rgba(249,115,22,0.25)" }, // orange-300
+  { color: "#fda4af", bg: "rgba(244,63,94,0.25)" }, // rose-300
+  { color: "#a5b4fc", bg: "rgba(99,102,241,0.25)" }, // indigo-300
 ];
 
 const getKeywordConfig = (text: string) => {
@@ -130,7 +133,6 @@ const getLanguageCode = (lang: string): string => {
   };
   return mapping[lang] || "en";
 };
-
 
 //  CodeBlock (for markdown rendering)
 const CodeBlock = ({
@@ -222,7 +224,7 @@ const CodeBlock = ({
   );
 };
 
-// Response Parser 
+// Response Parser
 // Splits an AI response into optional question + answer sections so we can
 // render them with ParakeetAI-style iconic headers.
 interface ParsedSection {
@@ -244,7 +246,10 @@ const parseAIResponse = (raw: string): ParsedSection => {
   const m = text.match(re);
   if (m) {
     const cleanInline = (s: string) =>
-      s.replace(/^\s*\*{1,3}\s*/, "").replace(/\s*\*{1,3}\s*$/, "").trim();
+      s
+        .replace(/^\s*\*{1,3}\s*/, "")
+        .replace(/\s*\*{1,3}\s*$/, "")
+        .trim();
     return { question: cleanInline(m[1]), answer: cleanInline(m[2]) };
   }
 
@@ -258,7 +263,10 @@ const parseAIResponse = (raw: string): ParsedSection => {
 };
 
 // Small inline copy button used within the answer area
-const InlineCopyButton: React.FC<{ text: string; label?: string }> = ({ text, label }) => {
+const InlineCopyButton: React.FC<{ text: string; label?: string }> = ({
+  text,
+  label,
+}) => {
   const [copied, setCopied] = useState(false);
   const handleCopy = () => {
     navigator.clipboard.writeText(text).then(() => {
@@ -273,9 +281,15 @@ const InlineCopyButton: React.FC<{ text: string; label?: string }> = ({ text, la
       className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded ml-1.5 text-[9px] font-bold bg-white/10 hover:bg-white/20 text-white/60 hover:text-white transition-all active:scale-95 shrink-0"
     >
       {copied ? (
-        <><Check className="h-2.5 w-2.5 text-emerald-400" /><span className="text-emerald-400">OK</span></>
+        <>
+          <Check className="h-2.5 w-2.5 text-emerald-400" />
+          <span className="text-emerald-400">OK</span>
+        </>
       ) : (
-        <><Copy className="h-2.5 w-2.5" />{label && <span>{label}</span>}</>
+        <>
+          <Copy className="h-2.5 w-2.5" />
+          {label && <span>{label}</span>}
+        </>
       )}
     </button>
   );
@@ -288,12 +302,14 @@ const InlineCopyButton: React.FC<{ text: string; label?: string }> = ({ text, la
  * Safe to apply to fully-completed text too (no-op on valid markdown).
  */
 function sanitizeStreamingMarkdown(text: string): string {
-  return text
-    // Drop the marker if it leaks through to the renderer.
-    .replace(/\n?={3,}NEXT_QUESTION={3,}\n?/g, "\n")
-    // Keep stream raw-first; only trim catastrophic trailing partial tokens.
-    .replace(/(\*{1,3}|_{1,3})$/, "")
-    .replace(/`{1,3}$/, "");
+  return (
+    text
+      // Drop the marker if it leaks through to the renderer.
+      .replace(/\n?={3,}NEXT_QUESTION={3,}\n?/g, "\n")
+      // Keep stream raw-first; only trim catastrophic trailing partial tokens.
+      .replace(/(\*{1,3}|_{1,3})$/, "")
+      .replace(/`{1,3}$/, "")
+  );
 }
 
 /**
@@ -323,7 +339,10 @@ function normalizeBulletParagraphs(text: string): string {
       if (parts.length < 2) return para;
 
       const intro = parts[0].trim();
-      const items = parts.slice(1).map((s) => `- ${s.trim()}`).join("\n");
+      const items = parts
+        .slice(1)
+        .map((s) => `- ${s.trim()}`)
+        .join("\n");
       return intro ? `${intro}\n\n${items}` : items;
     })
     .join("\n\n");
@@ -348,14 +367,18 @@ function enforceHierarchicalAnswerMarkdown(answer: string): string {
       .filter(Boolean);
 
   const deriveLabel = (paragraph: string): { label?: string; body: string } => {
-    const forMatch = paragraph.match(/^For\s+([^,:.\n]{3,60})\s*[:,]\s*([\s\S]*)$/i);
+    const forMatch = paragraph.match(
+      /^For\s+([^,:.\n]{3,60})\s*[:,]\s*([\s\S]*)$/i,
+    );
     if (forMatch) {
       return {
         label: forMatch[1].trim(),
         body: (forMatch[2] || "").trim(),
       };
     }
-    const headed = paragraph.match(/^([A-Z][A-Za-z0-9/&+\-\s]{3,60})\s*:\s*([\s\S]*)$/);
+    const headed = paragraph.match(
+      /^([A-Z][A-Za-z0-9/&+\-\s]{3,60})\s*:\s*([\s\S]*)$/,
+    );
     if (headed) {
       return {
         label: headed[1].trim(),
@@ -398,7 +421,9 @@ function enforceHierarchicalAnswerMarkdown(answer: string): string {
     sections.unshift("**🔹 Key Points:**", ...keyBullets, "");
   }
 
-  return sections.length > 0 ? `${summary}\n\n${sections.join("\n").trim()}` : raw;
+  return sections.length > 0
+    ? `${summary}\n\n${sections.join("\n").trim()}`
+    : raw;
 }
 
 function applyDeterministicHighlighting(markdown: unknown): string {
@@ -406,8 +431,8 @@ function applyDeterministicHighlighting(markdown: unknown): string {
     typeof markdown === "string"
       ? markdown
       : markdown == null
-      ? ""
-      : String(markdown);
+        ? ""
+        : String(markdown);
   if (!markdownText.trim()) return markdownText;
 
   const wrapIfNotBold = (text: string, pattern: RegExp) =>
@@ -420,8 +445,14 @@ function applyDeterministicHighlighting(markdown: unknown): string {
         const before = typeof args[0] === "string" ? args[0] : "";
         const token = typeof args[1] === "string" ? args[1] : match;
         const offsetCandidate = args[2];
-        const source = typeof args[args.length - 2] === "string" ? (args[args.length - 2] as string) : "";
-        const offset = typeof offsetCandidate === "number" ? offsetCandidate : source.indexOf(match);
+        const source =
+          typeof args[args.length - 2] === "string"
+            ? (args[args.length - 2] as string)
+            : "";
+        const offset =
+          typeof offsetCandidate === "number"
+            ? offsetCandidate
+            : source.indexOf(match);
         const after =
           typeof source === "string" && offset >= 0
             ? source.slice(offset + match.length)
@@ -434,9 +465,15 @@ function applyDeterministicHighlighting(markdown: unknown): string {
 
   const processPlain = (plain: string) => {
     let out = plain;
-    out = wrapIfNotBold(out, /(^|[^\w*])(Databricks|PySpark|ADF|Azure DevOps)(?=[^\w*]|$)/gi);
+    out = wrapIfNotBold(
+      out,
+      /(^|[^\w*])(Databricks|PySpark|ADF|Azure DevOps)(?=[^\w*]|$)/gi,
+    );
     out = wrapIfNotBold(out, /(^|[^\w*])(1TB\+|40%|50%)(?=[^\w*]|$)/g);
-    out = wrapIfNotBold(out, /(^|[^\w*])(coalesce\(\)|current_date\(\)|withColumnRenamed\(\))(?=[^\w*]|$)/gi);
+    out = wrapIfNotBold(
+      out,
+      /(^|[^\w*])(coalesce\(\)|current_date\(\)|withColumnRenamed\(\))(?=[^\w*]|$)/gi,
+    );
     return out;
   };
 
@@ -452,7 +489,10 @@ function isProjectQuestion(question: string): boolean {
   );
 }
 
-function normalizeProjectAnswerMarkdown(question: string, answer: string): string {
+function normalizeProjectAnswerMarkdown(
+  question: string,
+  answer: string,
+): string {
   if (!answer?.trim() || !isProjectQuestion(question)) return answer;
   if (/^\s*-\s+\*\*[^*\n]+\*\*\s*(?:—|-|:)/m.test(answer)) return answer;
 
@@ -665,8 +705,10 @@ const AnswerArea: React.FC<{
                         const text = (() => {
                           const extract = (node: any): string => {
                             if (typeof node === "string") return node;
-                            if (Array.isArray(node)) return node.map(extract).join("");
-                            if (node?.props?.children) return extract(node.props.children);
+                            if (Array.isArray(node))
+                              return node.map(extract).join("");
+                            if (node?.props?.children)
+                              return extract(node.props.children);
                             return "";
                           };
                           return extract(children);
@@ -691,10 +733,8 @@ const AnswerArea: React.FC<{
                         const config = getKeywordConfig(text);
                         return (
                           <strong
-                            className={cn(
-                              "font-bold transition-colors",
-                              config.color,
-                            )}
+                            style={{ color: config.color }}
+                            className="font-bold transition-colors"
                           >
                             {children}
                           </strong>
@@ -703,21 +743,41 @@ const AnswerArea: React.FC<{
                       pre: ({ children }) => {
                         const codeElement = children as any;
                         const language =
-                          codeElement?.props?.className?.replace("language-", "") ||
-                          "";
+                          codeElement?.props?.className?.replace(
+                            "language-",
+                            "",
+                          ) || "";
                         return (
                           <CodeBlock language={language}>{children}</CodeBlock>
                         );
                       },
-                      code: ({ node, inline, children, ...props }: any) => {
-                        if (inline) {
+                      code: ({ node, className, children, ...props }: any) => {
+                        // In react-markdown v8+, `inline` prop was removed.
+                        // Inline code has no className; block code has "language-xxx".
+                        const isInline = !className;
+
+                        if (isInline) {
+                          const text = String(children);
+                          const config = getKeywordConfig(text);
                           return (
-                            <code className="px-1.5 py-0.5 rounded text-[13px] font-mono font-medium bg-white/10 text-blue-200 mx-0.5">
+                            <code
+                              style={{
+                                color: config.color,
+                                backgroundColor: config.bg,
+                              }}
+                              className="px-1.5 py-0.5 rounded text-[13px] font-mono font-semibold mx-0.5"
+                            >
                               {children}
                             </code>
                           );
                         }
-                        return <code {...props}>{children}</code>;
+
+                        // Block code — passed through to the `pre` renderer's CodeBlock
+                        return (
+                          <code className={className} {...props}>
+                            {children}
+                          </code>
+                        );
                       },
                     }}
                   >
@@ -736,7 +796,7 @@ const AnswerArea: React.FC<{
   );
 };
 
-// â”€â”€â”€ Main FloatingApp 
+// â”€â”€â”€ Main FloatingApp
 
 // Compresses the raw PNG data-URL from capture_screen (typically 5-15 MB) to a
 // JPEG Blob of <= 1280 px wide at 65% quality (~200-400 KB) using the Canvas API.
@@ -751,10 +811,16 @@ function compressScreenshotToBlob(dataUrl: string): Promise<Blob> {
       canvas.width = Math.round(img.width * scale);
       canvas.height = Math.round(img.height * scale);
       const ctx = canvas.getContext("2d");
-      if (!ctx) { reject(new Error("Canvas 2d context unavailable")); return; }
+      if (!ctx) {
+        reject(new Error("Canvas 2d context unavailable"));
+        return;
+      }
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
       canvas.toBlob(
-        (blob) => (blob ? resolve(blob) : reject(new Error("Canvas toBlob returned null"))),
+        (blob) =>
+          blob
+            ? resolve(blob)
+            : reject(new Error("Canvas toBlob returned null")),
         "image/jpeg",
         0.65,
       );
@@ -769,10 +835,18 @@ const FloatingApp: React.FC = () => {
   // These have their own persistence via overlaySettings and are not Redux state.
   const [overlayOpacity, setOverlayOpacityState] = useState(() => getOpacity());
   const [overlayZoom, setOverlayZoomState] = useState(() => getZoom());
-  const [overlayPrivate, setOverlayPrivateState] = useState(() => getPrivateMode());
+  const [overlayPrivate, setOverlayPrivateState] = useState(() =>
+    getPrivateMode(),
+  );
 
-  const setOverlayOpacity = useCallback((v: number) => { setOverlayOpacityState(v); saveOpacity(v); }, []);
-  const setOverlayZoom    = useCallback((v: number) => { setOverlayZoomState(v);    saveZoom(v);    }, []);
+  const setOverlayOpacity = useCallback((v: number) => {
+    setOverlayOpacityState(v);
+    saveOpacity(v);
+  }, []);
+  const setOverlayZoom = useCallback((v: number) => {
+    setOverlayZoomState(v);
+    saveZoom(v);
+  }, []);
   const setOverlayPrivate = useCallback((v: boolean) => {
     setOverlayPrivateState(v);
     savePrivateMode(v);
@@ -790,9 +864,13 @@ const FloatingApp: React.FC = () => {
       .onPrivateModeChanged((value) => {
         setOverlayPrivateState(value);
       })
-      .then((fn) => { unlisten = fn; })
+      .then((fn) => {
+        unlisten = fn;
+      })
       .catch(console.error);
-    return () => { unlisten?.(); };
+    return () => {
+      unlisten?.();
+    };
   }, []);
 
   // Ref for safe zoom measurement (points to the FloatingSurface root).
@@ -807,9 +885,12 @@ const FloatingApp: React.FC = () => {
   );
 
   useOverlayShortcuts({
-    opacity: overlayOpacity, setOpacity: setOverlayOpacity,
-    zoom: overlayZoom,       setZoom: setOverlayZoom,
-    privateMode: overlayPrivate, setPrivateMode: setOverlayPrivate,
+    opacity: overlayOpacity,
+    setOpacity: setOverlayOpacity,
+    zoom: overlayZoom,
+    setZoom: setOverlayZoom,
+    privateMode: overlayPrivate,
+    setPrivateMode: setOverlayPrivate,
     safeZoomMin: floatSafeMin,
     safeZoomMax: floatSafeMax,
     isPrivateLocked: isPrivateLockedRef.current,
@@ -829,12 +910,18 @@ const FloatingApp: React.FC = () => {
   useCursorPassthrough({ isDraggingRef });
 
   // ── CSS-based widget drag (fullscreen window stays fixed; widget moves inside it)
-  const [widgetPos, setWidgetPos] = useState<{ top: number; left: number } | null>(null);
+  const [widgetPos, setWidgetPos] = useState<{
+    top: number;
+    left: number;
+  } | null>(null);
   const layer2Ref = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{
-    startMouseX: number; startMouseY: number;
-    startLeft: number;  startTop: number;
-    widgetW: number;    widgetH: number;
+    startMouseX: number;
+    startMouseY: number;
+    startLeft: number;
+    startTop: number;
+    widgetW: number;
+    widgetH: number;
   } | null>(null);
 
   // Re-clamp position if the monitor layout changes while the app is open.
@@ -857,17 +944,23 @@ const FloatingApp: React.FC = () => {
     e.preventDefault();
     isDraggingRef.current = true;
     const rect = layer2Ref.current?.getBoundingClientRect();
-    if (!rect) { isDraggingRef.current = false; return; }
+    if (!rect) {
+      isDraggingRef.current = false;
+      return;
+    }
     dragRef.current = {
-      startMouseX: e.clientX, startMouseY: e.clientY,
-      startLeft: rect.left,   startTop: rect.top,
-      widgetW: rect.width,    widgetH: rect.height,
+      startMouseX: e.clientX,
+      startMouseY: e.clientY,
+      startLeft: rect.left,
+      startTop: rect.top,
+      widgetW: rect.width,
+      widgetH: rect.height,
     };
     const onMouseMove = (ev: MouseEvent) => {
       const d = dragRef.current;
       if (!d) return;
       const rawLeft = d.startLeft + (ev.clientX - d.startMouseX);
-      const rawTop  = d.startTop  + (ev.clientY - d.startMouseY);
+      const rawTop = d.startTop + (ev.clientY - d.startMouseY);
       // Clamp on every frame — widget stays reachable even near screen edges.
       const { x, y } = clampToScreen(rawLeft, rawTop, d.widgetW, d.widgetH);
       setWidgetPos({ left: x, top: y });
@@ -876,12 +969,11 @@ const FloatingApp: React.FC = () => {
       isDraggingRef.current = false;
       dragRef.current = null;
       document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup",   onMouseUp);
+      document.removeEventListener("mouseup", onMouseUp);
     };
     document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup",   onMouseUp);
+    document.addEventListener("mouseup", onMouseUp);
   }, []);
-
 
   // ── Keyboard shortcuts (must live here so they fire with no element focused)
   // Cmd/Ctrl+G → AI Answer  |  Cmd/Ctrl+K → Analyze Screen
@@ -895,6 +987,15 @@ const FloatingApp: React.FC = () => {
   // on the Analyze Screen button.  We flip this immediately on click so the
   // button shows the spinner the moment it is pressed.
   const [isCapturePhase, setIsCapturePhase] = useState(false);
+
+  // Expandable question card state — lets the user read long detected questions
+  // without the fixed card growing and squeezing the answer panel.
+  const [isQuestionExpanded, setIsQuestionExpanded] = useState(false);
+
+  // Collapse question card whenever the user navigates to a different response.
+  useEffect(() => {
+    setIsQuestionExpanded(false);
+  }, [session.currentResponseIndex]);
 
   // Capture + compress screenshot, then delegate to hook
   const handleAnalyzeScreenCapture = useCallback(async () => {
@@ -927,19 +1028,25 @@ const FloatingApp: React.FC = () => {
       if (e.key.toLowerCase() === "g") {
         e.preventDefault();
         if (session.isAnswering) {
-          console.log("[AI Answer][Dedup] keyboard shortcut ignored while request active");
+          console.log(
+            "[AI Answer][Dedup] keyboard shortcut ignored while request active",
+          );
           return;
         }
+        if (session.isTranscriptExpanded) session.toggleTranscriptExpanded();
         handleAiAnswerClickRef.current();
       } else if (e.key.toLowerCase() === "k") {
         e.preventDefault();
+        if (session.isTranscriptExpanded) session.toggleTranscriptExpanded();
         void handleAnalyzeScreenCaptureRef.current();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => {
       window.removeEventListener("keydown", onKey);
-      console.log("[Tauri][WindowLifecycle] keyboard listener unregister count=1");
+      console.log(
+        "[Tauri][WindowLifecycle] keyboard listener unregister count=1",
+      );
     };
   }, []);
 
@@ -968,8 +1075,8 @@ const FloatingApp: React.FC = () => {
           style={{
             position: "absolute",
             // Use stored position after drag; fall back to centered at top.
-            top:       widgetPos?.top ?? 10,
-            left:      widgetPos ? widgetPos.left : "50%",
+            top: widgetPos?.top ?? 10,
+            left: widgetPos ? widgetPos.left : "50%",
             transform: widgetPos ? "none" : "translateX(-50%)",
             pointerEvents: "auto",
             // Width tracks badge vs full widget so useCursorPassthrough
@@ -987,15 +1094,19 @@ const FloatingApp: React.FC = () => {
                   className="w-full flex items-center justify-center gap-2.5 px-3 bg-zinc-950/90 backdrop-blur-2xl rounded-xl border border-white/8 hover:border-blue-500/30 hover:bg-zinc-900/95 transition-all active:scale-95 group"
                 >
                   <div className="shrink-0 w-5 h-5 rounded-lg bg-gradient-to-br from-blue-500 to-violet-600 flex items-center justify-center shadow-[0_0_10px_rgba(99,102,241,0.4)]">
-                    <span className="text-[10px] font-black text-white leading-none">S</span>
+                    <span className="text-[10px] font-black text-white leading-none">
+                      S
+                    </span>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
-                    <div className={cn(
-                      "w-1.5 h-1.5 rounded-full transition-colors",
-                      session.isMicActive || session.isTabActive
-                        ? "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)] animate-pulse"
-                        : "bg-blue-400/60 animate-pulse",
-                    )} />
+                    <div
+                      className={cn(
+                        "w-1.5 h-1.5 rounded-full transition-colors",
+                        session.isMicActive || session.isTabActive
+                          ? "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)] animate-pulse"
+                          : "bg-blue-400/60 animate-pulse",
+                      )}
+                    />
                   </div>
                   <span className="text-[11px] font-semibold text-white/60 group-hover:text-white/90 transition-colors tracking-tight">
                     ScribeShade
@@ -1022,484 +1133,690 @@ const FloatingApp: React.FC = () => {
                 toastOptions={{ style: { fontSize: "12px" } }}
               />
 
-      {/* Top Card: Controls */}
-      <div className="shrink-0">
-        {/* Header */}
-        <div className="px-4 py-2 flex items-center justify-between border-b border-white/5 relative group/header cursor-default no-drag">
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-2 drag">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <div className="w-2 h-2 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)] animate-pulse cursor-default" />
-                </TooltipTrigger>
-                <TooltipContent side="bottom" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
-                  ScribeShade
-                </TooltipContent>
-              </Tooltip>
-            </div>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <div
-                  className="p-1 rounded bg-white/25 text-white/20 group-hover/header:text-white/40 cursor-grab active:cursor-grabbing transition-colors select-none"
-                  onMouseDown={handleGripMouseDown}
-                >
-                  <GripHorizontal size={14} className="pointer-events-none" />
-                </div>
-              </TooltipTrigger>
-              <TooltipContent side="bottom" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
-                Drag to move
-              </TooltipContent>
-            </Tooltip>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <div className="scale-90 origin-right">
-              <ModelSelector
-                value={session.selectedModel}
-                onChange={session.onModelChange}
-                isFullscreen={true}
-              />
-            </div>
-
-            <div className="flex items-center gap-2 bg-white/5 px-3 h-9 rounded-xl border border-white/10 shadow-inner transition-all hover:bg-white/10 group">
-              <Clock className="h-3.5 w-3.5 text-blue-400 group-hover:animate-pulse" />
-              <span className="text-[13px] font-mono font-bold text-white/90 tabular-nums tracking-tight">
-                {session.formattedTime || "00:00"}
-              </span>
-            </div>
-
-            <div className="flex items-center gap-1 bg-white/5 p-1 rounded-xl border border-white/10 h-9">
-              <SessionMenu
-                opacity={overlayOpacity}
-                setOpacity={setOverlayOpacity}
-                zoom={overlayZoom}
-                setZoom={setOverlayZoom}
-                privateMode={overlayPrivate}
-                setPrivateMode={setOverlayPrivate}
-                safeMin={floatSafeMin}
-                safeMax={floatSafeMax}
-                onEndSession={session.endSession}
-                sessionActive={!!session.sessionInfo}
-              />
-
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    onClick={session.collapseWindow}
-                    className="p-2 hover:bg-white/10 rounded-lg transition-all text-zinc-300 hover:text-blue-400 active:scale-95 flex items-center justify-center"
-                  >
-                    <ChevronDown size={16} />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
-                  Collapse to Icon
-                </TooltipContent>
-              </Tooltip>
-
-              <div className="w-px h-4 bg-white/10 mx-0.5" />
-
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    onClick={session.endSession}
-                    disabled={session.isEnding}
-                    className={cn(
-                      "p-2 rounded-lg transition-all flex items-center justify-center",
-                      session.isEnding
-                        ? "bg-rose-500/20 text-rose-400 cursor-not-allowed"
-                        : "text-zinc-300 hover:bg-rose-500/10 hover:text-rose-400 active:scale-95",
-                    )}
-                  >
-                    <LogOut size={16} className={session.isEnding ? "animate-pulse" : ""} />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
-                  End Session
-                </TooltipContent>
-              </Tooltip>
-            </div>
-          </div>
-        </div>
-
-        {/* Live Monitor Row */}
-        <div className="px-4 py-2.5 flex items-center justify-between bg-white/2 border-b border-white/5 gap-3">
-          <div className="flex-1 flex items-center gap-2 overflow-hidden mr-3">
-            <div className="flex gap-1 shrink-0">
-              <div className={cn(
-                "w-1.5 h-1.5 rounded-full transition-all duration-300",
-                session.isMicConnecting
-                  ? "bg-amber-500 animate-pulse shadow-[0_0_8px_rgba(245,158,11,0.5)]"
-                  : session.isMicActive
-                    ? "bg-emerald-500 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)]"
-                    : "bg-white/20",
-              )} />
-              <div className={cn(
-                "w-1.5 h-1.5 rounded-full transition-all duration-300",
-                session.isTabConnecting
-                  ? "bg-amber-500 animate-pulse shadow-[0_0_8px_rgba(245,158,11,0.5)]"
-                  : session.isTabActive
-                    ? "bg-purple-500 animate-pulse shadow-[0_0_8px_rgba(168,85,247,0.5)]"
-                    : "bg-white/20",
-              )} />
-            </div>
-
-            <div className="flex-1 truncate text-[12px] font-medium text-white italic">
-              {session.isEnding ? (
-                <span className="text-rose-400 font-bold animate-pulse">Ending Session...</span>
-              ) : !session.sessionInfo ? (
-                <span className="text-white/20 flex items-center gap-1.5">
-                  <Loader2 size={11} className="animate-spin shrink-0" />
-                  Waiting for session...
-                </span>
-              ) : session.lastTranscriptLine || session.interimTranscript ? (
-                <>
-                  {session.lastTranscriptLine && (
-                    <span className={cn(
-                      "font-bold mr-1.5 text-[9px] uppercase tracking-wider not-italic",
-                      session.lastTranscriptSender === "User" ? "text-blue-400" : "text-purple-400",
-                    )}>
-                      {session.lastTranscriptSender === "User" ? "You •" : "System •"}
-                    </span>
-                  )}
-                  {session.lastTranscriptLine}
-                  {session.interimTranscript && (
-                    <span className="text-white/30 ml-1">{session.interimTranscript}</span>
-                  )}
-                </>
-              ) : session.tabStatus === "error" ? (
-                <span className="flex items-center gap-2 text-rose-300/90">
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span className="text-[11px] font-semibold truncate max-w-[260px] cursor-default">
-                        {session.tabError ?? "System audio unavailable"}
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent side="top" className="max-w-[280px]">
-                      {session.tabError ?? "System audio unavailable"}
-                    </TooltipContent>
-                  </Tooltip>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (session.tabErrorPermissionType === "microphone") {
-                        void session.preflightMicPermission(true);
-                      } else {
-                        void session.retrySystemAudio();
-                      }
-                    }}
-                    className="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider bg-white/10 hover:bg-white/20 text-white border border-white/10 transition-colors"
-                  >
-                    Retry
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (session.tabErrorPermissionType === "microphone") {
-                        invoke("open_macos_privacy_settings", { permissionType: "microphone" }).catch(() => {});
-                      } else if (session.tabErrorPermissionType === "screen-recording") {
-                        invoke("open_macos_privacy_settings", { permissionType: "screen-recording" }).catch(() => {});
-                      } else {
-                        invoke("open_screen_recording_settings").catch(() => {});
-                      }
-                    }}
-                    className="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider bg-white/10 hover:bg-white/20 text-white border border-white/10 transition-colors"
-                  >
-                    Open Settings
-                  </button>
-                  {session.permissionRequiresRestart && (
-                    <span className="text-[10px] text-amber-300/90">
-                      Restart app after enabling permission
-                    </span>
-                  )}
-                </span>
-              ) : (
-                <span className="text-white/20">
-                  {session.isMicActive ? "Listening for speech..." : "Waiting for audio..."}
-                </span>
-              )}
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2 shrink-0">
-            <div className={cn(
-              "px-2 py-1 rounded-lg border text-[10px] font-semibold tracking-wide",
-              session.captureStatus === "Live"
-                ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
-                : session.captureStatus === "Reconnecting"
-                  ? "bg-amber-500/15 text-amber-300 border-amber-500/30"
-                  : session.captureStatus === "Released"
-                    ? "bg-white/5 text-white/60 border-white/10"
-                    : "bg-rose-500/15 text-rose-300 border-rose-500/30",
-            )}>
-              {session.captureStatus}
-            </div>
-            {session.captureStatus === "Error" && (
-              <button
-                type="button"
-                onClick={() => { void session.retrySystemAudio(); }}
-                className="px-2 py-1 rounded-lg border text-[10px] font-semibold tracking-wide bg-white/10 hover:bg-white/20 text-white border-white/15 transition-colors"
-              >
-                Retry
-              </button>
-            )}
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  onClick={session.toggleTranscriptExpanded}
-                  disabled={!session.sessionInfo || session.messages.length === 0}
-                  className={cn(
-                    "p-2 rounded-xl transition-all active:scale-95 border",
-                    session.isTranscriptExpanded
-                      ? "bg-blue-500/20 text-blue-400 border-blue-500/30"
-                      : "bg-white/10 text-zinc-300 border-white/10 hover:bg-blue-500/10 hover:text-blue-400",
-                    (!session.sessionInfo || session.messages.length === 0) && "opacity-40 cursor-not-allowed",
-                  )}
-                >
-                  <AlignJustify size={14} />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="left" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
-                {session.isTranscriptExpanded ? "Hide Transcript" : "Show Transcript"}
-              </TooltipContent>
-            </Tooltip>
-
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  onClick={session.handleToggleMic}
-                  disabled={!session.sessionInfo}
-                  className={cn(
-                    "p-2 rounded-xl transition-all active:scale-95 border",
-                    session.isMicActive
-                      ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/30 shadow-[0_0_15px_rgba(16,185,129,0.2)]"
-                      : "bg-white/10 text-zinc-300 border-white/10 hover:bg-emerald-500/10 hover:text-emerald-400",
-                    !session.sessionInfo && "opacity-40 cursor-not-allowed",
-                  )}
-                >
-                  {session.isMicConnecting ? (
-                    <Loader2 size={14} className="animate-spin" />
-                  ) : session.isMicActive ? (
-                    <Mic size={14} />
-                  ) : (
-                    <MicOff size={14} />
-                  )}
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="left" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
-                {session.isMicActive ? "Disable Mic" : "Enable Mic (optional)"}
-              </TooltipContent>
-            </Tooltip>
-
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  onClick={session.handleClearTranscript}
-                  disabled={!session.sessionInfo}
-                  className={cn(
-                    "p-2 rounded-xl bg-white/10 text-zinc-300 border border-white/10 hover:bg-rose-500/20 hover:text-rose-400 hover:border-rose-500/30 transition-all active:scale-95 flex items-center justify-center",
-                    !session.sessionInfo && "opacity-40 cursor-not-allowed",
-                  )}
-                >
-                  <Trash2 size={14} />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="left" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
-                Clear Transcript
-              </TooltipContent>
-            </Tooltip>
-          </div>
-        </div>
-
-        {/* Collapsible Transcript Panel */}
-        {session.isTranscriptExpanded && (
-          <SessionTranscript
-            messages={session.messages}
-            micInterim={session.micInterimTranscript}
-            tabInterim={session.tabInterimTranscript}
-            onPatchMessage={session.handlePatchTranscriptMessage}
-          />
-        )}
-
-        {/* Action Bar */}
-        <div className="px-4 py-2.5 flex items-center justify-between gap-3">
-          <ChatActionButtons
-            onAiAnswer={session.handleAiAnswerClick}
-            onAnalyzeScreen={() => { void handleAnalyzeScreenCapture(); }}
-            isAnswering={session.isAnswering}
-            isAnalyzing={session.isAnalyzing || session.isCapturing || isCapturePhase}
-            canAnswer={!!session.sessionInfo && session.messages.length > 0}
-            canAnalyze={!!session.sessionInfo}
-            isFullscreen={true}
-          />
-          <div className="relative flex-1">
-            <input
-              className="w-full h-10 rounded-xl pl-4 pr-12 text-sm font-medium bg-white/5 border border-white/10 text-white placeholder:text-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500/50 transition-all"
-              placeholder="Ask AI anything..."
-              value={session.inputValue}
-              onChange={(e) => session.setInputValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  void session.handleSend();
-                }
-              }}
-            />
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  onClick={() => { void session.handleSend(); }}
-                  disabled={!session.inputValue.trim() || !session.sessionInfo}
-                  className="absolute right-1 top-1 h-8 w-10 rounded-lg bg-blue-500 hover:bg-blue-600 disabled:bg-white/10 flex items-center justify-center text-white transition-all active:scale-95 shadow-lg shadow-blue-500/20"
-                >
-                  <Send size={14} />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="top" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
-                Send Message
-              </TooltipContent>
-            </Tooltip>
-          </div>
-        </div>
-      </div>
-
-      {/* AI Responses Panel */}
-      {(session.isAnswering || session.isAnalyzing || isCapturePhase || session.aiResponses.length > 0) && (
-        <div className="flex flex-col border-t border-white/10">
-          {(() => {
-            // Clamp the Redux index to the current React array length so we
-            // never access aiResponses[undefined] when Redux races ahead of
-            // the React state update (root cause of blank panel / wrong counter).
-            const safeIndex = session.aiResponses.length > 0
-              ? Math.min(session.currentResponseIndex, session.aiResponses.length - 1)
-              : 0;
-            const currentResponse = session.aiResponses[safeIndex];
-
-            return (
-              <>
-                <div className="px-3 py-2 flex items-center justify-between shrink-0">
-                  <div className="flex items-center gap-1">
-                    <button
-                      onClick={session.goToPrevResponse}
-                      disabled={safeIndex === 0 || session.aiResponses.length === 0}
-                      className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-25 disabled:cursor-not-allowed text-white transition-all active:scale-95"
-                    >
-                      <ChevronLeft size={14} />
-                    </button>
-                    <button
-                      onClick={session.goToNextResponse}
-                      disabled={safeIndex >= session.aiResponses.length - 1}
-                      className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-25 disabled:cursor-not-allowed text-white transition-all active:scale-95"
-                    >
-                      <ChevronRight size={14} />
-                    </button>
-                    {session.aiResponses.length > 1 && (
-                      <span className="text-[11px] text-white/40 ml-1 font-mono">
-                        {safeIndex + 1}/{session.aiResponses.length}
-                      </span>
-                    )}
-                    {(session.isAnswering || session.isAnalyzing || isCapturePhase) && session.aiResponses.length === 0 && (
-                      <span className="flex items-center gap-1.5 ml-1 text-[11px] text-blue-400/80">
-                        <Loader2 size={11} className="animate-spin" />
-                        {isCapturePhase ? "Capturing screen..." : "Generating..."}
-                      </span>
-                    )}
+              {/* Top Card: Controls */}
+              <div className="shrink-0">
+                {/* Header */}
+                <div className="px-4 py-2 flex items-center justify-between border-b border-white/5 relative group/header cursor-default no-drag">
+                  <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2 drag">
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <div className="w-2 h-2 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)] animate-pulse cursor-default" />
+                        </TooltipTrigger>
+                        <TooltipContent
+                          side="bottom"
+                          className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
+                        >
+                          ScribeShade
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <div
+                          className="p-1 rounded bg-white/25 text-white/20 group-hover/header:text-white/40 cursor-grab active:cursor-grabbing transition-colors select-none"
+                          onMouseDown={handleGripMouseDown}
+                        >
+                          <GripHorizontal
+                            size={14}
+                            className="pointer-events-none"
+                          />
+                        </div>
+                      </TooltipTrigger>
+                      <TooltipContent
+                        side="bottom"
+                        className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
+                      >
+                        Drag to move
+                      </TooltipContent>
+                    </Tooltip>
                   </div>
+
                   <div className="flex items-center gap-2">
+                    <div className="scale-90 origin-right">
+                      <ModelSelector
+                        value={session.selectedModel}
+                        onChange={session.onModelChange}
+                        isFullscreen={true}
+                      />
+                    </div>
+
+                    <div className="flex items-center gap-2 bg-white/5 px-3 h-9 rounded-xl border border-white/10 shadow-inner transition-all hover:bg-white/10 group">
+                      <Clock className="h-3.5 w-3.5 text-blue-400 group-hover:animate-pulse" />
+                      <span className="text-[13px] font-mono font-bold text-white/90 tabular-nums tracking-tight">
+                        {session.formattedTime || "00:00"}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-1 bg-white/5 p-1 rounded-xl border border-white/10 h-9">
+                      <SessionMenu
+                        opacity={overlayOpacity}
+                        setOpacity={setOverlayOpacity}
+                        zoom={overlayZoom}
+                        setZoom={setOverlayZoom}
+                        privateMode={overlayPrivate}
+                        setPrivateMode={setOverlayPrivate}
+                        safeMin={floatSafeMin}
+                        safeMax={floatSafeMax}
+                        onEndSession={session.endSession}
+                        sessionActive={!!session.sessionInfo}
+                      />
+
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            onClick={session.collapseWindow}
+                            className="p-2 hover:bg-white/10 rounded-lg transition-all text-zinc-300 hover:text-blue-400 active:scale-95 flex items-center justify-center"
+                          >
+                            <ChevronDown size={16} />
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent
+                          side="bottom"
+                          className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
+                        >
+                          Collapse to Icon
+                        </TooltipContent>
+                      </Tooltip>
+
+                      <div className="w-px h-4 bg-white/10 mx-0.5" />
+
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            onClick={session.endSession}
+                            disabled={session.isEnding}
+                            className={cn(
+                              "p-2 rounded-lg transition-all flex items-center justify-center",
+                              session.isEnding
+                                ? "bg-rose-500/20 text-rose-400 cursor-not-allowed"
+                                : "text-zinc-300 hover:bg-rose-500/10 hover:text-rose-400 active:scale-95",
+                            )}
+                          >
+                            <LogOut
+                              size={16}
+                              className={
+                                session.isEnding ? "animate-pulse" : ""
+                              }
+                            />
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent
+                          side="bottom"
+                          className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
+                        >
+                          End Session
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Live Monitor Row */}
+                <div className="px-4 py-2.5 flex items-center justify-between bg-white/2 border-b border-white/5 gap-3">
+                  <div className="flex-1 flex items-center gap-2 overflow-hidden mr-3">
+                    <div className="flex gap-1 shrink-0">
+                      <div
+                        className={cn(
+                          "w-1.5 h-1.5 rounded-full transition-all duration-300",
+                          session.isMicConnecting
+                            ? "bg-amber-500 animate-pulse shadow-[0_0_8px_rgba(245,158,11,0.5)]"
+                            : session.isMicActive
+                              ? "bg-emerald-500 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)]"
+                              : "bg-white/20",
+                        )}
+                      />
+                      <div
+                        className={cn(
+                          "w-1.5 h-1.5 rounded-full transition-all duration-300",
+                          session.isTabConnecting
+                            ? "bg-amber-500 animate-pulse shadow-[0_0_8px_rgba(245,158,11,0.5)]"
+                            : session.isTabActive
+                              ? "bg-purple-500 animate-pulse shadow-[0_0_8px_rgba(168,85,247,0.5)]"
+                              : "bg-white/20",
+                        )}
+                      />
+                    </div>
+
+                    <div className="flex-1 truncate text-[12px] font-medium text-white italic">
+                      {session.isEnding ? (
+                        <span className="text-rose-400 font-bold animate-pulse">
+                          Ending Session...
+                        </span>
+                      ) : !session.sessionInfo ? (
+                        <span className="text-white/20 flex items-center gap-1.5">
+                          <Loader2
+                            size={11}
+                            className="animate-spin shrink-0"
+                          />
+                          Waiting for session...
+                        </span>
+                      ) : session.lastTranscriptLine ||
+                        session.interimTranscript ? (
+                        <>
+                          {session.lastTranscriptLine && (
+                            <span
+                              className={cn(
+                                "font-bold mr-1.5 text-[9px] uppercase tracking-wider not-italic",
+                                session.lastTranscriptSender === "User"
+                                  ? "text-blue-400"
+                                  : "text-purple-400",
+                              )}
+                            >
+                              {session.lastTranscriptSender === "User"
+                                ? "You •"
+                                : "System •"}
+                            </span>
+                          )}
+                          {session.lastTranscriptLine}
+                          {session.interimTranscript && (
+                            <span className="text-white/30 ml-1">
+                              {session.interimTranscript}
+                            </span>
+                          )}
+                        </>
+                      ) : session.tabStatus === "error" ? (
+                        <span className="flex items-center gap-2 text-rose-300/90">
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span className="text-[11px] font-semibold truncate max-w-[260px] cursor-default">
+                                {session.tabError ?? "System audio unavailable"}
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent
+                              side="top"
+                              className="max-w-[280px]"
+                            >
+                              {session.tabError ?? "System audio unavailable"}
+                            </TooltipContent>
+                          </Tooltip>
+                          {!session.isSystemAuthError && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (
+                                  session.tabErrorPermissionType === "microphone"
+                                ) {
+                                  void session.preflightMicPermission(true);
+                                } else {
+                                  void session.retrySystemAudio();
+                                }
+                              }}
+                              className="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider bg-white/10 hover:bg-white/20 text-white border border-white/10 transition-colors"
+                            >
+                              Retry
+                            </button>
+                          )}
+                          {!session.isSystemAuthError && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (
+                                  session.tabErrorPermissionType === "microphone"
+                                ) {
+                                  invoke("open_macos_privacy_settings", {
+                                    permissionType: "microphone",
+                                  }).catch(() => {});
+                                } else if (
+                                  session.tabErrorPermissionType ===
+                                  "screen-recording"
+                                ) {
+                                  invoke("open_macos_privacy_settings", {
+                                    permissionType: "screen-recording",
+                                  }).catch(() => {});
+                                } else {
+                                  invoke("open_screen_recording_settings").catch(
+                                    () => {},
+                                  );
+                                }
+                              }}
+                              className="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider bg-white/10 hover:bg-white/20 text-white border border-white/10 transition-colors"
+                            >
+                              Open Settings
+                            </button>
+                          )}
+                          {session.isSystemAuthError && (
+                            <span className="text-[10px] text-amber-300/90">
+                              Invalid Deepgram key. Update VITE_DEEPGRAM_API_KEY and rebuild/restart.
+                            </span>
+                          )}
+                          {session.permissionRequiresRestart && (
+                            <span className="text-[10px] text-amber-300/90">
+                              Restart app after enabling permission
+                            </span>
+                          )}
+                        </span>
+                      ) : (
+                        <span className="text-white/20">
+                          {session.isMicActive
+                            ? "Listening for speech..."
+                            : "Waiting for audio..."}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <div
+                      className={cn(
+                        "px-2 py-1 rounded-lg border text-[10px] font-semibold tracking-wide",
+                        session.captureStatus === "Live"
+                          ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                          : session.captureStatus === "Reconnecting"
+                            ? "bg-amber-500/15 text-amber-300 border-amber-500/30"
+                            : session.captureStatus === "Released"
+                              ? "bg-white/5 text-white/60 border-white/10"
+                              : "bg-rose-500/15 text-rose-300 border-rose-500/30",
+                      )}
+                    >
+                      {session.captureStatus}
+                    </div>
+                    {session.captureStatus === "Error" && !session.isSystemAuthError && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void session.retrySystemAudio();
+                        }}
+                        className="px-2 py-1 rounded-lg border text-[10px] font-semibold tracking-wide bg-white/10 hover:bg-white/20 text-white border-white/15 transition-colors"
+                      >
+                        Retry
+                      </button>
+                    )}
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <button
-                          onClick={() =>
-                            void session.handleRegenerateResponse(
-                              currentResponse?.id ?? "",
-                            )
-                          }
+                          onClick={session.toggleTranscriptExpanded}
                           disabled={
-                            !currentResponse?.id ||
-                            session.isAnswering ||
-                            session.isAnalyzing ||
-                            isCapturePhase
+                            !session.sessionInfo ||
+                            session.messages.length === 0
                           }
-                          className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-25 disabled:cursor-not-allowed text-white transition-all active:scale-95"
+                          className={cn(
+                            "p-2 rounded-xl transition-all active:scale-95 border",
+                            session.isTranscriptExpanded
+                              ? "bg-blue-500/20 text-blue-400 border-blue-500/30"
+                              : "bg-white/10 text-zinc-300 border-white/10 hover:bg-blue-500/10 hover:text-blue-400",
+                            (!session.sessionInfo ||
+                              session.messages.length === 0) &&
+                              "opacity-40 cursor-not-allowed",
+                          )}
                         >
-                          <RotateCcw size={13} />
+                          <AlignJustify size={14} />
                         </button>
                       </TooltipTrigger>
-                      <TooltipContent side="left" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
-                        Regenerate answer
+                      <TooltipContent
+                        side="bottom"
+                        className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
+                      >
+                        {session.isTranscriptExpanded
+                          ? "Hide Transcript"
+                          : "Show Transcript"}
                       </TooltipContent>
                     </Tooltip>
+
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <button
-                          onClick={session.toggleResponsesExpanded}
-                          className="w-7 h-7 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 hover:text-blue-400 text-white/50 transition-all active:scale-95"
+                          onClick={session.handleToggleMic}
+                          disabled={!session.sessionInfo}
+                          className={cn(
+                            "p-2 rounded-xl transition-all active:scale-95 border",
+                            session.isMicActive
+                              ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/30 shadow-[0_0_15px_rgba(16,185,129,0.2)]"
+                              : "bg-white/10 text-zinc-300 border-white/10 hover:bg-emerald-500/10 hover:text-emerald-400",
+                            !session.sessionInfo &&
+                              "opacity-40 cursor-not-allowed",
+                          )}
                         >
-                          {session.isResponsesExpanded ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
+                          {session.isMicConnecting ? (
+                            <Loader2 size={14} className="animate-spin" />
+                          ) : session.isMicActive ? (
+                            <Mic size={14} />
+                          ) : (
+                            <MicOff size={14} />
+                          )}
                         </button>
                       </TooltipTrigger>
-                      <TooltipContent side="left" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
-                        {session.isResponsesExpanded ? "Collapse" : "Expand"}
+                      <TooltipContent
+                        side="bottom"
+                        className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
+                      >
+                        {session.isMicActive
+                          ? "Disable Mic"
+                          : "Enable Mic (optional)"}
+                      </TooltipContent>
+                    </Tooltip>
+
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          onClick={session.handleClearTranscript}
+                          disabled={!session.sessionInfo}
+                          className={cn(
+                            "p-2 rounded-xl bg-white/10 text-zinc-300 border border-white/10 hover:bg-rose-500/20 hover:text-rose-400 hover:border-rose-500/30 transition-all active:scale-95 flex items-center justify-center",
+                            !session.sessionInfo &&
+                              "opacity-40 cursor-not-allowed",
+                          )}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent
+                        side="bottom"
+                        className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
+                      >
+                        Clear Transcript
                       </TooltipContent>
                     </Tooltip>
                   </div>
                 </div>
 
-                {session.isResponsesExpanded && session.aiResponses.length > 0 && (
-                  <div className="border-t border-white/10 max-h-120 overflow-y-auto overflow-x-auto no-scrollbar">
-                    <AnswerAreaErrorBoundary>
-                      <AnswerArea
-                        responses={[
-                          {
-                            messageId: currentResponse?.id ?? "",
-                            text: currentResponse?.text ?? "",
-                            question: currentResponse?.question ?? "",
-                            isStreaming:
-                              safeIndex === session.aiResponses.length - 1 &&
-                              (session.isAnswering || session.isAnalyzing),
-                          },
-                        ].filter((r) => r.messageId)}
-                        isStreaming={session.isAnswering || session.isAnalyzing}
-                      />
-                    </AnswerAreaErrorBoundary>
-                  </div>
-                )}
-              </>
-            );
-          })()}
-
-          {session.isResponsesExpanded &&
-            (session.isAnswering || session.isAnalyzing || isCapturePhase) &&
-            session.aiResponses.length === 0 && (
-              <div className="px-4 pb-4">
-                <div className="relative overflow-hidden rounded-xl border border-white/10 bg-white/[0.03] p-4">
-                  <span className="pointer-events-none absolute inset-0 overflow-hidden rounded-xl">
-                    <span className="absolute inset-y-[-60%] -left-[20%] w-1/3 h-[220%] bg-gradient-to-r from-transparent via-blue-400/20 to-transparent animate-[ai-sweep_1.2s_cubic-bezier(0.25,0.46,0.45,0.94)_infinite]" />
-                  </span>
-                  <div className="relative z-10 flex items-center gap-2 text-blue-400/80 mb-3">
-                    <Loader2 size={16} className="animate-spin" />
-                    <span className="text-[13px] font-medium">
-                      {isCapturePhase
-                        ? "Capturing screen..."
-                        : session.isAnalyzing
-                          ? "Analyzing screen..."
-                          : "Generating response..."}
-                    </span>
-                  </div>
-                  <div className="relative z-10 space-y-2 animate-pulse">
-                    <div className="h-2.5 w-[92%] rounded bg-white/10" />
-                    <div className="h-2.5 w-[80%] rounded bg-white/10" />
-                    <div className="h-2.5 w-[86%] rounded bg-white/10" />
+                {/* Action Bar */}
+                <div className="px-4 py-2.5 flex items-center justify-between gap-3">
+                  <ChatActionButtons
+                    onAiAnswer={() => {
+                      if (session.isTranscriptExpanded) session.toggleTranscriptExpanded();
+                      session.handleAiAnswerClick();
+                    }}
+                    onAnalyzeScreen={() => {
+                      if (session.isTranscriptExpanded) session.toggleTranscriptExpanded();
+                      void handleAnalyzeScreenCapture();
+                    }}
+                    isAnswering={session.isAnswering}
+                    isAnalyzing={
+                      session.isAnalyzing ||
+                      session.isCapturing ||
+                      isCapturePhase
+                    }
+                    canAnswer={
+                      !!session.sessionInfo && session.messages.length > 0
+                    }
+                    canAnalyze={!!session.sessionInfo}
+                    isFullscreen={true}
+                  />
+                  <div className="relative flex-1">
+                    <input
+                      className="w-full h-10 rounded-xl pl-4 pr-12 text-sm font-medium bg-white/5 border border-white/10 text-white placeholder:text-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500/50 transition-all"
+                      placeholder="Ask AI anything..."
+                      value={session.inputValue}
+                      onChange={(e) => session.setInputValue(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          void session.handleSend();
+                        }
+                      }}
+                    />
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          onClick={() => {
+                            void session.handleSend();
+                          }}
+                          disabled={
+                            !session.inputValue.trim() || !session.sessionInfo
+                          }
+                          className="absolute right-1 top-1 h-8 w-10 rounded-lg bg-blue-500 hover:bg-blue-600 disabled:bg-white/10 flex items-center justify-center text-white transition-all active:scale-95 shadow-lg shadow-blue-500/20"
+                        >
+                          <Send size={14} />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent
+                        side="top"
+                        className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
+                      >
+                        Send Message
+                      </TooltipContent>
+                    </Tooltip>
                   </div>
                 </div>
               </div>
-            )}
+
+              {/* ── Bottom Panel: Transcript Drawer OR AI Answer Panel (exclusive) ── */}
+              {session.isTranscriptExpanded ? (
+                /* ── Transcript Drawer ─────────────────────────────────────────── */
+                <div className="flex flex-col border-t border-white/10 min-h-[240px] max-h-[320px]">
+                  {/* Drawer header */}
+                  <div className="px-3 py-2 flex items-center justify-between shrink-0 border-b border-white/5 bg-white/[0.02]">
+                    <div className="flex items-center gap-2">
+                      <AlignJustify size={12} className="text-blue-400 shrink-0" />
+                      <span className="text-[11px] font-bold uppercase tracking-widest text-white/50">
+                        Transcript
+                      </span>
+                      {session.messages.length > 0 && (
+                        <span className="text-[10px] text-white/25 font-mono tabular-nums">
+                          {session.messages.length} entries
+                        </span>
+                      )}
+                    </div>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          onClick={session.toggleTranscriptExpanded}
+                          className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-zinc-400 hover:text-white transition-all active:scale-95"
+                        >
+                          <ChevronDown size={13} />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="left" className="bg-slate-900 border-white/10 text-white font-medium text-[11px]">
+                        Close Transcript
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                  {/* Scrollable transcript content — own scroll, never bleeds into answer */}
+                  <div className="flex-1 overflow-y-auto overflow-x-hidden no-scrollbar min-h-0">
+                    <SessionTranscript
+                      messages={session.messages}
+                      micInterim={session.micInterimTranscript}
+                      tabInterim={session.tabInterimTranscript}
+                      onPatchMessage={session.handlePatchTranscriptMessage}
+                    />
+                  </div>
+                </div>
+              ) : (
+                /* ── AI Answer Panel ───────────────────────────────────────────── */
+                (session.isAnswering ||
+                  session.isAnalyzing ||
+                  isCapturePhase ||
+                  session.aiResponses.length > 0) && (
+                  <div className="flex flex-col border-t border-white/10">
+                    {(() => {
+                      // Clamp the Redux index to the current React array length so we
+                      // never access aiResponses[undefined] when Redux races ahead of
+                      // the React state update.
+                      const safeIndex =
+                        session.aiResponses.length > 0
+                          ? Math.min(
+                              session.currentResponseIndex,
+                              session.aiResponses.length - 1,
+                            )
+                          : 0;
+                      const currentResponse = session.aiResponses[safeIndex];
+                      const currentQuestion = currentResponse?.question?.trim() || "";
+
+                      return (
+                        <>
+                          {/* Response nav toolbar */}
+                          <div className="px-3 py-2 flex items-center justify-between shrink-0">
+                            <div className="flex items-center gap-1">
+                              <button
+                                onClick={session.goToPrevResponse}
+                                disabled={
+                                  safeIndex === 0 ||
+                                  session.aiResponses.length === 0
+                                }
+                                className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-25 disabled:cursor-not-allowed text-white transition-all active:scale-95"
+                              >
+                                <ChevronLeft size={14} />
+                              </button>
+                              <button
+                                onClick={session.goToNextResponse}
+                                disabled={
+                                  safeIndex >= session.aiResponses.length - 1
+                                }
+                                className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-25 disabled:cursor-not-allowed text-white transition-all active:scale-95"
+                              >
+                                <ChevronRight size={14} />
+                              </button>
+                              {session.aiResponses.length > 1 && (
+                                <span className="text-[11px] text-white/40 ml-1 font-mono">
+                                  {safeIndex + 1}/{session.aiResponses.length}
+                                </span>
+                              )}
+                              {(session.isAnswering ||
+                                session.isAnalyzing ||
+                                isCapturePhase) &&
+                                session.aiResponses.length === 0 && (
+                                  <span className="flex items-center gap-1.5 ml-1 text-[11px] text-blue-400/80">
+                                    <Loader2 size={11} className="animate-spin" />
+                                    {isCapturePhase
+                                      ? "Capturing screen..."
+                                      : "Generating..."}
+                                  </span>
+                                )}
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <button
+                                    onClick={() =>
+                                      void session.handleRegenerateResponse(
+                                        currentResponse?.id ?? "",
+                                      )
+                                    }
+                                    disabled={
+                                      !currentResponse?.id ||
+                                      session.isAnswering ||
+                                      session.isAnalyzing ||
+                                      isCapturePhase
+                                    }
+                                    className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-25 disabled:cursor-not-allowed text-white transition-all active:scale-95"
+                                  >
+                                    <RotateCcw size={13} />
+                                  </button>
+                                </TooltipTrigger>
+                                <TooltipContent
+                                  side="left"
+                                  className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
+                                >
+                                  Regenerate answer
+                                </TooltipContent>
+                              </Tooltip>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <button
+                                    onClick={session.toggleResponsesExpanded}
+                                    className="w-7 h-7 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 hover:text-blue-400 text-white/50 transition-all active:scale-95"
+                                  >
+                                    {session.isResponsesExpanded ? (
+                                      <ChevronDown size={13} />
+                                    ) : (
+                                      <ChevronUp size={13} />
+                                    )}
+                                  </button>
+                                </TooltipTrigger>
+                                <TooltipContent
+                                  side="left"
+                                  className="bg-slate-900 border-white/10 text-white font-medium text-[11px]"
+                                >
+                                  {session.isResponsesExpanded
+                                    ? "Collapse"
+                                    : "Expand"}
+                                </TooltipContent>
+                              </Tooltip>
+                            </div>
+                          </div>
+
+                          {/* Expandable detected question card */}
+                          {session.isResponsesExpanded && currentQuestion && (
+                            <div className="mx-3 mb-1.5 px-3 py-2 rounded-lg bg-white/[0.04] border border-white/10 shrink-0">
+                              <div className="flex items-start gap-2">
+                                <HelpCircle size={11} className="text-blue-400 mt-0.5 shrink-0" />
+                                <p
+                                  className={cn(
+                                    "text-[11px] leading-relaxed text-white/55 flex-1 break-words",
+                                    !isQuestionExpanded && "line-clamp-2",
+                                  )}
+                                >
+                                  {currentQuestion}
+                                </p>
+                                {currentQuestion.length > 90 && (
+                                  <button
+                                    onClick={() => setIsQuestionExpanded((q) => !q)}
+                                    className="shrink-0 text-[9px] font-bold text-blue-400/60 hover:text-blue-400 transition-colors mt-0.5 uppercase tracking-wider"
+                                  >
+                                    {isQuestionExpanded ? "Less" : "More"}
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Answer content — primary scrollable area */}
+                          {session.isResponsesExpanded &&
+                            session.aiResponses.length > 0 && (
+                              <div className="border-t border-white/10 max-h-[420px] overflow-y-auto overflow-x-hidden no-scrollbar">
+                                <AnswerAreaErrorBoundary>
+                                  <AnswerArea
+                                    responses={[
+                                      {
+                                        messageId: currentResponse?.id ?? "",
+                                        text: currentResponse?.text ?? "",
+                                        question: currentResponse?.question ?? "",
+                                        isStreaming:
+                                          safeIndex ===
+                                            session.aiResponses.length - 1 &&
+                                          (session.isAnswering ||
+                                            session.isAnalyzing),
+                                      },
+                                    ].filter((r) => r.messageId)}
+                                    isStreaming={
+                                      session.isAnswering || session.isAnalyzing
+                                    }
+                                  />
+                                </AnswerAreaErrorBoundary>
+                              </div>
+                            )}
+                        </>
+                      );
+                    })()}
+
+                    {/* Loading skeleton — shown while waiting for first chunk */}
+                    {session.isResponsesExpanded &&
+                      (session.isAnswering ||
+                        session.isAnalyzing ||
+                        isCapturePhase) &&
+                      session.aiResponses.length === 0 && (
+                        <div className="px-4 pb-4">
+                          <div className="relative overflow-hidden rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                            <span className="pointer-events-none absolute inset-0 overflow-hidden rounded-xl">
+                              <span className="absolute inset-y-[-60%] -left-[20%] w-1/3 h-[220%] bg-gradient-to-r from-transparent via-blue-400/20 to-transparent animate-[ai-sweep_1.2s_cubic-bezier(0.25,0.46,0.45,0.94)_infinite]" />
+                            </span>
+                            <div className="relative z-10 flex items-center gap-2 text-blue-400/80 mb-3">
+                              <Loader2 size={16} className="animate-spin" />
+                              <span className="text-[13px] font-medium">
+                                {isCapturePhase
+                                  ? "Capturing screen..."
+                                  : session.isAnalyzing
+                                    ? "Analyzing screen..."
+                                    : "Generating response..."}
+                              </span>
+                            </div>
+                            <div className="relative z-10 space-y-2 animate-pulse">
+                              <div className="h-2.5 w-[92%] rounded bg-white/10" />
+                              <div className="h-2.5 w-[80%] rounded bg-white/10" />
+                              <div className="h-2.5 w-[86%] rounded bg-white/10" />
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                  </div>
+                )
+              )}
+            </FloatingSurface>
+          )}
         </div>
-      )}
-        </FloatingSurface>
-        )}
       </div>
-    </div>
-  </TooltipProvider>
+    </TooltipProvider>
   );
 };
 

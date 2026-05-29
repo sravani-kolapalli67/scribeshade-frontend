@@ -45,6 +45,7 @@ export interface SessionInfo {
   saveTranscript: boolean;
   isFree: boolean;
   projectIds: string[];
+  primaryProjectId: string;
 }
 
 export const DEFAULT_SESSION_INFO: SessionInfo = {
@@ -60,4 +61,5 @@ export const DEFAULT_SESSION_INFO: SessionInfo = {
   saveTranscript: true,
   isFree: false,
   projectIds: [],
+  primaryProjectId: "",
 };

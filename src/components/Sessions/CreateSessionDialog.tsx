@@ -43,6 +43,7 @@ const INITIAL_SESSION_DATA = {
   selectedResume: null as Resume | null,
   selectedDocument: null as Document | null,
   selectedProjectIds: [] as string[],
+  primaryProjectId: "",
   language: "English",
   simpleLanguage: false,
   extraContext: "",
@@ -78,6 +79,10 @@ export default function CreateSessionDialog({
   };
 
   const handleNext = () => {
+    if (step === 4 && sessionData.selectedProjectIds.length === 2 && !sessionData.primaryProjectId) {
+      toast.error("Please select a primary project.");
+      return;
+    }
     if (step < 8) {
       setStep((curr) => (curr + 1) as Step);
     }
@@ -113,6 +118,9 @@ export default function CreateSessionDialog({
     formData.append("resumeId", sessionData.selectedResume?.id || "");
     formData.append("documentId", sessionData.selectedDocument?.id || "");
     formData.append("projectIds", JSON.stringify(sessionData.selectedProjectIds));
+    if (sessionData.primaryProjectId) {
+      formData.append("primaryProjectId", sessionData.primaryProjectId);
+    }
     formData.append("language", sessionData.language);
     formData.append("simpleLanguage", sessionData.simpleLanguage.toString());
     formData.append("extraContext", sessionData.extraContext);
@@ -277,7 +285,9 @@ export default function CreateSessionDialog({
             {step === 4 && (
               <Step4_AIProjects
                 selectedProjectIds={sessionData.selectedProjectIds}
+                primaryProjectId={sessionData.primaryProjectId}
                 onChange={(ids) => updateData("selectedProjectIds", ids)}
+                onPrimaryChange={(id) => updateData("primaryProjectId", id)}
               />
             )}
 
@@ -334,7 +344,10 @@ export default function CreateSessionDialog({
                           !JOB_DESCRIPTION_REGEX.test(
                             sessionData.jobDescription,
                           )))) ||
-                    (step === 2 && !sessionData.selectedResume)
+                    (step === 2 && !sessionData.selectedResume) ||
+                    (step === 4 &&
+                      sessionData.selectedProjectIds.length === 2 &&
+                      !sessionData.primaryProjectId)
                   }
                   className="rounded-xl gap-2 h-11 px-10 bg-black dark:bg-white text-white dark:text-black font-bold shadow-lg hover:shadow-xl active:scale-95 transition-all"
                 >

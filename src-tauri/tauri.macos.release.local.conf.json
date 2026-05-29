@@ -1,0 +1,11 @@
+{
+  "bundle": {
+    "createUpdaterArtifacts": false,
+    "macOS": {
+      "infoPlist": "Info.plist",
+      "entitlements": "entitlements.plist",
+      "minimumSystemVersion": "13.0",
+      "signingIdentity": "Apple Development: Bhupendra Ranawat (RK9FG35235)"
+    }
+  }
+}

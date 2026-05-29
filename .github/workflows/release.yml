@@ -97,7 +97,7 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            args: --target universal-apple-darwin
+            args: --target universal-apple-darwin --config src-tauri/tauri.macos.release.conf.json
           - platform: windows-latest
             args: ""
           - platform: ubuntu-22.04
@@ -190,6 +190,24 @@ jobs:
           check TAURI_SIGNING_PRIVATE_KEY "$TAURI_SIGNING_PRIVATE_KEY"
           exit $fail
 
+      - name: Prepare macOS ad-hoc release config
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > src-tauri/tauri.macos.release.conf.json <<EOF
+          {
+            "bundle": {
+              "macOS": {
+                "infoPlist": "Info.plist",
+                "entitlements": "entitlements.plist",
+                "minimumSystemVersion": "13.0",
+                "signingIdentity": "-"
+              }
+            }
+          }
+          EOF
+
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -220,6 +238,18 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Verify macOS bundle identity and entitlements
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH=$(find src-tauri/target -type d -name "ScribeShade.app" | head -n 1)
+          if [ -z "${APP_PATH:-}" ]; then
+            echo "ERROR: ScribeShade.app not found in build outputs" >&2
+            exit 1
+          fi
+          bash scripts/verify-macos-app.sh "$APP_PATH"
 
       - name: Validate updater artifacts (fail-fast)
         shell: bash

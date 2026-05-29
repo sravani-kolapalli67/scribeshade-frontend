@@ -137,6 +137,9 @@ pub struct DeepgramConfig {
     pub language: String,
     pub sample_rate: u32,
     pub channels: u32,
+    /// Keyterm prompting for Nova-3 / Flux style models.
+    /// Repeated in the query string as `keyterm=...` entries.
+    pub keyterms: Vec<String>,
     /// Optional Deepgram endpointing latency in milliseconds.
     /// Leave unset for mic so the existing mic behavior stays unchanged.
     pub endpointing_ms: Option<u32>,
@@ -273,6 +276,7 @@ pub async fn run_session(
     //   interim_results=true   needed for live UI updates
     //   smart_format=true       safe with all models
     //   tag              optional, identifies the request in Deepgram dashboard
+    //   keyterm          optional prompt hint (repeated per keyterm)
     //
     // PARAMS WE DELIBERATELY DO NOT SEND (any of these can cause HTTP 400):
     //   utterance_end_ms — Deepgram requires >= 1000; we previously sent 600
@@ -302,6 +306,16 @@ pub async fn run_session(
         }
         if let Some(v) = utterance_end.as_deref() {
             query_builder.append_pair("utterance_end_ms", v);
+        }
+        // Keyterm prompting is supported by Nova-3 and Flux. We only append for
+        // Nova-3 family models to avoid legacy-model incompatibilities.
+        if model.starts_with("nova-3") {
+            for keyterm in &cfg.keyterms {
+                let term = keyterm.trim();
+                if !term.is_empty() {
+                    query_builder.append_pair("keyterm", term);
+                }
+            }
         }
         query_builder.append_pair("tag", cfg.tag).finish()
     };

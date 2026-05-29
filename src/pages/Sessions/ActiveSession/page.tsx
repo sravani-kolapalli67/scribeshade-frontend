@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useParams, useNavigate, useLocation } from "react-router-dom";
 import { useDeepgram } from "@/hooks/useDeepgram";
 import { useScreenShare } from "@/hooks/useScreenShare";
@@ -48,6 +48,7 @@ import {
   normalizeSpeakerType,
 } from "@/types/ai-answer";
 import { detectActiveQuestion } from "@/features/session/detection/activeQuestionDetector";
+import { extractInterviewKeywordsFromParts } from "@/utils/keywordExtractor";
 
 /**
  * Segments a single transcript chunk into individual interview questions.
@@ -106,7 +107,7 @@ function normalizeLineForDedup(text: string): string {
 }
 
 const NEAR_DUPLICATE_GAP_MS = 2500;
-const SYSTEM_INTERIM_COMMIT_MS = 700;
+const SYSTEM_INTERIM_COMMIT_MS = 300;
 const SYSTEM_FINAL_RECONCILE_WINDOW_MS = 8000;
 const MIN_INCLUDE_DUPLICATE_LEN = 20;
 const OVERLAY_TRANSCRIPT_MAX_MESSAGES = 60;
@@ -399,6 +400,15 @@ export default function ActiveSession() {
   );
   const patchPersistTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const connectData = location.state?.connectData || {};
+  const deepgramKeyterms = useMemo(
+    () =>
+      extractInterviewKeywordsFromParts([
+        connectData?.companyName,
+        connectData?.jobTitle,
+        connectData?.extraContext,
+      ]),
+    [connectData?.companyName, connectData?.jobTitle, connectData?.extraContext],
+  );
   // Ephemeral mode flag — false means nothing persists after the session ends.
   // Defaults to true to match backend (saveTranscription defaults to true).
   const saveTranscriptEnabled: boolean = connectData?.saveTranscript !== false;
@@ -987,6 +997,7 @@ export default function ActiveSession() {
     apiKey: import.meta.env.VITE_DEEPGRAM_API_KEY || "",
     model: "nova-3",
     language: getLanguageCode(selectedLanguage),
+    keyterms: deepgramKeyterms,
     onTranscript: onUserTranscript,
   });
 
@@ -1015,6 +1026,7 @@ export default function ActiveSession() {
     apiKey: import.meta.env.VITE_DEEPGRAM_API_KEY || "",
     model: "nova-3",
     language: getLanguageCode(selectedLanguage),
+    keyterms: deepgramKeyterms,
     onTranscript: onInterviewerTranscript,
     inputStream: streamHasAudio ? stream : null,
   });
@@ -1182,6 +1194,8 @@ export default function ActiveSession() {
           await invoke("start_mic_transcription", {
             language: getLanguageCode(selectedLanguage),
             model: "nova-3",
+            keyterms: deepgramKeyterms,
+            apiKey: import.meta.env.VITE_DEEPGRAM_API_KEY || "",
           });
         } catch (e) {
           toast.error(`Mic: ${String(e)}`);
@@ -1196,7 +1210,7 @@ export default function ActiveSession() {
         micTranscription.startTranscription();
       }
     }
-  }, [selectedLanguage, tauriMicActive, tauriMicConnecting, micTranscription]);
+  }, [deepgramKeyterms, selectedLanguage, tauriMicActive, tauriMicConnecting, micTranscription]);
 
   const {
     aiChat,
