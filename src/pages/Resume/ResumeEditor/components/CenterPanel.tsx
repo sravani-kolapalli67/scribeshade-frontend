@@ -16,6 +16,7 @@ import { ENDPOINTS } from "@/lib/endpoints";
 import { postCreditedAi, createIdempotencyKey, InsufficientCreditsError } from "@/lib/creditedAi";
 import { toast } from "sonner";
 import type { SectionQuality } from "@/store/resumeBuilderSlice";
+import type { ResumeFields } from "@/store/resumeBuilderSlice";
 import { Sparkles, Plus, Loader2 } from "lucide-react";
 import { SECTION_LABEL, AI_ENHANCEABLE, sectionAIText, AI_ENHANCE_FALLBACK_COST, getSectionIcon } from "../types";
 import { SectionEditorFields } from "./SectionEditorFields";
@@ -116,7 +117,11 @@ export function CenterPanel() {
       }
       const token = await getToken();
       const { data, creditsUsed, creditsRemaining, cached } =
-        await postCreditedAi<{ enhancedText: string; sectionId: string }>(
+        await postCreditedAi<{
+          enhancedText: string;
+          enhancedFields?: Partial<ResumeFields>;
+          sectionId: string;
+        }>(
           ENDPOINTS.resumeBuilderEnhanceSection(),
           {
             userId,
@@ -130,7 +135,11 @@ export function CenterPanel() {
           },
           { token, idempotencyKey },
         );
-      dispatch(setAiSuggestion({ sectionId: activeSection, suggestion: data.enhancedText }));
+      dispatch(setAiSuggestion({
+        sectionId: activeSection,
+        suggestion: data.enhancedText,
+        suggestionFields: data.enhancedFields,
+      }));
       // Instantly update badge via optimistic write; no extra HTTP request needed.
       if (!isNaN(creditsRemaining)) setOptimisticBalance(creditsRemaining);
       // Surface the actual charge to the user. `cached` means a free replay
@@ -168,7 +177,7 @@ export function CenterPanel() {
     } finally {
       dispatch(setIsEnhancing(false));
     }
-  }, [dispatch, getToken, clerkUserId, activeSection, fields, isEnhancing, jobDescription, jobTitle, refreshBalance]);
+  }, [dispatch, getToken, clerkUserId, activeSection, fields, isEnhancing, jobDescription, jobTitle, quality, refreshBalance]);
 
   return (
     <main className="flex-1 overflow-y-auto bg-slate-50/60">
@@ -252,4 +261,3 @@ export function CenterPanel() {
 }
 
 // ─── CenterPanel — ATS Score ─────────────────────────────────────────────────
-

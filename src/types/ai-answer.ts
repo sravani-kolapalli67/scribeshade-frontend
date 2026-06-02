@@ -20,6 +20,29 @@ export interface ActiveQuestionDetectionPayload {
   referencedHistoryTurnId?: string;
 }
 
+export interface QuestionMetaCorrection {
+  from: string;
+  to: string;
+  reason: string;
+}
+
+export interface QuestionMeta {
+  displayQuestion: string;
+  intent: string;
+  confidence: number;
+  topic: string;
+  isFollowUp: boolean;
+  shouldAnswer: boolean;
+  source: string;
+  corrections: QuestionMetaCorrection[];
+}
+
+export interface PreviousAIAnswerMemory {
+  question?: string;
+  answer: string;
+  codeBlocks?: string[];
+}
+
 export interface AIAnswerRequestPayload {
   transcript: string;
   requestId?: string;
@@ -29,6 +52,7 @@ export interface AIAnswerRequestPayload {
   recentTranscriptWindow?: string[];
   speakerSeparatedTranscript?: AIAnswerSpeakerEntry[];
   previousAiAnswer?: string;
+  previousAiAnswers?: PreviousAIAnswerMemory[];
   previousCodeBlocks?: string[];
   selectedAnswerId?: string;
   selectedAnswerQuestion?: string;
@@ -50,8 +74,10 @@ export interface AIAnswerRequestPayload {
 }
 
 export const AI_ANSWER_LIMITS = {
-  recentTranscriptWindowMax: 15,
+  recentTranscriptWindowMax: 60,
   previousAiAnswerMaxChars: 1000,
+  previousAiAnswersMax: 2,
+  previousAiAnswerQuestionMaxChars: 500,
   previousCodeBlocksMax: 2,
   previousCodeBlockMaxChars: 1500,
   selectedAnswerQuestionMaxChars: 500,
@@ -84,6 +110,31 @@ export function sanitizeAIAnswerPayload(
   const previousAiAnswer = payload.previousAiAnswer
     ? payload.previousAiAnswer.slice(0, AI_ANSWER_LIMITS.previousAiAnswerMaxChars)
     : undefined;
+  const previousAiAnswers = (payload.previousAiAnswers || [])
+    .slice(-AI_ANSWER_LIMITS.previousAiAnswersMax)
+    .map((entry) => ({
+      ...(entry.question
+        ? {
+            question: entry.question
+              .slice(0, AI_ANSWER_LIMITS.previousAiAnswerQuestionMaxChars)
+              .trim(),
+          }
+        : {}),
+      answer: (entry.answer || "")
+        .slice(0, AI_ANSWER_LIMITS.previousAiAnswerMaxChars)
+        .trim(),
+      ...(Array.isArray(entry.codeBlocks)
+        ? {
+            codeBlocks: entry.codeBlocks
+              .slice(0, AI_ANSWER_LIMITS.previousCodeBlocksMax)
+              .map((block) =>
+                block.slice(0, AI_ANSWER_LIMITS.previousCodeBlockMaxChars),
+              )
+              .filter((block) => block.trim().length > 0),
+          }
+        : {}),
+    }))
+    .filter((entry) => entry.answer.length > 0);
   const previousCodeBlocks = (payload.previousCodeBlocks || [])
     .slice(0, AI_ANSWER_LIMITS.previousCodeBlocksMax)
     .map((block) => block.slice(0, AI_ANSWER_LIMITS.previousCodeBlockMaxChars))
@@ -144,6 +195,7 @@ export function sanitizeAIAnswerPayload(
       ? { speakerSeparatedTranscript }
       : {}),
     ...(previousAiAnswer ? { previousAiAnswer } : {}),
+    ...(previousAiAnswers.length > 0 ? { previousAiAnswers } : {}),
     ...(previousCodeBlocks.length > 0 ? { previousCodeBlocks } : {}),
     ...(payload.selectedAnswerId ? { selectedAnswerId: payload.selectedAnswerId } : {}),
     ...(selectedAnswerQuestion ? { selectedAnswerQuestion } : {}),

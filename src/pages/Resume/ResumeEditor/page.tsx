@@ -38,6 +38,11 @@ import { InjectKeywordsPanel } from "./components/InjectKeywordsPanel";
 import { KeywordMatchPanel } from "./components/KeywordMatchPanel";
 import { AIToolsStrip } from "./components/AIToolsStrip";
 import type { ToolId } from "./components/AIToolsStrip";
+import {
+  readPersistedSectionValidation,
+  stripPersistedSectionValidation,
+  withPersistedSectionValidation,
+} from "./sectionQualityPersistence";
 
 // ─── PAGE ROOT ────────────────────────────────────────────────────────────────
 
@@ -71,6 +76,7 @@ export default function ResumeEditor() {
   const jobDescription  = useSelector((s: RootState) => s.resumeBuilder.jobDescription);
   const jobTitle        = useSelector((s: RootState) => s.resumeBuilder.jobTitle);
   const company         = useSelector((s: RootState) => s.resumeBuilder.company);
+  const sectionValidation = useSelector((s: RootState) => s.resumeBuilder.sectionValidation);
   const { getToken }    = useAuth();
 
   const [templateCode, setTemplateCode] = useState<string>("");
@@ -108,7 +114,12 @@ export default function ResumeEditor() {
       (!config.fields || Object.keys(config.fields).length === 0);
 
     const initialize = (resolvedConfig: typeof config) => {
-      const { title, fields: parsedFields } = configToFields(resolvedConfig);
+      const persistedSectionValidation = readPersistedSectionValidation(resolvedConfig);
+      const cleanConfig = {
+        ...resolvedConfig,
+        fields: stripPersistedSectionValidation(resolvedConfig.fields),
+      };
+      const { title, fields: parsedFields } = configToFields(cleanConfig);
       const rawConfigTitle = resolvedConfig.resumeTitle || resolvedConfig.title || title;
       const finalTitle = (!rawConfigTitle || rawConfigTitle === "My Resume")
         ? smartTitle(parsedFields, title)
@@ -123,6 +134,7 @@ export default function ResumeEditor() {
         jobDescription: resolvedConfig.jobDescription ?? "",
         jobTitle:       resolvedConfig.jobTitle ?? "",
         company:        resolvedConfig.company ?? "",
+        sectionValidation: persistedSectionValidation,
       }));
       if (resolvedConfig.resumeId) dispatch(setSavedResumeId(resolvedConfig.resumeId));
 
@@ -156,6 +168,7 @@ export default function ResumeEditor() {
         .then((data) => initialize({
           ...config,
           fields:         data.fields ?? {},
+          sectionValidation: readPersistedSectionValidation(data) ?? readPersistedSectionValidation(config),
           templateId:     data.templateId ?? config.templateId,
           sections:       data.sections ?? config.sections,
           resumeTitle:    data.title ?? config.resumeTitle,
@@ -194,13 +207,14 @@ export default function ResumeEditor() {
       dispatch(setAutoSaveStatus("saving"));
       try {
         const token = await getToken();
+        const fieldsForSave = withPersistedSectionValidation(fields, sectionValidation);
         const res = await fetch(ENDPOINTS.resumeBuilderSave(), {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
           body: JSON.stringify({
             userId: localStorage.getItem("userId"),
             resumeId: savedResumeId ?? null,
-            title: resumeTitle, templateId, fields, sections,
+            title: resumeTitle, templateId, fields: fieldsForSave, sections,
             jobDescription, jobTitle, company, status: "draft",
           }),
         });
@@ -228,6 +242,7 @@ export default function ResumeEditor() {
         resumeTitle,
         title: resumeTitle,
         fields,
+        sectionValidation,
         sections,
         templateId,
         jobDescription,
@@ -243,6 +258,7 @@ export default function ResumeEditor() {
     savedResumeId,
     resumeTitle,
     fields,
+    sectionValidation,
     sections,
     templateId,
     jobDescription,

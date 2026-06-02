@@ -23,6 +23,7 @@ import { useSessionHeartbeat } from "@/hooks/useSessionHeartbeat";
 import { useSessionEvents } from "@/hooks/useSessionEvents";
 import { createAudioSessionController } from "@/features/session/audio/audioSessionController";
 import { extractInterviewKeywordsFromParts } from "@/utils/keywordExtractor";
+import { normalizeSttTranscript } from "@/features/session/transcript/stt-normalizer";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
   initSession,
@@ -57,6 +58,7 @@ import {
 } from "@/features/session/selectors/floatingSessionSelectors";
 import { isScenarioBased, extractContextFromMessages, buildDynamicTranscriptWindow } from "@/semantic";
 import { detectActiveQuestion } from "@/features/session/detection/activeQuestionDetector";
+import { buildAdaptiveAiContext } from "@/features/session/context/adaptiveAiContext";
 import {
   createSessionOperationRegistry,
   createSessionTransitionGuard,
@@ -65,7 +67,6 @@ import {
 import {
   type AIAnswerRequestPayload,
   extractCodeBlocks,
-  normalizeSpeakerType,
 } from "@/types/ai-answer";
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "";
@@ -151,7 +152,6 @@ function getLanguageCode(lang: string): string {
 // Fallback window (ms) used only when no AI answer has been given yet in this
 // session. Covers a multi-question interviewer monologue at the very start.
 const FIRST_ANSWER_WINDOW_MS = 120_000;
-const ACTIVE_QUESTION_DEBOUNCE_MS = 600;
 const ACTIVE_QUESTION_CONFIDENCE_THRESHOLD = 0.58;
 
 // When regenerate is clicked we intentionally wait a bit so additional
@@ -494,10 +494,15 @@ function resolveQuestionFromContext(
   _lastMessage: { text: string; sender: string } | null,
   lastAnswerTimestamp: number | null,
 ): { question: string; source: string } | null {
+  const normalizedMessages = allMessages.map((message) => ({
+    ...message,
+    text: normalizeSttTranscript(message.text || ""),
+  }));
+  const normalizedLiveInterim = normalizeSttTranscript(liveInterimText || "");
   // Priority 1: Live interim text from system audio
-  if (liveInterimText?.trim()) {
+  if (normalizedLiveInterim?.trim()) {
     // Apply intent detection to clean up speech recognition artifacts
-    const intent = detectIntent(liveInterimText.trim());
+    const intent = detectIntent(normalizedLiveInterim.trim());
     console.log(
       "[resolveQuestionFromContext] Intent detection applied to live_interim:",
       {
@@ -511,7 +516,7 @@ function resolveQuestionFromContext(
 
   // Priority 1.5: Scenario-based context preservation using new semantic engine
   // Check if recent transcript contains scenario markers and extract full context block
-  const recentFallback = allMessages
+  const recentFallback = normalizedMessages
     .filter((m) => m.text?.trim())
     .slice(-FALLBACK_MSG_COUNT);
 
@@ -562,7 +567,7 @@ function resolveQuestionFromContext(
   // Speech-to-text delivers each sentence as a separate Redux message, so a
   // two-question block produces two entries. Joining them reconstructs the
   // full question block without leaking previously-answered content.
-  const recentInterviewer = allMessages
+  const recentInterviewer = normalizedMessages
     .filter((m) => m.sender === "Interviewer" && m.timestamp > cutoff && m.text?.trim())
     .map((m) => ({ text: m.text.trim(), timestamp: m.timestamp }));
   const mergedInterviewer = dedupeAndMergeConsecutiveChunks(recentInterviewer);
@@ -585,7 +590,7 @@ function resolveQuestionFromContext(
   }
 
   // Priority 3: Join all User messages that arrived after the cutoff.
-  const recentUser = allMessages
+  const recentUser = normalizedMessages
     .filter((m) => m.sender === "User" && m.timestamp > cutoff && m.text?.trim())
     .map((m) => ({ text: m.text.trim(), timestamp: m.timestamp }));
   const mergedUser = dedupeAndMergeConsecutiveChunks(recentUser);
@@ -1083,7 +1088,7 @@ export function useFloatingSession() {
     ): CommitOutcome | void => {
       if (!rawText.trim()) return { status: "empty", reason: "empty_input" };
 
-      let cleanText = deduplicatePhrases(rawText);
+      let cleanText = deduplicatePhrases(normalizeSttTranscript(rawText));
       const lastSameSenderMsg = [...messagesRef.current].reverse().find((m) => m.sender === sender);
       if (lastSameSenderMsg) {
         cleanText = removeOverlap(lastSameSenderMsg.text, cleanText);
@@ -1245,10 +1250,11 @@ export function useFloatingSession() {
     (text: string, isFinal: boolean): CommitOutcome | void => {
       const source: SttSourceKey = "mic";
       const sourceState = sttSourceStateRef.current[source];
+      const normalizedText = normalizeSttTranscript(text || "");
       if (isFinal) {
-        return reconcileFinalForSource(source, text);
+        return reconcileFinalForSource(source, normalizedText);
       }
-      const interim = (text || "").trim();
+      const interim = normalizedText.trim();
       if (!interim) return;
       sourceState.latestInterimText = interim;
       sourceState.latestInterimAt = Date.now();
@@ -1261,10 +1267,11 @@ export function useFloatingSession() {
     (text: string, isFinal: boolean): CommitOutcome | void => {
       const source: SttSourceKey = "system";
       const sourceState = sttSourceStateRef.current[source];
+      const normalizedText = normalizeSttTranscript(text || "");
       if (isFinal) {
-        return reconcileFinalForSource(source, text);
+        return reconcileFinalForSource(source, normalizedText);
       }
-      const interim = (text || "").trim();
+      const interim = normalizedText.trim();
       if (!interim) return;
       sourceState.latestInterimText = interim;
       sourceState.latestInterimAt = Date.now();
@@ -1569,12 +1576,13 @@ export function useFloatingSession() {
 
     listen<{ text: string; is_final: boolean }>("stt:system-audio", (event) => {
       const { text, is_final } = event.payload;
+      const normalizedText = normalizeSttTranscript(text || "");
       const now = Date.now();
       const health = systemHealthRef.current;
       health.lastSystemEventAt = now;
       if (is_final) {
         health.lastSystemFinalAt = now;
-        const trimmed = text.trim();
+        const trimmed = normalizedText.trim();
         if (!trimmed) {
           if (!health.emptyFinalWindowStartAt || now - health.emptyFinalWindowStartAt > SYSTEM_EMPTY_FINAL_STORM_WINDOW_MS) {
             health.emptyFinalWindowStartAt = now;
@@ -1600,7 +1608,7 @@ export function useFloatingSession() {
         }
       } else {
         health.lastSystemInterimAt = now;
-        if (text.trim().length > 0) {
+        if (normalizedText.trim().length > 0) {
           health.lastMeaningfulSystemTranscriptAt = now;
           health.emptyFinalStreak = 0;
           health.emptyFinalWindowStartAt = 0;
@@ -1612,10 +1620,10 @@ export function useFloatingSession() {
       }
       if (is_final) {
         setTabInterimTranscript("");
-        handleInterviewerTranscriptRef.current(text, true);
+        handleInterviewerTranscriptRef.current(normalizedText, true);
       } else {
-        setTabInterimTranscript(text);
-        handleInterviewerTranscriptRef.current(text, false);
+        setTabInterimTranscript(normalizedText);
+        handleInterviewerTranscriptRef.current(normalizedText, false);
       }
     }).then((fn) => { unlistenTx = fn; }).catch(() => {});
 
@@ -1829,12 +1837,13 @@ export function useFloatingSession() {
 
     listen<{ text: string; is_final: boolean }>("stt:mic", (event) => {
       const { text, is_final } = event.payload;
+      const normalizedText = normalizeSttTranscript(text || "");
       if (is_final) {
         setMicInterimTranscript("");
-        handleUserTranscriptRef.current(text, true);
+        handleUserTranscriptRef.current(normalizedText, true);
       } else {
-        setMicInterimTranscript(text);
-        handleUserTranscriptRef.current(text, false);
+        setMicInterimTranscript(normalizedText);
+        handleUserTranscriptRef.current(normalizedText, false);
       }
     }).then((fn) => { unlistenTx = fn; }).catch(() => {});
 
@@ -2055,7 +2064,8 @@ export function useFloatingSession() {
     transitionGuardRef.current.transition("answering", "ai_answer_dispatch", info.sessionId);
     try {
 
-    // 1) Apply semantic debounce before locking active question snapshot.
+    const contextBuildStartedAt = Date.now();
+    // 1) Build immediate snapshot (zero wait).
     const preDebounceMessages = [...messagesRef.current];
     const preDebounceDetection = detectActiveQuestion({
       liveInterimText: tabInterimTranscript.trim(),
@@ -2072,10 +2082,7 @@ export function useFloatingSession() {
           : Date.now() - FIRST_ANSWER_WINDOW_MS,
       selectedAnswerQuestion: "",
     });
-    const initialSignature = `${messagesRef.current.length}:${tabInterimTranscript.trim()}`;
-    await new Promise((r) => setTimeout(r, ACTIVE_QUESTION_DEBOUNCE_MS));
-    const afterDebounceSignature = `${messagesRef.current.length}:${tabInterimTranscript.trim()}`;
-    const evolving = initialSignature !== afterDebounceSignature;
+    const evolving = false;
 
     // 2) Freeze immutable snapshot used for this request only.
     const snapshotTimestamp = Date.now();
@@ -2129,6 +2136,14 @@ export function useFloatingSession() {
       detection.confidenceScore < ACTIVE_QUESTION_CONFIDENCE_THRESHOLD;
 
     if (failedConfidenceGate) {
+      const interviewerPreferredQuestion = [
+        detection.source === "transcript_history"
+          ? detection.cleanedQuestion.trim()
+          : "",
+        preDebounceDetection.source === "transcript_history"
+          ? preDebounceDetection.cleanedQuestion.trim()
+          : "",
+      ].find((candidate) => candidate && !isFillerPhrase(candidate));
       const fallbackResolved = resolveQuestionFromContext(
         liveInterviewerTextSnapshot,
         msgsSnapshot,
@@ -2136,6 +2151,7 @@ export function useFloatingSession() {
         lastAnswerTimestampRef.current,
       );
       const fallbackQuestion = (
+        interviewerPreferredQuestion ||
         fallbackResolved?.question?.trim() ||
         preDebounceDetection.cleanedQuestion.trim() ||
         question
@@ -2245,41 +2261,26 @@ export function useFloatingSession() {
           !!m.text?.trim() &&
           typeof m.timestamp === "number",
       )
-      .slice(-30)
       .map((m) => ({
         sender: m.sender as "User" | "Interviewer",
         text: m.text.trim(),
         timestamp: m.timestamp,
       }));
-    const dedupedPayloadEntries = dedupeAndMergeTranscriptEntries(recentMessages).slice(-15);
-    const recentTranscriptWindow = dedupedPayloadEntries.map(
-      (m) => `[${m.sender}]: ${m.text.trim()}`,
-    );
-    const speakerSeparatedTranscript = dedupedPayloadEntries.map((m) => ({
-      speakerType: normalizeSpeakerType(m.sender),
-      content: m.text.trim(),
-      ...(typeof m.timestamp === "number" ? { timestamp: m.timestamp } : {}),
-    }));
-    const latestAiAnswer = [...aiChat]
-      .reverse()
-      .find((m) => m.sender === "AI" && m.text?.trim())?.text
-      ?.trim();
-
-    const recentAiAnswersForContext = [...aiChat]
-      .filter((m) => m.sender === "AI" && m.text?.trim())
-      .slice(-2);
-    const contextPreamble =
-      recentAiAnswersForContext.length > 0
-        ? recentAiAnswersForContext
-            .map((m, i) => {
-              const q = m.question?.trim() || "";
-              const a = m.text?.trim() ?? "";
-              return q
-                ? `[Prior answer ${i + 1}]\nQ: ${q}\nA: ${a.slice(0, 600)}${a.length > 600 ? "..." : ""}`
-                : `[Prior answer ${i + 1}]\n${a.slice(0, 600)}${a.length > 600 ? "..." : ""}`;
-            })
-            .join("\n\n")
-        : "";
+    const adaptiveContext = buildAdaptiveAiContext({
+      transcriptMessages: recentMessages,
+      aiMessages: aiChat
+        .filter((m) => m.sender === "AI")
+        .map((m) => ({
+          sender: "AI" as const,
+          text: m.text,
+          question: m.question,
+        })),
+      fallbackQuestion: question,
+      liveInterimQuestion: liveInterviewerTextSnapshot,
+      cutoffTimestamp: lastAnswerTimestampRef.current,
+    });
+    const recentTranscriptWindow = adaptiveContext.recentTranscriptWindow;
+    const speakerSeparatedTranscript = adaptiveContext.speakerSeparatedTranscript;
 
     const safeResponseIndex =
       aiResponses.length > 0
@@ -2300,10 +2301,12 @@ export function useFloatingSession() {
     const followupReconstruction = reconstructWeakFollowupQuestion(
       recentTranscriptWindow,
       speakerSeparatedTranscript,
-      question,
+      adaptiveContext.currentQuestion || question,
     );
     const effectiveCurrentQuestion =
-      followupReconstruction.reconstructedCurrentQuestion || question;
+      followupReconstruction.reconstructedCurrentQuestion ||
+      adaptiveContext.currentQuestion ||
+      question;
     console.log("[useFloatingSession] followupQuestionReconstruction", {
       originalCurrentQuestion: question,
       weakFollowupDetected: followupReconstruction.weakFollowupDetected,
@@ -2316,20 +2319,22 @@ export function useFloatingSession() {
       recentTranscriptWindow.length > 0
         ? recentTranscriptWindow.join("\n")
         : question;
-    const enrichedTranscript = contextPreamble
-      ? `${contextPreamble}\n\n[Current interview transcript]\n${rawTranscript}`
-      : rawTranscript;
 
       const payload: AIAnswerRequestPayload = {
       requestId: opRequestId,
       sessionId: info.sessionId,
-      transcript: enrichedTranscript,
+      transcript: rawTranscript,
       currentQuestion: effectiveCurrentQuestion,
       recentTranscriptWindow,
       speakerSeparatedTranscript,
-      ...(latestAiAnswer ? { previousAiAnswer: latestAiAnswer } : {}),
-      ...(latestAiAnswer
-        ? { previousCodeBlocks: extractCodeBlocks(latestAiAnswer) }
+      ...(adaptiveContext.previousAiAnswers.length > 0
+        ? { previousAiAnswers: adaptiveContext.previousAiAnswers }
+        : {}),
+      ...(adaptiveContext.previousAiAnswer
+        ? { previousAiAnswer: adaptiveContext.previousAiAnswer }
+        : {}),
+      ...(adaptiveContext.previousCodeBlocks?.length
+        ? { previousCodeBlocks: adaptiveContext.previousCodeBlocks }
         : {}),
       ...(selectedAiMessage?.id ? { selectedAnswerId: selectedAiMessage.id } : {}),
       ...(selectedAnswerQuestion ? { selectedAnswerQuestion } : {}),
@@ -2339,7 +2344,7 @@ export function useFloatingSession() {
         : {}),
       ...(selectedAnswerTopic ? { selectedAnswerTopic } : {}),
       activeQuestionDetection: {
-        activeQuestion: question,
+        activeQuestion: adaptiveContext.currentQuestion || question,
         cleanedQuestion: effectiveCurrentQuestion,
         isFollowUp: effectiveDetection.isFollowUp,
         topicChanged: effectiveDetection.topicChanged,
@@ -2352,6 +2357,14 @@ export function useFloatingSession() {
       answerMode: "auto",
       sourcePlatform: "tauri",
     };
+
+      console.log("[AI Answer][Timing][FE]", {
+        sessionId: info.sessionId,
+        requestId: payload.requestId,
+        buildContextMs: Date.now() - contextBuildStartedAt,
+        windowSizeUsed: adaptiveContext.windowSizeUsed,
+        expandedReason: adaptiveContext.expandedReason,
+      });
 
       console.log("[AI Answer][Request] start", {
         sessionId: info.sessionId,
@@ -2437,32 +2450,133 @@ export function useFloatingSession() {
       const liveInterviewerText = tabInterimTranscript.trim();
       const resolved = resolveQuestionFromContext(liveInterviewerText, msgs, lastMessage, lastAnswerTimestampRef.current);
       const contextQuestion = resolved?.question || "(no context)";
+      const adaptiveContext = buildAdaptiveAiContext({
+        transcriptMessages: msgs
+          .filter(
+            (m) =>
+              (m.sender === "User" || m.sender === "Interviewer") &&
+              !!m.text?.trim() &&
+              typeof m.timestamp === "number",
+          )
+          .map((m) => ({
+            sender: m.sender as "User" | "Interviewer",
+            text: m.text.trim(),
+            timestamp: m.timestamp,
+          })),
+        aiMessages: aiChat
+          .filter((m) => m.sender === "AI")
+          .map((m) => ({
+            sender: "AI" as const,
+            text: m.text,
+            question: m.question,
+          })),
+        fallbackQuestion: contextQuestion,
+        liveInterimQuestion: liveInterviewerText,
+        cutoffTimestamp: lastAnswerTimestampRef.current,
+      });
 
       console.log("[useFloatingSession] handleAnalyzeScreenClick: Initiating handleAnalyzeScreen with:", {
         sessionId: info.sessionId,
         screenshotSize: screenshotBlob?.size,
         contextQuestion,
         model: selectedModelRef.current,
+        windowSizeUsed: adaptiveContext.windowSizeUsed,
+        expandedReason: adaptiveContext.expandedReason,
       });
 
       isAnalyzeEmittingRef.current = true;
       setIsCapturing(true);
       try {
-        await handleAnalyzeScreen(info.sessionId, screenshotBlob || null, selectedModelRef.current);
+        await handleAnalyzeScreen(
+          info.sessionId,
+          screenshotBlob || null,
+          selectedModelRef.current,
+          {
+            transcript:
+              adaptiveContext.recentTranscriptWindow.length > 0
+                ? adaptiveContext.recentTranscriptWindow.join("\n")
+                : contextQuestion,
+            currentQuestion: adaptiveContext.currentQuestion || contextQuestion,
+            recentTranscriptWindow: adaptiveContext.recentTranscriptWindow,
+            speakerSeparatedTranscript: adaptiveContext.speakerSeparatedTranscript,
+            ...(adaptiveContext.previousAiAnswers.length > 0
+              ? { previousAiAnswers: adaptiveContext.previousAiAnswers }
+              : {}),
+            ...(adaptiveContext.previousAiAnswer
+              ? { previousAiAnswer: adaptiveContext.previousAiAnswer }
+              : {}),
+            ...(adaptiveContext.previousCodeBlocks?.length
+              ? { previousCodeBlocks: adaptiveContext.previousCodeBlocks }
+              : {}),
+            activeQuestionDetection: {
+              activeQuestion: adaptiveContext.currentQuestion || contextQuestion,
+              cleanedQuestion: adaptiveContext.currentQuestion || contextQuestion,
+              isFollowUp: false,
+              topicChanged: false,
+              confidenceScore: 1,
+              ignoredNoise: false,
+            },
+            sourcePlatform: "tauri",
+            answerMode: "auto",
+          },
+        );
       } finally {
         isAnalyzeEmittingRef.current = false;
         setIsCapturing(false);
       }
     },
-    [handleAnalyzeScreen, tabInterimTranscript, lastMessage],
+    [handleAnalyzeScreen, tabInterimTranscript, lastMessage, aiChat],
   );
 
   const handleSend = useCallback(async () => {
     if (!inputValue.trim() || !sessionInfoRef.current) return;
     const query = inputValue.trim();
     setInputValue("");
-    handleCustomQuery(sessionInfoRef.current.sessionId, query, selectedModelRef.current);
-  }, [inputValue, handleCustomQuery]);
+    const adaptiveContext = buildAdaptiveAiContext({
+      transcriptMessages: messagesRef.current
+        .filter(
+          (m) =>
+            (m.sender === "User" || m.sender === "Interviewer") &&
+            !!m.text?.trim() &&
+            typeof m.timestamp === "number",
+        )
+        .map((m) => ({
+          sender: m.sender as "User" | "Interviewer",
+          text: m.text.trim(),
+          timestamp: m.timestamp,
+        })),
+      aiMessages: aiChat
+        .filter((m) => m.sender === "AI")
+        .map((m) => ({
+          sender: "AI" as const,
+          text: m.text,
+          question: m.question,
+        })),
+      fallbackQuestion: query,
+      liveInterimQuestion: tabInterimTranscript.trim(),
+      cutoffTimestamp: lastAnswerTimestampRef.current,
+    });
+    handleCustomQuery(sessionInfoRef.current.sessionId, query, selectedModelRef.current, {
+      transcript:
+        adaptiveContext.recentTranscriptWindow.length > 0
+          ? adaptiveContext.recentTranscriptWindow.join("\n")
+          : query,
+      currentQuestion: query,
+      recentTranscriptWindow: adaptiveContext.recentTranscriptWindow,
+      speakerSeparatedTranscript: adaptiveContext.speakerSeparatedTranscript,
+      ...(adaptiveContext.previousAiAnswers.length > 0
+        ? { previousAiAnswers: adaptiveContext.previousAiAnswers }
+        : {}),
+      ...(adaptiveContext.previousAiAnswer
+        ? { previousAiAnswer: adaptiveContext.previousAiAnswer }
+        : {}),
+      ...(adaptiveContext.previousCodeBlocks?.length
+        ? { previousCodeBlocks: adaptiveContext.previousCodeBlocks }
+        : {}),
+      sourcePlatform: "tauri",
+      answerMode: "auto",
+    });
+  }, [inputValue, handleCustomQuery, aiChat, tabInterimTranscript]);
 
   const handleRegenerateResponse = useCallback(
     async (messageId: string) => {

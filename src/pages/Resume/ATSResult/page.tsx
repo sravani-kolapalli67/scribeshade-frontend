@@ -1,6 +1,8 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import { useLocation, Link, useNavigate } from "react-router-dom";
+import { useAuth } from "@clerk/clerk-react";
 import {
   AlertCircle,
   Lightbulb,
@@ -8,6 +10,8 @@ import {
   ShieldCheck,
   Check,
   X,
+  Loader2,
+  FileText,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -29,12 +33,140 @@ interface ATSAnalysisResult {
   suggestions: string[];
   filename?: string;
   jobTitle?: string;
+  resumeId?: string;
+}
+
+interface PendingATSAnalysis {
+  resumeId: string;
+  filename?: string;
+  source?: "uploaded" | "builder";
+  userId?: string;
 }
 
 export default function ATSResult() {
   const location = useLocation();
   const navigate = useNavigate();
-  const analysis = location.state?.analysis as ATSAnalysisResult;
+  const { getToken } = useAuth();
+  const initialAnalysis = location.state?.analysis as ATSAnalysisResult | undefined;
+  const pendingAnalysis = location.state?.pendingAnalysis as PendingATSAnalysis | undefined;
+  const [analysis, setAnalysis] = useState<ATSAnalysisResult | undefined>(initialAnalysis);
+  const [isGenerating, setIsGenerating] = useState(Boolean(!initialAnalysis && pendingAnalysis));
+  const [error, setError] = useState<string | null>(null);
+  const startedAnalysisIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (analysis || !pendingAnalysis) return;
+    if (startedAnalysisIdRef.current === pendingAnalysis.resumeId) return;
+    startedAnalysisIdRef.current = pendingAnalysis.resumeId;
+    const pending = pendingAnalysis;
+
+    async function generateAtsScore() {
+      setIsGenerating(true);
+      setError(null);
+
+      try {
+        const isBuilderResume = pending.source === "builder";
+        const token = isBuilderResume ? await getToken() : null;
+        const response = await fetch(
+          isBuilderResume
+            ? `${import.meta.env.VITE_BACKEND_URL}/api/resume/builder/ats-score`
+            : `${import.meta.env.VITE_BACKEND_URL}/api/resume/ats-score`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify({ resumeId: pending.resumeId }),
+          },
+        );
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || "Failed to analyze resume");
+        }
+
+        const result = {
+          ...(isBuilderResume ? data.data : data),
+          filename: pending.filename,
+          resumeId: pending.resumeId,
+        } as ATSAnalysisResult;
+
+        setAnalysis(result);
+        navigate("/resume/ats-result", {
+          replace: true,
+          state: { analysis: result },
+        });
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to analyze resume");
+      } finally {
+        setIsGenerating(false);
+      }
+    }
+
+    generateAtsScore();
+  }, [analysis, getToken, navigate, pendingAnalysis]);
+
+  if (isGenerating) {
+    return (
+      <div className="min-h-[560px] flex items-center justify-center px-4">
+        <Card className="w-full max-w-2xl rounded-2xl border-border/60 shadow-sm">
+          <CardContent className="px-8 py-10">
+            <div className="flex flex-col items-center text-center gap-6">
+              <div className="relative">
+                <div className="h-20 w-20 rounded-full bg-blue-500/10 flex items-center justify-center">
+                  <Loader2 className="h-9 w-9 animate-spin text-blue-600" />
+                </div>
+                <div className="absolute -bottom-1 -right-1 h-8 w-8 rounded-full bg-background border shadow-sm flex items-center justify-center">
+                  <FileText className="h-4 w-4 text-muted-foreground" />
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <h1 className="text-2xl font-bold tracking-tight">
+                  ATS score is generating
+                </h1>
+                <p className="text-sm text-muted-foreground max-w-md">
+                  We are analyzing resume structure, keyword coverage, strengths,
+                  weaknesses, and improvement suggestions.
+                </p>
+              </div>
+
+              {pendingAnalysis?.filename && (
+                <div className="rounded-full border bg-muted/40 px-4 py-2 text-sm font-medium max-w-full truncate">
+                  {pendingAnalysis.filename}
+                </div>
+              )}
+
+              <div className="w-full space-y-2 pt-2">
+                <div className="h-2 rounded-full bg-muted overflow-hidden">
+                  <div className="h-full w-2/3 rounded-full bg-blue-600 animate-pulse" />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  This page will show the ATS report automatically when analysis finishes.
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[400px] space-y-4 px-4 text-center">
+        <AlertCircle className="h-10 w-10 text-destructive" />
+        <div>
+          <p className="font-semibold">ATS analysis failed</p>
+          <p className="text-sm text-muted-foreground mt-1">{error}</p>
+        </div>
+        <Button onClick={() => navigate("/resume/all")}>
+          Back to resumes
+        </Button>
+      </div>
+    );
+  }
 
   if (!analysis) {
     return (

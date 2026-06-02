@@ -1,4 +1,5 @@
 import { detectIntent, isFillerPhrase } from "@/lib/intent-detector";
+import { normalizeSttTranscript } from "@/features/session/transcript/stt-normalizer";
 
 export interface ActiveQuestionDetectionResult {
   activeQuestion: string;
@@ -117,15 +118,21 @@ export function detectActiveQuestion(input: {
   selectedAnswerQuestion?: string;
   selectedAnswerId?: string;
 }): ActiveQuestionDetectionResult {
-  const live = input.liveInterimText?.trim() || "";
+  const live = normalizeSttTranscript(input.liveInterimText || "");
   const selectedQuestion = input.selectedAnswerQuestion?.trim() || "";
+  const normalizedMessages = input.allMessages.map((entry) => ({
+    ...entry,
+    text: normalizeSttTranscript(entry.text || ""),
+  }));
 
   const build = (
     question: string,
     source: ActiveQuestionDetectionResult["source"],
     confidence: number,
   ): ActiveQuestionDetectionResult => {
-    const cleanedQuestion = detectIntent(question).cleanedQuestion || question.trim();
+    const normalizedQuestion = normalizeSttTranscript(question || "");
+    const cleanedQuestion =
+      detectIntent(normalizedQuestion).cleanedQuestion || normalizedQuestion.trim();
     const baseNoise = !cleanedQuestion || isFillerPhrase(cleanedQuestion);
     const isAdminNoise = ADMIN_NOISE_RE.test(cleanedQuestion);
     const incomplete = isLikelyIncomplete(cleanedQuestion);
@@ -164,7 +171,7 @@ export function detectActiveQuestion(input: {
     return build(intent.cleanedQuestion, "live_interim", clampConfidence(intent.confidence + bonus));
   }
 
-  const afterCutoff = input.allMessages
+  const afterCutoff = normalizedMessages
     .filter((m) => (m.timestamp || 0) > input.cutoffTimestamp && m.text?.trim());
   const interviewerChunks = afterCutoff
     .filter((m) => m.sender === "Interviewer")
@@ -206,7 +213,7 @@ export function detectActiveQuestion(input: {
   }
 
   const fallbackMerged = mergeChunks(
-    input.allMessages.slice(-12).map((m) => m.text || "").filter(Boolean),
+    normalizedMessages.slice(-12).map((m) => m.text || "").filter(Boolean),
   );
   if (fallbackMerged && !isFillerPhrase(fallbackMerged)) {
     const latestQuestionChunk = fallbackMerged

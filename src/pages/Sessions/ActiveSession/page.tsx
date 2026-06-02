@@ -43,12 +43,12 @@ import { useCreditsBalance } from "@/hooks/useCreditsBalance";
 import { useCreditBrackets } from "@/hooks/useCreditBrackets";
 import {
   type AIAnswerRequestPayload,
-  AI_ANSWER_LIMITS,
   extractCodeBlocks,
-  normalizeSpeakerType,
 } from "@/types/ai-answer";
 import { detectActiveQuestion } from "@/features/session/detection/activeQuestionDetector";
 import { extractInterviewKeywordsFromParts } from "@/utils/keywordExtractor";
+import { buildAdaptiveAiContext } from "@/features/session/context/adaptiveAiContext";
+import { normalizeSttTranscript } from "@/features/session/transcript/stt-normalizer";
 
 /**
  * Segments a single transcript chunk into individual interview questions.
@@ -132,15 +132,6 @@ function buildOverlayTranscript(messages: Message[]): string {
     .trim();
   if (joined.length <= OVERLAY_TRANSCRIPT_MAX_CHARS) return joined;
   return joined.slice(joined.length - OVERLAY_TRANSCRIPT_MAX_CHARS);
-}
-
-function isQuestionLike(text: string): boolean {
-  const t = (text || "").trim();
-  if (!t) return false;
-  if (t.includes("?")) return true;
-  return /^(what|why|how|when|where|which|who|can|could|would|should|is|are|do|does|did)\b/i.test(
-    t,
-  );
 }
 
 function deriveAnswerTopicFromText(text: string): string {
@@ -345,6 +336,7 @@ export default function ActiveSession() {
     "anthropic/claude-haiku-4-5",
     "anthropic/claude-sonnet-4-5",
     "google/gemini-3.1-flash-lite-preview",
+    "openai/gpt-4o-mini",
     "openai/gpt-5",
   ];
   
@@ -757,11 +749,12 @@ export default function ActiveSession() {
 
   const handleTranscript = useCallback(
     (sender: "User" | "Interviewer", text: string, isFinal: boolean) => {
-      if (isFinal && text.trim()) {
+      const normalizedText = normalizeSttTranscript(text || "");
+      if (isFinal && normalizedText.trim()) {
         const now = Date.now();
-        console.log(`[Transcript Final Input] ${sender}: ${text}`);
+        console.log(`[Transcript Final Input] ${sender}: ${normalizedText}`);
         setMessages((prev) => {
-          let cleanText = deduplicatePhrases(text);
+          let cleanText = deduplicatePhrases(normalizedText);
           // removeOverlap is only meaningful for the Interviewer (tab/system audio)
           // path where Deepgram streams overlapping context windows. Applying it
           // to User (mic) transcription strips valid words that happen to match
@@ -774,7 +767,7 @@ export default function ActiveSession() {
           }
           cleanText = cleanText.trim();
           if (!cleanText) {
-            console.log(`[Dedupe] Empty after overlap removal from ${sender}: "${text}"`);
+            console.log(`[Dedupe] Empty after overlap removal from ${sender}: "${normalizedText}"`);
             return prev;
           }
 
@@ -965,7 +958,7 @@ export default function ActiveSession() {
 
   const scheduleSystemInterimCommit = useCallback(
     (text: string) => {
-      const trimmed = (text || "").trim();
+      const trimmed = normalizeSttTranscript(text || "").trim();
       if (!trimmed) return;
       latestSystemInterimRef.current = trimmed;
       clearSystemInterimCommitTimer();
@@ -1112,11 +1105,12 @@ export default function ActiveSession() {
     // Mic transcript listener
     listen<{ text: string; is_final: boolean }>("stt:mic", (event) => {
       const { text, is_final } = event.payload;
+      const normalizedText = normalizeSttTranscript(text || "");
       if (is_final) {
         setTauriMicInterim("");
-        onUserTranscriptRef.current(text, true);
+        onUserTranscriptRef.current(normalizedText, true);
       } else {
-        setTauriMicInterim(text);
+        setTauriMicInterim(normalizedText);
       }
     }).then((fn) => { unlistenMicTx = fn; }).catch(() => {});
 
@@ -1143,12 +1137,13 @@ export default function ActiveSession() {
     // System audio transcript listener
     listen<{ text: string; is_final: boolean }>("stt:system-audio", (event) => {
       const { text, is_final } = event.payload;
+      const normalizedText = normalizeSttTranscript(text || "");
       if (is_final) {
         setTauriTabInterim("");
-        onInterviewerTranscriptRef.current(text, true);
+        onInterviewerTranscriptRef.current(normalizedText, true);
       } else {
-        setTauriTabInterim(text);
-        onInterviewerTranscriptRef.current(text, false);
+        setTauriTabInterim(normalizedText);
+        onInterviewerTranscriptRef.current(normalizedText, false);
       }
     }).then((fn) => { unlistenSysTx = fn; }).catch(() => {});
 
@@ -1552,7 +1547,56 @@ export default function ActiveSession() {
         }
 
         if (screenshot) {
-          await handleAnalyzeScreen(id, screenshot, selectedModel);
+          const adaptiveContext = buildAdaptiveAiContext({
+            transcriptMessages: messages
+              .filter(
+                (m) =>
+                  (m.sender === "Interviewer" || m.sender === "User") &&
+                  !!m.text?.trim(),
+              )
+              .map((m) => ({
+                sender: m.sender as "User" | "Interviewer",
+                text: m.text.trim(),
+                timestamp: m.timestamp,
+              })),
+            aiMessages: aiChat
+              .filter((m) => m.sender === "AI")
+              .map((m) => ({
+                sender: "AI" as const,
+                text: m.text,
+                question: m.question,
+              })),
+            fallbackQuestion: "(analyze screen)",
+            liveInterimQuestion: mergedTabInterimTranscript || activeMicInterimTranscript || "",
+          });
+          await handleAnalyzeScreen(id, screenshot, selectedModel, {
+            transcript:
+              adaptiveContext.recentTranscriptWindow.length > 0
+                ? adaptiveContext.recentTranscriptWindow.join("\n")
+                : adaptiveContext.currentQuestion || "(analyze screen)",
+            currentQuestion: adaptiveContext.currentQuestion || "(analyze screen)",
+            recentTranscriptWindow: adaptiveContext.recentTranscriptWindow,
+            speakerSeparatedTranscript: adaptiveContext.speakerSeparatedTranscript,
+            ...(adaptiveContext.previousAiAnswers.length > 0
+              ? { previousAiAnswers: adaptiveContext.previousAiAnswers }
+              : {}),
+            ...(adaptiveContext.previousAiAnswer
+              ? { previousAiAnswer: adaptiveContext.previousAiAnswer }
+              : {}),
+            ...(adaptiveContext.previousCodeBlocks?.length
+              ? { previousCodeBlocks: adaptiveContext.previousCodeBlocks }
+              : {}),
+            activeQuestionDetection: {
+              activeQuestion: adaptiveContext.currentQuestion || "(analyze screen)",
+              cleanedQuestion: adaptiveContext.currentQuestion || "(analyze screen)",
+              isFollowUp: false,
+              topicChanged: false,
+              confidenceScore: 1,
+              ignoredNoise: false,
+            },
+            sourcePlatform: isTauri() ? "tauri" : "web",
+            answerMode: "auto",
+          });
         } else {
           console.warn("No screenshot could be captured.");
         }
@@ -1588,7 +1632,17 @@ export default function ActiveSession() {
         }, 1000);
       }
     },
-    [stream, id, captureScreenshot, handleAnalyzeScreen, selectedModel],
+    [
+      stream,
+      id,
+      captureScreenshot,
+      handleAnalyzeScreen,
+      selectedModel,
+      messages,
+      aiChat,
+      mergedTabInterimTranscript,
+      activeMicInterimTranscript,
+    ],
   );
 
   const onAiAnswer = useCallback(() => {
@@ -1599,8 +1653,8 @@ export default function ActiveSession() {
     // context extraction and contaminate the AI request context.
     const snapshotTimestamp = Date.now();
     const messagesSnapshot = [...messages];
-    const micInterimSnapshot = activeMicInterimTranscript;
-    const tabInterimSnapshot = mergedTabInterimTranscript;
+    const micInterimSnapshot = normalizeSttTranscript(activeMicInterimTranscript || "");
+    const tabInterimSnapshot = normalizeSttTranscript(mergedTabInterimTranscript || "");
 
     console.log("[AI Answer] Creating transcript snapshot at timestamp:", snapshotTimestamp);
     console.log("[AI Answer] Snapshot contains", messagesSnapshot.length, "messages");
@@ -1655,6 +1709,7 @@ export default function ActiveSession() {
           .filter((m) => m.sender === "User" && m.timestamp && now - m.timestamp < CONTEXT_WINDOW_MS)
           .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))[0]?.text ||
         "";
+      userVoiceInput = normalizeSttTranscript(userVoiceInput);
       
       questionSource = userVoiceInput ? "user_interim" : "";
 
@@ -1691,23 +1746,25 @@ export default function ActiveSession() {
           .filter((m) => m.sender === "Interviewer" && m.timestamp && now - m.timestamp < CONTEXT_WINDOW_MS)
           .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))[0]?.text ||
         "";
+      const normalizedInterviewerContext = normalizeSttTranscript(interviewerContext);
       
-      if (!questionSource && interviewerContext) {
+      if (!questionSource && normalizedInterviewerContext) {
         questionSource = "interviewer_context";
       }
 
-      if (userVoiceInput && interviewerContext) {
+      if (userVoiceInput && normalizedInterviewerContext) {
         // Apply intent detection to clean up the user input
         const intentResult = detectIntent(userVoiceInput);
         const cleanedUserInput = intentResult.cleanedQuestion || userVoiceInput;
         question = cleanedUserInput;
       } else {
-        question = userVoiceInput || interviewerContext || interimText || "";
+        question = userVoiceInput || normalizedInterviewerContext || interimText || "";
         if (!questionSource && question) {
           questionSource = "fallback_interim";
         }
       }
     }
+    question = normalizeSttTranscript(question);
 
     if (!question) {
       console.log("[AI Answer] No question could be extracted from transcript snapshot");
@@ -1718,64 +1775,38 @@ export default function ActiveSession() {
     console.log("[AI Answer] Question content:", question.slice(0, 100));
     console.log("[AI Answer] Context window:", CONTEXT_WINDOW_MS, "ms");
 
+    const contextBuildStartedAt = Date.now();
     const recentMessages = messagesSnapshot
-      .filter((m) => m.text?.trim())
-      .slice(-AI_ANSWER_LIMITS.recentTranscriptWindowMax * 2);
-
-    // Build deterministic deduped recent window, preserving latest occurrence order.
-    const dedupMap = new Map<
-      string,
-      {
-        sender: string;
-        text: string;
-        timestamp?: number;
-      }
-    >();
-    for (const m of recentMessages) {
-      const text = m.text.trim();
-      if (!text || isFillerPhrase(text)) continue;
-      const norm = normalizeLineForDedup(text);
-      if (!norm) continue;
-      dedupMap.set(norm, { sender: m.sender, text, timestamp: m.timestamp });
-    }
-    const dedupedEntries = Array.from(dedupMap.values()).slice(
-      -AI_ANSWER_LIMITS.recentTranscriptWindowMax,
-    );
-    const recentTranscriptWindow = dedupedEntries.map(
-      (m) => `[${m.sender}]: ${m.text}`,
-    );
-    const speakerSeparatedTranscript = dedupedEntries.map((m) => ({
-      speakerType: normalizeSpeakerType(m.sender),
-      content: m.text,
-      ...(typeof m.timestamp === "number" ? { timestamp: m.timestamp } : {}),
-    }));
-
-    // Prefer newest meaningful question-like text from live/interim only when present.
-    // Else derive from latest interviewer/candidate deduped entry, then fallback.
-    const newestWindowQuestion =
-      [...dedupedEntries]
-        .reverse()
-        .find(
-          (m) =>
-            (m.sender === "Interviewer" || m.sender === "User") &&
-            isQuestionLike(m.text),
-        )?.text || "";
-    const meaningfulInterim = [
-      tabInterimSnapshot?.trim() || "",
-      micInterimSnapshot?.trim() || "",
-    ].find((txt) => txt && !isFillerPhrase(txt) && isQuestionLike(txt));
-    const bestCurrentQuestion =
-      meaningfulInterim ||
-      question ||
-      newestWindowQuestion;
+      .filter(
+        (m) =>
+          (m.sender === "Interviewer" || m.sender === "User") &&
+          !!m.text?.trim(),
+      )
+      .map((m) => ({
+        sender: m.sender as "User" | "Interviewer",
+        text: m.text.trim(),
+        timestamp: m.timestamp,
+      }));
+    const adaptiveContext = buildAdaptiveAiContext({
+      transcriptMessages: recentMessages,
+      aiMessages: aiChat
+        .filter((m) => m.sender === "AI")
+        .map((m) => ({
+          sender: "AI" as const,
+          text: m.text,
+          question: m.question,
+        })),
+      fallbackQuestion: question,
+      liveInterimQuestion: interviewerInterim || "",
+      cutoffTimestamp: snapshotTimestamp - CONTEXT_WINDOW_MS,
+    });
+    const recentTranscriptWindow = adaptiveContext.recentTranscriptWindow;
+    const speakerSeparatedTranscript = adaptiveContext.speakerSeparatedTranscript;
+    const bestCurrentQuestion = adaptiveContext.currentQuestion || question;
     const transcriptText =
       recentTranscriptWindow.length > 0
         ? recentTranscriptWindow.join("\n")
         : bestCurrentQuestion;
-    const latestAiAnswer = [...aiChat]
-      .reverse()
-      .find((m) => m.sender === "AI" && m.text?.trim())?.text
-      ?.trim();
     const selectedAiMessage =
       (lastInteractedAiMessageIdRef.current
         ? aiChat.find(
@@ -1839,9 +1870,14 @@ export default function ActiveSession() {
       currentQuestion: effectiveCurrentQuestion,
       recentTranscriptWindow,
       speakerSeparatedTranscript,
-      ...(latestAiAnswer ? { previousAiAnswer: latestAiAnswer } : {}),
-      ...(latestAiAnswer
-        ? { previousCodeBlocks: extractCodeBlocks(latestAiAnswer) }
+      ...(adaptiveContext.previousAiAnswers.length > 0
+        ? { previousAiAnswers: adaptiveContext.previousAiAnswers }
+        : {}),
+      ...(adaptiveContext.previousAiAnswer
+        ? { previousAiAnswer: adaptiveContext.previousAiAnswer }
+        : {}),
+      ...(adaptiveContext.previousCodeBlocks?.length
+        ? { previousCodeBlocks: adaptiveContext.previousCodeBlocks }
         : {}),
       ...(selectedAiMessage?.id ? { selectedAnswerId: selectedAiMessage.id } : {}),
       ...(selectedAnswerQuestion ? { selectedAnswerQuestion } : {}),
@@ -1864,6 +1900,12 @@ export default function ActiveSession() {
       answerMode: "auto",
       sourcePlatform: isTauri() ? "tauri" : "web",
     };
+    console.log("[AI Answer][Timing][FE][Web]", {
+      sessionId: id,
+      buildContextMs: Date.now() - contextBuildStartedAt,
+      windowSizeUsed: adaptiveContext.windowSizeUsed,
+      expandedReason: adaptiveContext.expandedReason,
+    });
 
     isExecutingRef.current = true;
     try {
@@ -2185,6 +2227,63 @@ export default function ActiveSession() {
     onPatchMessage,
   };
 
+  const onSendCustomQuery = useCallback(() => {
+    if (!id || !inputMessage.trim()) return;
+    const query = inputMessage.trim();
+    const adaptiveContext = buildAdaptiveAiContext({
+      transcriptMessages: messages
+        .filter(
+          (message) =>
+            (message.sender === "Interviewer" || message.sender === "User") &&
+            !!message.text?.trim(),
+        )
+        .map((message) => ({
+          sender: message.sender as "User" | "Interviewer",
+          text: message.text.trim(),
+          timestamp: message.timestamp,
+        })),
+      aiMessages: aiChat
+        .filter((message) => message.sender === "AI")
+        .map((message) => ({
+          sender: "AI" as const,
+          text: message.text,
+          question: message.question,
+        })),
+      fallbackQuestion: query,
+      liveInterimQuestion:
+        mergedTabInterimTranscript || activeMicInterimTranscript || "",
+    });
+    handleCustomQuery(id, query, selectedModel, {
+      transcript:
+        adaptiveContext.recentTranscriptWindow.length > 0
+          ? adaptiveContext.recentTranscriptWindow.join("\n")
+          : query,
+      currentQuestion: query,
+      recentTranscriptWindow: adaptiveContext.recentTranscriptWindow,
+      speakerSeparatedTranscript: adaptiveContext.speakerSeparatedTranscript,
+      ...(adaptiveContext.previousAiAnswers.length > 0
+        ? { previousAiAnswers: adaptiveContext.previousAiAnswers }
+        : {}),
+      ...(adaptiveContext.previousAiAnswer
+        ? { previousAiAnswer: adaptiveContext.previousAiAnswer }
+        : {}),
+      ...(adaptiveContext.previousCodeBlocks?.length
+        ? { previousCodeBlocks: adaptiveContext.previousCodeBlocks }
+        : {}),
+      sourcePlatform: isTauri() ? "tauri" : "web",
+      answerMode: "auto",
+    });
+  }, [
+    id,
+    inputMessage,
+    messages,
+    aiChat,
+    mergedTabInterimTranscript,
+    activeMicInterimTranscript,
+    handleCustomQuery,
+    selectedModel,
+  ]);
+
   const chatPanelProps = {
     messages: aiChat,
     inputMessage,
@@ -2198,7 +2297,7 @@ export default function ActiveSession() {
     canAnalyze: isTauri() || !!stream,
     onAiAnswer,
     onAnalyzeScreen,
-    onSend: () => id && handleCustomQuery(id, inputMessage, selectedModel),
+    onSend: onSendCustomQuery,
     onExit: () => setIsEndSessionDialogOpen(true),
     onRegenerate,
     onMessageInteract: onAiMessageInteract,

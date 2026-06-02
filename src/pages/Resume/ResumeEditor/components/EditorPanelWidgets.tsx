@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { cn } from "@/lib/utils";
 import type { RootState, AppDispatch } from "@/store/store";
-import type { SectionQuality } from "@/store/resumeBuilderSlice";
+import type { ResumeFields, SectionQuality } from "@/store/resumeBuilderSlice";
 import { applyAiSuggestion, discardAiSuggestion } from "@/store/resumeBuilderSlice";
 import { sectionAIText } from "../types";
 import {
@@ -12,16 +12,57 @@ import {
 
 // ─── AiDiffPanel ──────────────────────────────────────────────────────────────
 
+const SKILL_PREVIEW_FIELDS: Array<{ label: string; key: keyof ResumeFields }> = [
+  { label: "Languages", key: "skillsLanguages" },
+  { label: "Frameworks & Libraries", key: "skillsFrameworks" },
+  { label: "Databases", key: "skillsDatabases" },
+  { label: "Tools & Platforms", key: "skillsTools" },
+];
+
+function SkillsPreviewRows({
+  fields,
+  muted,
+}: {
+  fields: Partial<ResumeFields>;
+  muted?: boolean;
+}) {
+  return (
+    <div className="space-y-2">
+      {SKILL_PREVIEW_FIELDS.map(({ label, key }) => {
+        const value = fields[key]?.trim();
+        return (
+          <div key={key} className="rounded-lg border border-border/60 bg-background/70 px-3 py-2">
+            <div className={cn(
+              "text-[10px] font-bold uppercase tracking-wider mb-1",
+              muted ? "text-muted-foreground" : "text-[var(--color-brand)]",
+            )}>
+              {label}
+            </div>
+            <div className={cn(
+              "text-xs leading-relaxed",
+              muted ? "text-muted-foreground" : "text-foreground",
+            )}>
+              {value || "—"}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /** Shows a before/after diff when an AI-enhanced suggestion is ready. */
 export function AiDiffPanel() {
   const dispatch     = useDispatch<AppDispatch>();
   const aiSuggestion = useSelector((s: RootState) => s.resumeBuilder.aiSuggestion);
+  const aiSuggestionFields = useSelector((s: RootState) => s.resumeBuilder.aiSuggestionFields);
   const aiSectionId  = useSelector((s: RootState) => s.resumeBuilder.aiSectionId);
   const fields       = useSelector((s: RootState) => s.resumeBuilder.fields);
 
   if (!aiSuggestion || !aiSectionId) return null;
 
   const currentText = sectionAIText(aiSectionId, fields);
+  const isStructuredSkills = aiSectionId === "skills" && !!aiSuggestionFields;
 
   return (
     <div className="rounded-2xl border border-[var(--color-brand)]/20 bg-background shadow-lg overflow-hidden">
@@ -37,20 +78,28 @@ export function AiDiffPanel() {
         </button>
       </div>
 
-      <div className="grid grid-cols-2 divide-x divide-border max-h-52 overflow-auto">
+      <div className="grid grid-cols-2 divide-x divide-border max-h-80 overflow-auto">
         <div className="p-4 space-y-2">
           <div className="flex items-center gap-1.5 mb-2">
             <span className="w-2 h-2 rounded-full bg-muted-foreground/30" />
             <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Current</span>
           </div>
-          <p className="text-xs leading-relaxed text-muted-foreground whitespace-pre-line">{currentText || "(empty)"}</p>
+          {isStructuredSkills ? (
+            <SkillsPreviewRows fields={fields} muted />
+          ) : (
+            <p className="text-xs leading-relaxed text-muted-foreground whitespace-pre-line">{currentText || "(empty)"}</p>
+          )}
         </div>
         <div className="p-4 space-y-2 bg-[var(--color-brand-muted)]/40">
           <div className="flex items-center gap-1.5 mb-2">
             <span className="w-2 h-2 rounded-full bg-[var(--color-brand)]" />
             <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--color-brand)]">AI Enhanced</span>
           </div>
-          <p className="text-xs leading-relaxed whitespace-pre-line">{aiSuggestion}</p>
+          {isStructuredSkills ? (
+            <SkillsPreviewRows fields={aiSuggestionFields} />
+          ) : (
+            <p className="text-xs leading-relaxed whitespace-pre-line">{aiSuggestion}</p>
+          )}
         </div>
       </div>
 

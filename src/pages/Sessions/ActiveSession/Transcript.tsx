@@ -2,6 +2,7 @@ import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { TranscriptHeader } from "./components/TranscriptHeader";
 import { TranscriptMessageList } from "./components/TranscriptMessageList";
+import type { QuestionMeta } from "@/types/ai-answer";
 
 export interface Message {
   id: string;
@@ -10,6 +11,7 @@ export interface Message {
   time: string;
   timestamp?: number;
   question?: string;
+  questionMeta?: QuestionMeta;
   snapshotId?: string;
   originalText?: string;
   patchedText?: string;
@@ -24,6 +26,11 @@ export interface Message {
       speakerType: "interviewer" | "candidate" | "assistant" | "system";
       content: string;
       timestamp?: number;
+    }[];
+    previousAiAnswers?: {
+      question?: string;
+      answer: string;
+      codeBlocks?: string[];
     }[];
     selectedAnswerId?: string;
     selectedAnswerQuestion?: string;

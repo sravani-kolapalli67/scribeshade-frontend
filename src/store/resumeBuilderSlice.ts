@@ -110,6 +110,7 @@ export interface ResumeBuilderState {
   lockedFields: Partial<Record<keyof ResumeFields, boolean>>;
   // AI Enhance
   aiSuggestion: string | null;
+  aiSuggestionFields: Partial<ResumeFields> | null;
   aiSectionId: SectionId | null;
   isEnhancing: boolean;
   /** Sections whose current content was produced by AI Enhance. */
@@ -181,6 +182,82 @@ const REQUIRED_SECTION_IDS = new Set<SectionId>([
   "personalInfo", "summary", "experience", "skills", "education",
 ]);
 
+const SKILL_FIELD_ORDER: Array<keyof ResumeFields> = [
+  "skillsLanguages",
+  "skillsFrameworks",
+  "skillsDatabases",
+  "skillsTools",
+];
+
+const SKILL_SECTION_HEADING_RE = /^\s*(?:\*\*)?\s*(technical\s+skills|skills|core\s+skills|key\s+skills)\s*(?:\*\*)?\s*:?\s*$/i;
+
+function cleanAiSkillLine(line: string): string {
+  return line
+    .replace(/^\s*[-*•]\s*/, "")
+    .replace(/^\s*\d+[.)]\s*/, "")
+    .replace(/\*\*/g, "")
+    .replace(/`/g, "")
+    .trim();
+}
+
+function skillFieldFromLabel(label: string): keyof ResumeFields | null {
+  const normalized = label.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  if (/\b(language|languages|programming|scripting|querying)\b/.test(normalized)) {
+    return "skillsLanguages";
+  }
+  if (/\b(framework|frameworks|libraries|library|big data|data engineering|orchestration)\b/.test(normalized)) {
+    return "skillsFrameworks";
+  }
+  if (/\b(database|databases|warehouse|warehouses|query engines|storage)\b/.test(normalized)) {
+    return "skillsDatabases";
+  }
+  if (/\b(tool|tools|platform|platforms|cloud|devops|bi|governance|monitoring)\b/.test(normalized)) {
+    return "skillsTools";
+  }
+  return null;
+}
+
+function parseEnhancedSkillsSuggestion(suggestion: string): Partial<ResumeFields> {
+  const result: Partial<ResumeFields> = {};
+  const unlabelledLines: string[] = [];
+  const lines = suggestion
+    .split("\n")
+    .map(cleanAiSkillLine)
+    .filter((line) => line.length > 0 && !SKILL_SECTION_HEADING_RE.test(line));
+
+  lines.forEach((line) => {
+    const separatorIndex = line.indexOf(":");
+    if (separatorIndex === -1) {
+      unlabelledLines.push(line);
+      return;
+    }
+
+    const label = line.slice(0, separatorIndex);
+    const value = cleanAiSkillLine(line.slice(separatorIndex + 1));
+    const field = skillFieldFromLabel(label);
+    if (!field || !value) {
+      unlabelledLines.push(line);
+      return;
+    }
+    result[field] = value;
+  });
+
+  if (Object.keys(result).length === 0) {
+    lines.slice(0, SKILL_FIELD_ORDER.length).forEach((line, index) => {
+      result[SKILL_FIELD_ORDER[index]] = line;
+    });
+    return result;
+  }
+
+  const missingFields = SKILL_FIELD_ORDER.filter((field) => !result[field]);
+  missingFields.forEach((field, index) => {
+    const fallbackValue = unlabelledLines[index];
+    if (fallbackValue) result[field] = fallbackValue;
+  });
+
+  return result;
+}
+
 function normalizeSections(sections?: SectionDef[]): SectionDef[] {
   if (!sections?.length) return DEFAULT_SECTIONS.map((section) => ({ ...section }));
 
@@ -221,6 +298,32 @@ export const EMPTY_FIELDS: ResumeFields = {
   _customSections: "{}",
 };
 
+function statusFromQualityScore(score: number): SectionQuality["status"] {
+  if (score >= 85) return "excellent";
+  if (score >= 70) return "good";
+  if (score >= 50) return "needs_improvement";
+  return "poor";
+}
+
+function promotedEnhancedQuality(existing: SectionQuality | undefined): SectionQuality {
+  const score = Math.min(95, Math.max(existing?.score ?? 0, 75));
+  return {
+    score,
+    status: statusFromQualityScore(score),
+    issues: [],
+    suggestions: [],
+    constraints: existing?.constraints ?? {
+      minWords: 30,
+      maxWords: 300,
+      minBullets: null,
+      maxBullets: null,
+      reason: "AI enhancement applied. Revalidation should not reduce the saved enhanced score.",
+    },
+    wordCount: existing?.wordCount ?? 0,
+    isValidating: false,
+  };
+}
+
 const initialState: ResumeBuilderState = {
   resumeTitle: "My Resume",
   templateId: "classic",
@@ -231,6 +334,7 @@ const initialState: ResumeBuilderState = {
   fields: EMPTY_FIELDS,
   lockedFields: { name: true, email: true },
   aiSuggestion: null,
+  aiSuggestionFields: null,
   aiSectionId: null,
   isEnhancing: false,
   aiEnhancedSections: [],
@@ -299,6 +403,7 @@ const resumeBuilderSlice = createSlice({
     setActiveSection(state, action: PayloadAction<SectionId>) {
       state.activeSection = action.payload;
       state.aiSuggestion = null;
+      state.aiSuggestionFields = null;
       state.aiSectionId = null;
     },
 
@@ -364,13 +469,19 @@ const resumeBuilderSlice = createSlice({
     /** Set the AI suggestion result for a section. */
     setAiSuggestion(
       state,
-      action: PayloadAction<{ sectionId: SectionId; suggestion: string } | null>,
+      action: PayloadAction<{
+        sectionId: SectionId;
+        suggestion: string;
+        suggestionFields?: Partial<ResumeFields>;
+      } | null>,
     ) {
       if (action.payload) {
         state.aiSuggestion = action.payload.suggestion;
+        state.aiSuggestionFields = action.payload.suggestionFields ?? null;
         state.aiSectionId = action.payload.sectionId;
       } else {
         state.aiSuggestion = null;
+        state.aiSuggestionFields = null;
         state.aiSectionId = null;
       }
     },
@@ -403,6 +514,17 @@ const resumeBuilderSlice = createSlice({
       action: PayloadAction<{ sectionId: string; quality: Omit<SectionQuality, "isValidating"> }>,
     ) {
       const { sectionId, quality } = action.payload;
+      const existing = state.sectionValidation[sectionId];
+      const sectionWasEnhanced = state.aiEnhancedSections.includes(sectionId);
+      const existingLooksPromoted =
+        existing !== undefined &&
+        existing.score >= 75 &&
+        existing.issues.length === 0 &&
+        existing.suggestions.length === 0;
+      if ((sectionWasEnhanced || existingLooksPromoted) && existing && quality.score < existing.score) {
+        state.sectionValidation[sectionId] = { ...existing, isValidating: false };
+        return;
+      }
       state.sectionValidation[sectionId] = { ...quality, isValidating: false };
     },
 
@@ -492,9 +614,13 @@ const resumeBuilderSlice = createSlice({
           state.fields.experience = state.aiSuggestion;
           break;
         case "skills": {
-          const lines = state.aiSuggestion.split("\n").filter(Boolean);
-          if (lines[0]) state.fields.skillsLanguages = lines[0];
-          if (lines[1]) state.fields.skillsFrameworks = lines[1];
+          const parsedSkills = state.aiSuggestionFields ?? parseEnhancedSkillsSuggestion(state.aiSuggestion);
+          SKILL_FIELD_ORDER.forEach((field) => {
+            const value = parsedSkills[field];
+            if (typeof value === "string" && value.trim().length > 0) {
+              state.fields[field] = value;
+            }
+          });
           break;
         }
         case "projects":
@@ -515,13 +641,20 @@ const resumeBuilderSlice = createSlice({
       if (state.aiSectionId && !state.aiEnhancedSections.includes(state.aiSectionId)) {
         state.aiEnhancedSections.push(state.aiSectionId);
       }
+      if (state.aiSectionId) {
+        state.sectionValidation[state.aiSectionId] = promotedEnhancedQuality(
+          state.sectionValidation[state.aiSectionId],
+        );
+      }
       state.aiSuggestion = null;
+      state.aiSuggestionFields = null;
       state.aiSectionId = null;
       state.isDirty = true;
     },
 
     discardAiSuggestion(state) {
       state.aiSuggestion = null;
+      state.aiSuggestionFields = null;
       state.aiSectionId = null;
     },
 
@@ -758,9 +891,21 @@ const resumeBuilderSlice = createSlice({
         company?: string;
         sections?: SectionDef[];
         customSectionDefs?: SectionDef[];
+        sectionValidation?: Record<string, SectionQuality>;
       }>,
     ) {
-      const { title, fields, templateId, lockedFields, jobDescription, jobTitle, company, sections, customSectionDefs } = action.payload;
+      const {
+        title,
+        fields,
+        templateId,
+        lockedFields,
+        jobDescription,
+        jobTitle,
+        company,
+        sections,
+        customSectionDefs,
+        sectionValidation,
+      } = action.payload;
       if (title) state.resumeTitle = title;
       if (templateId) state.templateId = templateId;
       state.sections = normalizeSections(sections);
@@ -774,12 +919,14 @@ const resumeBuilderSlice = createSlice({
       // preserve user's autosave preference across sessions
       state.activeSection = "personalInfo";
       state.aiSuggestion = null;
+      state.aiSuggestionFields = null;
       state.aiSectionId = null;
       state.activeBottomTab = "editor";
       state.jobDescription = jobDescription ?? "";
       state.jobTitle = jobTitle ?? "";
       state.company = company ?? "";
       state.customSectionDefs = customSectionDefs ?? [];
+      state.sectionValidation = sectionValidation ?? {};
       state.aiActivityLog = [];
       state.tailoredSections = [];
       state.lastTailoredAt = null;

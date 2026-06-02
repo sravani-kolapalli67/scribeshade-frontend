@@ -1137,23 +1137,22 @@ export default function BuildResume() {
         );
 
         // 3. Send the fully rendered HTML to the PDF export endpoint
+        const entry = allEntries.find((e) => e.id === id);
+        const userName = r.fields?.name || "Resume";
+        const targetRole = r.fields?.role || r.jobTitle || "";
+        const baseName = targetRole ? `${userName} - ${targetRole}` : (entry?.title ?? r.title ?? userName);
+        const filename = `${baseName.replace(/[^a-z0-9_\-\s]+/gi, "").trim().replace(/\s+/g, "_")}.pdf`;
         const res = await fetch(ENDPOINTS.resumeBuilderExportPdf(), {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ resumeId: id, populatedHtml }),
+          body: JSON.stringify({ resumeId: id, populatedHtml, suggestedFilename: filename.replace(/\.pdf$/i, "") }),
         });
         if (!res.ok) throw new Error("Export failed");
         const blob = await res.blob();
-        const entry = allEntries.find((e) => e.id === id);
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
-        
-        const userName = r.fields?.name || "Resume";
-        const targetRole = r.jobTitle || r.fields?.role || "";
-        const baseName = targetRole ? `${userName} - ${targetRole}` : (entry?.title ?? r.title ?? userName);
-        
-        a.download = `${baseName.replace(/[^a-z0-9_\-\s]+/gi, "").trim().replace(/\s+/g, "_")}.pdf`;
+        a.download = filename;
         a.click();
         URL.revokeObjectURL(url);
       } catch (err) {

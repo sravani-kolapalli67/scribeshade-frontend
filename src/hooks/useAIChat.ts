@@ -4,6 +4,7 @@ import {
   type AIAnswerRequestPayload,
   AI_ANSWER_LIMITS,
   extractCodeBlocks,
+  type QuestionMeta,
   sanitizeAIAnswerPayload,
   resolveQueryFromAIAnswerPayload,
 } from "@/types/ai-answer";
@@ -19,7 +20,7 @@ import {
   resolveQuestionWithContinuity,
   summarizeAnswerForMemory,
 } from "@/lib/conversation-continuity";
-import { 
+import {
   prepareGeneration, 
   shouldTriggerGeneration, 
   createGenerationGuard, 
@@ -28,53 +29,19 @@ import {
   type GenerationMode,
   type GenerationDecision 
 } from '@/lib/generation-pipeline';
+import { normalizeSttTranscript } from "@/features/session/transcript/stt-normalizer";
 
 const SEGMENT_MARKER = /\n?={3,}NEXT_QUESTION={3,}\n?/;
 const QUESTION_MARKER = /(?:\*\*\s*)?QUESTION\s*:/i;
 // Backend sentinel: the model returns this single line when the input block
 // contains no genuine new interview question. We must not render a card for it.
 const NO_QUESTION_MARKER = /={3,}\s*NO_NEW_QUESTION\s*={3,}/i;
+const QUESTION_META_MARKER = /={3,}QUESTION_META=([^\n]+?)={3,}\n?/i;
 const NO_QUESTION_MESSAGE =
   "No question found on this screen. If you have a question, let me know.";
 const NO_QUESTION_HEURISTIC =
   /(no interview questions?\s+(?:are|were)?\s*visible|no clear question|please provide|share the actual interview|clarify|not clearly visible)/i;
 
-// ── Transcript normalization ────────────────────────────────────────────────
-// Common speech-to-text substitution errors and their corrections.
-// Applied before every AI call to improve prompt quality without an extra AI
-// round-trip. Keep entries lowercase; the function lower-cases the input
-// before matching and re-joins to original casing logic.
-const STT_CORRECTIONS: [RegExp, string][] = [
-  [/\btext stack\b/gi, "tech stack"],
-  [/\btext stacks\b/gi, "tech stacks"],
-  [/\btext sex stack\b/gi, "tech stack"],
-  [/\brest full\b/gi, "RESTful"],
-  [/\bdata race\b/gi, "data race"],
-  [/\bmy sequel\b/gi, "MySQL"],
-  [/\bpost gres\b/gi, "Postgres"],
-  [/\bpost gress\b/gi, "Postgres"],
-  [/\bpost grey s\b/gi, "Postgres"],
-  [/\bno sequel\b/gi, "NoSQL"],
-  [/\bno sql\b/gi, "NoSQL"],
-  [/\bkubernetes\b/gi, "Kubernetes"],
-  [/\bcube rnetes\b/gi, "Kubernetes"],
-  [/\bjava script\b/gi, "JavaScript"],
-  [/\btype script\b/gi, "TypeScript"],
-  [/\bnode js\b/gi, "Node.js"],
-  [/\breact js\b/gi, "React"],
-  [/\bvue js\b/gi, "Vue.js"],
-  [/\bai pi\b/gi, "API"],
-  [/\ba p i\b/gi, "API"],
-  [/\bgit hub\b/gi, "GitHub"],
-  [/\bci cd\b/gi, "CI/CD"],
-  [/\bdocker file\b/gi, "Dockerfile"],
-  [/\bmicro service\b/gi, "microservice"],
-  [/\bmicro services\b/gi, "microservices"],
-  [/\bopen ai\b/gi, "OpenAI"],
-  [/\baws\b/gi, "AWS"],
-  [/\bgcp\b/gi, "GCP"],
-  [/\bazure\b/gi, "Azure"],
-];
 
 type AIAnswerRequestInput = string | AIAnswerRequestPayload;
 type OriginalGenerationContext = NonNullable<Message["originalGenerationContext"]>;
@@ -97,12 +64,28 @@ function buildOriginalGenerationContextFromPayload(
       content: (entry.content || "").slice(0, 600),
       ...(typeof entry.timestamp === "number" ? { timestamp: entry.timestamp } : {}),
     }));
+  const previousAiAnswers = (payload.previousAiAnswers || [])
+    .slice(-AI_ANSWER_LIMITS.previousAiAnswersMax)
+    .map((entry) => ({
+      ...(entry.question ? { question: entry.question.slice(0, 500) } : {}),
+      answer: (entry.answer || "").slice(0, 1000),
+      ...(entry.codeBlocks?.length
+        ? {
+            codeBlocks: entry.codeBlocks
+              .slice(0, AI_ANSWER_LIMITS.previousCodeBlocksMax)
+              .map((block) =>
+                block.slice(0, AI_ANSWER_LIMITS.previousCodeBlockMaxChars),
+              ),
+          }
+        : {}),
+    }));
   return {
     originalQuestion: (currentQuestion || transcript).slice(0, 1000),
     originalTranscript: transcript,
     currentQuestion: currentQuestion || undefined,
     ...(recentTranscriptWindow.length > 0 ? { recentTranscriptWindow } : {}),
     ...(speakerSeparatedTranscript.length > 0 ? { speakerSeparatedTranscript } : {}),
+    ...(previousAiAnswers.length > 0 ? { previousAiAnswers } : {}),
     ...(payload.selectedAnswerId ? { selectedAnswerId: payload.selectedAnswerId } : {}),
     ...(payload.selectedAnswerQuestion
       ? {
@@ -142,19 +125,6 @@ function buildOriginalGenerationContextFromPayload(
     generatedAnswerText: "",
     generatedCodeBlocks: [],
   };
-}
-
-/**
- * Normalizes speech-to-text transcript errors before sending to the AI.
- * Corrects common mishearings and technical term misrecognitions.
- */
-function normalizeSttTranscript(text: string): string {
-  if (!text?.trim()) return text;
-  let result = text;
-  for (const [pattern, replacement] of STT_CORRECTIONS) {
-    result = result.replace(pattern, replacement);
-  }
-  return result;
 }
 
 /**
@@ -425,9 +395,28 @@ export function parseAnswerContent(rawText: string, fallbackQuestion?: string): 
   return { question: fallbackQuestion?.trim() ?? "", answer: text };
 }
 
+function extractQuestionMeta(rawText: string): {
+  text: string;
+  questionMeta?: QuestionMeta;
+} {
+  const match = rawText.match(QUESTION_META_MARKER);
+  if (!match) return { text: rawText };
+  try {
+    const parsed = JSON.parse(match[1]) as QuestionMeta;
+    return {
+      text: rawText.replace(QUESTION_META_MARKER, ""),
+      questionMeta: parsed,
+    };
+  } catch (error) {
+    console.warn("[useAIChat] Failed to parse QUESTION_META marker", error);
+    return { text: rawText.replace(QUESTION_META_MARKER, "") };
+  }
+}
+
 interface ConsumeStreamResult {
   /** IDs of cards that were created and have real content. */
   activeIds: string[];
+  questionMeta?: QuestionMeta;
   /**
    * True when the ONLY thing the backend returned was ===NO_NEW_QUESTION===.
    * Callers should treat this as a clean "nothing to answer" signal rather
@@ -450,6 +439,7 @@ async function consumeSegmentedStream(
   // Starts at 0; flips to 1 once we observe parts[0] is a meta preamble.
   let leadingSkip = 0;
   let preambleDecided = false;
+  let streamQuestionMeta: QuestionMeta | undefined = undefined;
   // segmentTexts[i] = current text of the i-th RENDERED card; segmentIds[i] = its message id.
   const segmentTexts: string[] = [""];
   const segmentIds: string[] = [initialMessageId];
@@ -468,6 +458,11 @@ async function consumeSegmentedStream(
 
         let rawText = segmentTexts[i];
         let snapshotId: string | undefined = undefined;
+        const metaExtract = extractQuestionMeta(rawText);
+        rawText = metaExtract.text;
+        if (metaExtract.questionMeta) {
+          streamQuestionMeta = metaExtract.questionMeta;
+        }
 
         // Strip snapshot sentinel
         const snapMatch = rawText.match(/===SNAPSHOT_ID=([a-f0-9\-]+)===/i);
@@ -481,6 +476,8 @@ async function consumeSegmentedStream(
         // on new segment cards (mirroring what handleAiAnswerSingle does).
         const { question: extractedQuestion } = parseAnswerContent(rawText);
         const displayText = rawText;
+        const displayQuestion =
+          extractedQuestion || streamQuestionMeta?.displayQuestion || "";
 
         const idx = next.findIndex((m) => m.id === sid);
         if (idx >= 0) {
@@ -490,7 +487,8 @@ async function consumeSegmentedStream(
           next[idx] = {
             ...next[idx],
             text: displayText,
-            question: extractedQuestion,
+            question: displayQuestion,
+            ...(streamQuestionMeta ? { questionMeta: streamQuestionMeta } : {}),
             ...(snapshotId ? { snapshotId } : {}),
             ...(requestContext
               ? {
@@ -512,7 +510,8 @@ async function consumeSegmentedStream(
             sender: "AI",
             text: displayText,
             time: baseTime,
-            question: extractedQuestion,
+            question: displayQuestion,
+            ...(streamQuestionMeta ? { questionMeta: streamQuestionMeta } : {}),
             ...(snapshotId ? { snapshotId } : {}),
             ...(requestContext
               ? {
@@ -559,6 +558,11 @@ async function consumeSegmentedStream(
 
     const chunkStr = decoder.decode(value, { stream: true });
     buffer += chunkStr;
+    const bufferMetaExtract = extractQuestionMeta(buffer);
+    if (bufferMetaExtract.questionMeta) {
+      streamQuestionMeta = bufferMetaExtract.questionMeta;
+      buffer = bufferMetaExtract.text;
+    }
 
     const parts = buffer.split(SEGMENT_MARKER);
 
@@ -596,18 +600,18 @@ async function consumeSegmentedStream(
 
   if (signal?.aborted) {
     await safelyCancelReader(reader);
-    return { activeIds: [], sentinelOnly: false };
+    return { activeIds: [], questionMeta: streamQuestionMeta, sentinelOnly: false };
   }
 
   if (NO_QUESTION_MARKER.test(buffer)) {
-    return { activeIds: [], sentinelOnly: true };
+    return { activeIds: [], questionMeta: streamQuestionMeta, sentinelOnly: true };
   }
 
   // Final flush — also catches the case where the stream ended WITHOUT any
   // separator AND the single segment happened to be preamble-only (rare).
   flushToState();
 
-  return { activeIds: segmentIds, sentinelOnly: false };
+  return { activeIds: segmentIds, questionMeta: streamQuestionMeta, sentinelOnly: false };
 }
 
 export const useAIChat = () => {
@@ -856,7 +860,12 @@ export const useAIChat = () => {
   );
 
   const handleAnalyzeScreen = useCallback(
-    async (sessionId: string, screenshotBlob: Blob | null, aiModel: string) => {
+    async (
+      sessionId: string,
+      screenshotBlob: Blob | null,
+      aiModel: string,
+      contextPayload?: Partial<AIAnswerRequestPayload>,
+    ) => {
       console.log(`[useAIChat] handleAnalyzeScreen triggered. sessionId: ${sessionId}, model: ${aiModel}`);
       if (!screenshotBlob) {
         console.log("[useAIChat] handleAnalyzeScreen: No screenshot blob provided. Aborting.");
@@ -899,6 +908,23 @@ export const useAIChat = () => {
         formData.append("screenshot", screenshotBlob, "screenshot.jpg");
         if (aiModel) {
           formData.append("aiModel", aiModel);
+        }
+        if (contextPayload) {
+          const normalizedContext = sanitizeAIAnswerPayload({
+            transcript:
+              contextPayload.transcript ||
+              contextPayload.currentQuestion ||
+              "screen visible interview question",
+            ...contextPayload,
+          });
+          formData.append("contextPayload", JSON.stringify(normalizedContext));
+          if (import.meta.env.DEV) {
+            console.log("[Analyze Screen][Context][FE]", {
+              sessionId,
+              windowCount: normalizedContext.recentTranscriptWindow?.length || 0,
+              previousAiAnswersCount: normalizedContext.previousAiAnswers?.length || 0,
+            });
+          }
         }
 
         const targetUrl = `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionId}/analyze-screen`;
@@ -1144,33 +1170,15 @@ export const useAIChat = () => {
       generationGuardRef.current.lockGeneration(segmentId, decision.groupedTranscript);
 
       try {
-        if (decision.segmentCount === 1) {
-          await handleAiAnswerSingleRef.current(
-            sessionId,
-            sanitizeAIAnswerPayload({
-              ...normalizedPayload,
-              currentQuestion: decision.groupedTranscript,
-            }),
-            aiModel,
-          );
-        } else {
-          for (let i = 0; i < decision.segments.length; i++) {
-            // Intentional segmentation mode: each call targets one split question.
-            await handleAiAnswerSingleRef.current(
-              sessionId,
-              sanitizeAIAnswerPayload({
-                ...normalizedPayload,
-                transcript: decision.segments[i],
-                currentQuestion: decision.segments[i],
-                patchedTranscript: undefined,
-              }),
-              aiModel,
-            );
-            if (i < decision.segments.length - 1) {
-              await new Promise(r => setTimeout(r, 500));
-            }
-          }
-        }
+        await handleAiAnswerSingleRef.current(
+          sessionId,
+          sanitizeAIAnswerPayload({
+            ...normalizedPayload,
+            transcript: normalizedPayload.transcript || decision.groupedTranscript,
+            currentQuestion: decision.groupedTranscript,
+          }),
+          aiModel,
+        );
 
         // Update previous context after successful generation
         previousContextRef.current = { transcript: normalizedQuestion, timestamp: Date.now() };
@@ -1266,7 +1274,7 @@ export const useAIChat = () => {
         const reader = response.body?.getReader();
         if (!reader) throw new Error("No reader available");
 
-        const { sentinelOnly } = await consumeSegmentedStream(
+        const { sentinelOnly, questionMeta } = await consumeSegmentedStream(
           reader,
           messageId,
           setAiChat,
@@ -1284,9 +1292,19 @@ export const useAIChat = () => {
 
         if (sentinelOnly) {
           // Backend cleanly said there was no interview question in the input.
-          // Remove the temporary placeholder card silently — no error message.
-          console.log(`[useAIChat] handleAiAnswer: Sentinel-only response. Removing placeholder card ${messageId}.`);
-          safeSetAiChat((prev) => prev.filter((m) => m.id !== messageId));
+          console.log(`[useAIChat] handleAiAnswer: Sentinel-only response. Showing no-question state on card ${messageId}.`);
+          safeSetAiChat((prev) =>
+            prev.map((msg) =>
+              msg.id === messageId
+                ? {
+                    ...msg,
+                    text: NO_QUESTION_MESSAGE,
+                    question: questionMeta?.displayQuestion || "",
+                    ...(questionMeta ? { questionMeta } : {}),
+                  }
+                : msg,
+            ),
+          );
           return;
         }
 
@@ -1346,7 +1364,12 @@ export const useAIChat = () => {
   handleAiAnswerSingleRef.current = handleAiAnswerSingle;
 
   const handleCustomQuery = useCallback(
-    async (sessionId: string, query: string, aiModel: string) => {
+    async (
+      sessionId: string,
+      query: string,
+      aiModel: string,
+      contextPayload?: Partial<AIAnswerRequestPayload>,
+    ) => {
       const normalizedQuery = normalizeSttTranscript(query);
       const continuity = applyContinuityToQuestion(normalizedQuery, "manual", "manual");
       const resolvedQuery = continuity.resolvedQuestion || normalizedQuery;
@@ -1437,27 +1460,24 @@ export const useAIChat = () => {
       console.log(`[useAIChat] handleCustomQuery: Spawning placeholder AI response card ID: ${aiMessageId}`);
       setAiChat((prev) => [...prev, newAiMessage]);
 
-      // Build a context preamble from the last 5 AI-answered messages in the current
-      // UI session (aiChatRef). This is the authoritative in-memory follow-up context
-      // — the backend also injects DB history, so together they form a full picture.
+      // Build structured prior-answer memory and transcript context for manual asks.
       const recentAiAnswers = aiChatRef.current
          .filter((m) => m.sender === "AI" && m.text?.trim())
-         .slice(-5);
-      const contextPreamble =
-        recentAiAnswers.length > 0
-          ? recentAiAnswers
-              .map((m, i) => {
-                const q = m.question?.trim() || extractQuestionFromAiText(m.text ?? "");
-                const a = m.text?.trim() ?? "";
-                return q
-                  ? `[Prior answer ${i + 1}]\nQ: ${q}\nA: ${a.slice(0, 500)}${a.length > 500 ? "..." : ""}`
-                  : `[Prior answer ${i + 1}]\n${a.slice(0, 500)}${a.length > 500 ? "..." : ""}`;
-              })
-              .join("\n\n")
-          : "";
-      const enrichedQuery = contextPreamble
-        ? `${contextPreamble}\n\n[New question / follow-up]\n${resolvedQuery}`
-        : resolvedQuery;
+         .slice(-AI_ANSWER_LIMITS.previousAiAnswersMax);
+      const previousAiAnswers =
+        contextPayload?.previousAiAnswers?.slice(
+          -AI_ANSWER_LIMITS.previousAiAnswersMax,
+        ) ||
+        recentAiAnswers.map((message) => {
+          const answer = message.text?.trim() || "";
+          const messageQuestion =
+            message.question?.trim() || extractQuestionFromAiText(answer);
+          return {
+            ...(messageQuestion ? { question: messageQuestion } : {}),
+            answer,
+            ...(answer ? { codeBlocks: extractCodeBlocks(answer) } : {}),
+          };
+        });
       const previousAiAnswer =
         recentAiAnswers.length > 0
           ? recentAiAnswers[recentAiAnswers.length - 1].text?.trim() || ""
@@ -1465,13 +1485,50 @@ export const useAIChat = () => {
       const previousCodeBlocks = previousAiAnswer
         ? extractCodeBlocks(previousAiAnswer)
         : [];
+      const recentTranscriptWindow =
+        contextPayload?.recentTranscriptWindow?.slice(
+          -AI_ANSWER_LIMITS.recentTranscriptWindowMax,
+        ) ||
+        [...aiChatRef.current]
+          .reverse()
+          .find(
+            (message) =>
+              message.sender === "AI" &&
+              message.originalGenerationContext?.recentTranscriptWindow?.length,
+          )
+          ?.originalGenerationContext?.recentTranscriptWindow?.slice(
+            -AI_ANSWER_LIMITS.recentTranscriptWindowMax,
+          ) ||
+        [];
+      const speakerSeparatedTranscript =
+        contextPayload?.speakerSeparatedTranscript?.slice(
+          -AI_ANSWER_LIMITS.recentTranscriptWindowMax,
+        ) ||
+        [...aiChatRef.current]
+          .reverse()
+          .find(
+            (message) =>
+              message.sender === "AI" &&
+              message.originalGenerationContext?.speakerSeparatedTranscript?.length,
+          )
+          ?.originalGenerationContext?.speakerSeparatedTranscript?.slice(
+            -AI_ANSWER_LIMITS.recentTranscriptWindowMax,
+          ) ||
+        [];
+      const transcriptForRequest =
+        contextPayload?.transcript?.trim() ||
+        (recentTranscriptWindow.length > 0
+          ? recentTranscriptWindow.join("\n")
+          : resolvedQuery);
       const runtimePlatform: "web" | "tauri" = isTauri() ? "tauri" : "web";
-
-      console.log("[useAIChat] handleCustomQuery: Context preamble built. Enriched query content:", enrichedQuery);
+      console.log("[useAIChat] handleCustomQuery: Context built.", {
+        previousAiAnswersCount: previousAiAnswers.length,
+        recentTranscriptWindowCount: recentTranscriptWindow.length,
+      });
 
       // Route through the unified generation pipeline
       const decision = prepareGeneration({ 
-        transcript: enrichedQuery, 
+        transcript: resolvedQuery, 
         mode: 'manual', 
         sessionId, 
         aiModel, 
@@ -1505,8 +1562,17 @@ export const useAIChat = () => {
               ...sanitizeAIAnswerPayload({
                 requestId,
                 sessionId,
-                transcript: enrichedQuery,
+                transcript: transcriptForRequest,
                 currentQuestion: resolvedQuery,
+                ...(recentTranscriptWindow.length > 0
+                  ? { recentTranscriptWindow }
+                  : {}),
+                ...(speakerSeparatedTranscript.length > 0
+                  ? { speakerSeparatedTranscript }
+                  : {}),
+                ...(previousAiAnswers.length > 0
+                  ? { previousAiAnswers }
+                  : {}),
                 previousAiAnswer: previousAiAnswer || undefined,
                 previousCodeBlocks,
                 sourcePlatform: runtimePlatform,
@@ -1521,8 +1587,17 @@ export const useAIChat = () => {
         if (import.meta.env.DEV) {
           console.log("[AI Answer Debug][FE][Manual] POST /ai-answer body:", {
               ...sanitizeAIAnswerPayload({
-                transcript: enrichedQuery,
+                transcript: transcriptForRequest,
                 currentQuestion: resolvedQuery,
+                ...(recentTranscriptWindow.length > 0
+                  ? { recentTranscriptWindow }
+                  : {}),
+                ...(speakerSeparatedTranscript.length > 0
+                  ? { speakerSeparatedTranscript }
+                  : {}),
+                ...(previousAiAnswers.length > 0
+                  ? { previousAiAnswers }
+                  : {}),
                 previousAiAnswer: previousAiAnswer || undefined,
                 previousCodeBlocks,
                 sourcePlatform: runtimePlatform,
@@ -1629,6 +1704,9 @@ export const useAIChat = () => {
           : {}),
         ...(cachedContext?.speakerSeparatedTranscript?.length
           ? { speakerSeparatedTranscript: cachedContext.speakerSeparatedTranscript }
+          : {}),
+        ...(cachedContext?.previousAiAnswers?.length
+          ? { previousAiAnswers: cachedContext.previousAiAnswers }
           : {}),
         ...(cachedContext?.selectedAnswerId ? { selectedAnswerId: cachedContext.selectedAnswerId } : {}),
         ...(cachedContext?.selectedAnswerQuestion ? { selectedAnswerQuestion: cachedContext.selectedAnswerQuestion } : {}),

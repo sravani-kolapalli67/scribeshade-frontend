@@ -16,6 +16,23 @@ import {
   AlertTriangle, Cloud, CloudOff, Undo2, Redo2,
 } from "lucide-react";
 import { AiActivityButton } from "./AiActivityButton";
+import { withPersistedSectionValidation } from "../sectionQualityPersistence";
+
+function sanitizePdfBaseName(value: string): string {
+  return value.replace(/[^a-z0-9_\-\s]+/gi, "").trim().replace(/\s+/g, "_");
+}
+
+function buildResumePdfFilename(name: string, role: string, fallbackTitle: string): string {
+  const safeName = name.trim();
+  const safeRole = role.trim();
+  const baseName =
+    safeName && safeRole ? `${safeName} - ${safeRole}` :
+    safeName ? safeName :
+    safeRole ? safeRole :
+    fallbackTitle.trim() || "Resume";
+
+  return `${sanitizePdfBaseName(baseName) || "Resume"}.pdf`;
+}
 
 /**
  * Top navigation bar — title, undo/redo, auto-save toggle, PDF export, manual save.
@@ -37,6 +54,7 @@ export function TopBar() {
   const jobDescription = useSelector((s: RootState) => s.resumeBuilder.jobDescription);
   const jobTitle       = useSelector((s: RootState) => s.resumeBuilder.jobTitle);
   const company        = useSelector((s: RootState) => s.resumeBuilder.company);
+  const sectionValidation = useSelector((s: RootState) => s.resumeBuilder.sectionValidation);
   const populatedHtml  = useSelector((s: RootState) => s.resumeBuilder.populatedHtml);
   const { getToken }   = useAuth();
   const [isExporting, setIsExporting] = useState(false);
@@ -46,12 +64,13 @@ export function TopBar() {
     try {
       const userId = localStorage.getItem("userId");
       const token = await getToken();
+      const fieldsForSave = withPersistedSectionValidation(fields, sectionValidation);
       const res = await fetch(ENDPOINTS.resumeBuilderSave(), {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({
           userId, resumeId: savedResumeId ?? null, title: resumeTitle,
-          templateId, fields, sections, jobDescription, jobTitle, company, status: "draft",
+          templateId, fields: fieldsForSave, sections, jobDescription, jobTitle, company, status: "draft",
         }),
       });
       const data = await res.json();
@@ -62,7 +81,7 @@ export function TopBar() {
       console.error("[TopBar] save error:", err);
       dispatch(setAutoSaveStatus("error"));
     }
-  }, [dispatch, getToken, savedResumeId, resumeTitle, templateId, fields, sections, jobDescription, jobTitle, company]);
+  }, [dispatch, getToken, savedResumeId, resumeTitle, templateId, fields, sectionValidation, sections, jobDescription, jobTitle, company]);
 
   const handleExportPdf = useCallback(async () => {
     if (isExporting) return;
@@ -80,10 +99,16 @@ export function TopBar() {
       if (!token) token = await getToken({ skipCache: true });
       if (!token) throw new Error("Session expired — please refresh the page and try again");
       _dbg(`getToken done, htmlBytes=${JSON.stringify({ userId, resumeId: savedResumeId, populatedHtml: populatedHtml || undefined }).length}`);
+      const filename = buildResumePdfFilename(fields?.name || "", fields?.role || jobTitle || "", resumeTitle);
       const res = await fetch(ENDPOINTS.resumeBuilderExportPdf(), {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ userId, resumeId: savedResumeId, populatedHtml: populatedHtml || undefined }),
+        body: JSON.stringify({
+          userId,
+          resumeId: savedResumeId,
+          populatedHtml: populatedHtml || undefined,
+          suggestedFilename: filename.replace(/\.pdf$/i, ""),
+        }),
       });
       _dbg(`fetch response received status=${res.status}`);
 
@@ -101,15 +126,6 @@ export function TopBar() {
 
       const blob   = await res.blob();
       _dbg(`blob() done, size=${blob.size}`);
-      const headerName = res.headers.get("X-PDF-Filename");
-      
-      const userName = fields?.name || "Resume";
-      const targetRole = jobTitle || fields?.role || "";
-      const baseName = targetRole ? `${userName} - ${targetRole}` : userName;
-      
-      const filename =
-        headerName ||
-        `${baseName.replace(/[^a-z0-9_\-\s]+/gi, "").trim().replace(/\s+/g, "_")}.pdf`;
 
       const blobUrl = URL.createObjectURL(blob);
       const a = document.createElement("a");

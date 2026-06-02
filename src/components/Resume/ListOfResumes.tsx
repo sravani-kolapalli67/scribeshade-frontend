@@ -112,6 +112,12 @@ export default function ListOfResumes({
   const [refreshKey, setRefreshKey] = useState(0);
   const [atsLoadingIds, setAtsLoadingIds] = useState<Record<string, boolean>>({});
 
+  const openResumePreview = useCallback((resume: Resume) => {
+    onSelectResume(resume);
+    setPreviewResume(resume);
+    setIsPreviewOpen(true);
+  }, [onSelectResume]);
+
   // ✅ Listen for upload completion event
   useEffect(() => {
     const handleResumeUploaded = () => {
@@ -190,31 +196,12 @@ export default function ListOfResumes({
 
   // ✅ ATS — Open ATS report for resume using resumeId
   const handleATS = async (resume: Resume) => {
-    setAtsLoadingIds((prev) => ({ ...prev, [resume.id]: true }));
-
     try {
-      // ── Builder resumes: use the dedicated builder ATS endpoint ────────────
-      if (resume.source === "builder") {
-        const token = await getToken();
-        const response = await fetch(
-          `${import.meta.env.VITE_BACKEND_URL}/api/resume/builder/ats-score`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              ...(token ? { Authorization: `Bearer ${token}` } : {}),
-            },
-            body: JSON.stringify({ resumeId: resume.id }),
-          },
-        );
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "Failed to analyze resume");
-        // Refresh table so the ATS score column updates
-        setRefreshKey((prev) => prev + 1);
+      if (resume.atsAnalysis) {
         navigate("/resume/ats-result", {
           state: {
             analysis: {
-              ...data.data,
+              ...resume.atsAnalysis,
               filename: resume.filename,
               resumeId: resume.id,
             },
@@ -224,12 +211,15 @@ export default function ListOfResumes({
       }
 
       // ── Uploaded resumes: check for cached analysis first ─────────────────
-      if (resume.ats) {
+      if (resume.ats || (resume.atsScore !== undefined && resume.atsScore !== null)) {
+        setAtsLoadingIds((prev) => ({ ...prev, [resume.id]: true }));
         const res = await fetch(
           `${import.meta.env.VITE_BACKEND_URL}/api/resume/all-ats?userId=${userId}`,
         );
         const allAnalyzed = await res.json();
-        const existing = allAnalyzed.find((r: any) => r.id === resume.id);
+        const existing = Array.isArray(allAnalyzed)
+          ? allAnalyzed.find((r: any) => r.id === resume.id)
+          : null;
 
         if (existing?.atsAnalysis) {
           navigate("/resume/ats-result", {
@@ -245,30 +235,13 @@ export default function ListOfResumes({
         }
       }
 
-      // Otherwise run fresh analysis for uploaded resumes
-      const response = await fetch(
-        `${import.meta.env.VITE_BACKEND_URL}/api/resume/ats-score`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ resumeId: resume.id }),
-        },
-      );
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || "Failed to analyze resume");
-      }
-
-      // Refresh table so the ATS score column updates
-      setRefreshKey((prev) => prev + 1);
       navigate("/resume/ats-result", {
         state: {
-          analysis: {
-            ...data,
-            filename: resume.filename,
+          pendingAnalysis: {
             resumeId: resume.id,
+            filename: resume.filename,
+            source: resume.source ?? "uploaded",
+            userId,
           },
         },
       });
@@ -397,7 +370,7 @@ export default function ListOfResumes({
         return (
           <div className="min-w-0 flex-1">
             <div
-              onClick={() => onSelectResume(resume)}
+              onClick={() => openResumePreview(resume)}
               className={cn(
                 "cursor-pointer font-medium text-sm truncate",
                 selectedResumeId === resume.id && "text-primary",
@@ -535,8 +508,7 @@ export default function ListOfResumes({
               size="icon"
               variant="ghost"
               onClick={() => {
-                setPreviewResume(resume);
-                setIsPreviewOpen(true);
+                openResumePreview(resume);
               }}
               className="h-8 w-8"
               title="Preview Resume"
@@ -630,7 +602,7 @@ export default function ListOfResumes({
       },
     },
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [onSelectResume, selectedResumeId, atsLoadingIds, handleATS]);
+  ], [openResumePreview, selectedResumeId, atsLoadingIds, handleATS]);
 
   return (
     <div className="space-y-4">
@@ -646,6 +618,7 @@ export default function ListOfResumes({
         fetchDataFn={fetchResumes}
         fetchByIdsFn={async () => []}
         idField="id"
+        onRowClick={(resume) => openResumePreview(resume)}
         renderToolbarContent={() => (
           <UploadResumeDialog
             userId={userId}
