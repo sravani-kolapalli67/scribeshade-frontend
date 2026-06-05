@@ -48,11 +48,23 @@ function normalizeLine(text: string): string {
     .trim();
 }
 
+export function stripLeadingConjunctionsAndFillers(text: string): string {
+  let cleaned = text.trim();
+  const regex = /^(?:and|or|then|also|but|so|now|plus|because|okay|ok|great|right|perfect|well|yes|no|wait|hey|hi|hello)\b\s*,?\s*/i;
+  let previous;
+  do {
+    previous = cleaned;
+    cleaned = cleaned.replace(regex, "");
+  } while (cleaned !== previous);
+  return cleaned;
+}
+
 function isQuestionLike(text: string): boolean {
   const t = (text || "").trim();
   if (!t) return false;
   if (t.includes("?")) return true;
-  return QUESTION_LIKE_RE.test(t);
+  const stripped = stripLeadingConjunctionsAndFillers(t);
+  return QUESTION_LIKE_RE.test(stripped);
 }
 
 function isLikelyIncomplete(text: string): boolean {
@@ -184,6 +196,28 @@ function buildInterviewerCompoundQuestion(
     .trim();
 }
 
+function buildTranscriptCompoundQuestion(
+  entries: AdaptiveTranscriptEntry[],
+): string {
+  const chunks = entries
+    .map((entry) => entry.text.trim())
+    .filter(Boolean);
+  if (!chunks.length) return "";
+  let startIndex = -1;
+  for (let index = chunks.length - 1; index >= 0; index -= 1) {
+    if (INTERVIEW_PROMPT_START_RE.test(chunks[index])) {
+      startIndex = index;
+      break;
+    }
+  }
+  const scoped = startIndex >= 0 ? chunks.slice(startIndex) : chunks;
+  return scoped
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .replace(/^(?:(?:so|okay|great|right|perfect)[,.;:\s]+)+/i, "")
+    .trim();
+}
+
 function containsTokenSequence(tokens: string[], sequence: string[]): boolean {
   if (!tokens.length || !sequence.length || sequence.length > tokens.length) {
     return false;
@@ -303,24 +337,25 @@ export function buildAdaptiveAiContext(input: {
   }
 
   let interviewerQuestion = buildInterviewerCompoundQuestion(selected);
+  let transcriptQuestion = interviewerQuestion || buildTranscriptCompoundQuestion(selected);
   const fallbackQuestion = (input.fallbackQuestion || "").trim();
   const liveInterimQuestion = (input.liveInterimQuestion || "").trim();
-  if (interviewerQuestion && fallbackQuestion) {
-    interviewerQuestion = mergeFallbackTailIntoCompound(
-      interviewerQuestion,
+  if (transcriptQuestion && fallbackQuestion) {
+    transcriptQuestion = mergeFallbackTailIntoCompound(
+      transcriptQuestion,
       fallbackQuestion,
     );
   }
-  let currentQuestion = interviewerQuestion || fallbackQuestion || liveInterimQuestion;
+  let currentQuestion = transcriptQuestion || fallbackQuestion || liveInterimQuestion;
 
   const shouldUseInterviewerCompound =
-    interviewerQuestion &&
+    transcriptQuestion &&
     fallbackQuestion &&
-    interviewerQuestion.split(/\s+/).length > fallbackQuestion.split(/\s+/).length + 4 &&
-    tokenOverlapRatio(interviewerQuestion, fallbackQuestion) >= 0.2 &&
-    tokenOverlapRatio(interviewerQuestion, fallbackQuestion) <= 0.85;
+    transcriptQuestion.split(/\s+/).length > fallbackQuestion.split(/\s+/).length + 4 &&
+    tokenOverlapRatio(transcriptQuestion, fallbackQuestion) >= 0.2 &&
+    tokenOverlapRatio(transcriptQuestion, fallbackQuestion) <= 0.85;
   if (shouldUseInterviewerCompound) {
-    currentQuestion = interviewerQuestion;
+    currentQuestion = transcriptQuestion;
   }
 
   if (isLikelyIncomplete(currentQuestion) && windowSizeUsed < 60) {
@@ -332,13 +367,14 @@ export function buildAdaptiveAiContext(input: {
     }
     selected = pickWindow(selectedSource, windowSizeUsed, 240_000);
     interviewerQuestion = buildInterviewerCompoundQuestion(selected);
-    if (interviewerQuestion && fallbackQuestion) {
-      interviewerQuestion = mergeFallbackTailIntoCompound(
-        interviewerQuestion,
+    transcriptQuestion = interviewerQuestion || buildTranscriptCompoundQuestion(selected);
+    if (transcriptQuestion && fallbackQuestion) {
+      transcriptQuestion = mergeFallbackTailIntoCompound(
+        transcriptQuestion,
         fallbackQuestion,
       );
     }
-    currentQuestion = interviewerQuestion || currentQuestion;
+    currentQuestion = transcriptQuestion || currentQuestion;
   }
 
   currentQuestion = currentQuestion.replace(/\s+/g, " ").trim();

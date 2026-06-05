@@ -280,105 +280,6 @@ function deriveAnswerTopicFromText(text: string): string {
   return "general";
 }
 
-function isWeakDeicticQuestion(text: string): boolean {
-  const t = normalizeLoose(text || "");
-  if (!t) return false;
-  return /^(that|this|that approach|this approach|explain that|explain this|can you explain that|can you explain this|tell me more|tell me more about that|how so|why|explain it|continue)\??$/.test(
-    t,
-  );
-}
-
-function reconstructWeakFollowupQuestion(
-  recentTranscriptWindow: string[],
-  speakerSeparatedTranscript: { content: string }[],
-  currentQuestion: string,
-): {
-  weakFollowupDetected: boolean;
-  reconstructedCurrentQuestion: string;
-  reconstructionChunksUsed: string[];
-} {
-  const original = (currentQuestion || "").trim();
-  const weakFollowupDetected = isWeakDeicticQuestion(original);
-  if (!weakFollowupDetected) {
-    return {
-      weakFollowupDetected: false,
-      reconstructedCurrentQuestion: original,
-      reconstructionChunksUsed: [],
-    };
-  }
-
-  const topicHints = [
-    "mongodb",
-    "mongo",
-    "mongoose",
-    "user event",
-    "user events",
-    "event logs",
-    "tracking",
-    "project",
-    "previous",
-    "mentioned",
-    "used",
-    "approach",
-  ];
-
-  const baseChunks = speakerSeparatedTranscript.length
-    ? speakerSeparatedTranscript.map((e) => e.content || "")
-    : recentTranscriptWindow.map((line) => line.replace(/^\[[^\]]+\]:\s*/, ""));
-
-  const candidates = baseChunks
-    .slice(-10)
-    .map((c) => (c || "").trim())
-    .filter(Boolean);
-
-  const deduped: string[] = [];
-  for (const c of candidates) {
-    const isDup = deduped.some((d) => areNearDuplicateTexts(d, c));
-    if (!isDup) deduped.push(c);
-  }
-
-  const scored = deduped.map((chunk) => {
-    const n = normalizeLoose(chunk);
-    let score = 0;
-    for (const hint of topicHints) {
-      if (n.includes(hint)) score += 2;
-    }
-    if (/[?]/.test(chunk)) score += 1;
-    return { chunk, score };
-  });
-
-  const relevant = [...scored]
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 8)
-    .sort(
-      (a, b) =>
-        deduped.indexOf(a.chunk) - deduped.indexOf(b.chunk),
-    )
-    .map((x) => x.chunk);
-
-  const merged = deduplicatePhrases(
-    relevant.join(" ").replace(/\s+/g, " ").trim(),
-  );
-  if (!merged) {
-    return {
-      weakFollowupDetected: true,
-      reconstructedCurrentQuestion: original,
-      reconstructionChunksUsed: relevant,
-    };
-  }
-
-  const suffix = /\?$/.test(original) ? original : `${original}?`;
-  const reconstructedCurrentQuestion = /(\bthat\b|\bthis\b|\bapproach\b)/i.test(original)
-    ? `${merged.replace(/[?]+$/g, "")}. ${suffix}`.replace(/\s+/g, " ").trim()
-    : merged;
-
-  return {
-    weakFollowupDetected: true,
-    reconstructedCurrentQuestion,
-    reconstructionChunksUsed: relevant,
-  };
-}
-
 function endsWithConnector(text: string): boolean {
   const t = (text || "").trim().toLowerCase();
   return /\b(the|that|this|in|on|of|with|for|to|and|or|because|if|when|while)$/.test(
@@ -1974,6 +1875,7 @@ export function useFloatingSession() {
   // (jump to it) vs "another response was appended while user is reading an
   // earlier one" (stay put).
   const prevResponsesLenRef = useRef(0);
+  const wasGeneratingResponseRef = useRef(false);
 
   useEffect(() => {
     const prev = prevResponsesLenRef.current;
@@ -2004,6 +1906,29 @@ export function useFloatingSession() {
       dispatch(setIsResponsesExpanded(true));
     }
   }, [isAnswering, isAnalyzing, dispatch]);
+
+  useEffect(() => {
+    const isGenerating = isAnswering || isAnalyzing;
+    const justFinishedGenerating =
+      wasGeneratingResponseRef.current && !isGenerating;
+
+    if (
+      justFinishedGenerating &&
+      aiResponses.length > 0 &&
+      !isTranscriptExpanded
+    ) {
+      dispatch(setCurrentResponseIndex(aiResponses.length - 1));
+      dispatch(setIsResponsesExpanded(true));
+    }
+
+    wasGeneratingResponseRef.current = isGenerating;
+  }, [
+    aiResponses.length,
+    dispatch,
+    isAnalyzing,
+    isAnswering,
+    isTranscriptExpanded,
+  ]);
 
   // ── AI action handlers ──────────────────────────────────────────────────────
 
@@ -2175,17 +2100,30 @@ export function useFloatingSession() {
           fallbackSource: fallbackResolved?.source || "pre_debounce",
           fallbackQuestion,
         });
-      } else {
-        console.log("[useFloatingSession] handleAiAnswerClick: No confident active question after debounce.", {
-          evolving,
-          detection,
-          preDebounceDetection,
-          semanticallyStable,
-          snapshotTimestamp,
-        });
-        return;
-      }
-    }
+	      } else {
+	        const transcriptFallback = msgsSnapshot
+	          .filter((m) => (m.sender === "Interviewer" || m.sender === "User") && !!m.text?.trim())
+	          .slice(-20)
+	          .map((m) => m.text.trim())
+	          .join(" ");
+	        question = transcriptFallback || liveInterviewerTextSnapshot || "";
+	        forcedByExplicitClick = true;
+	        effectiveDetection = {
+	          ...detection,
+	          activeQuestion: question,
+	          cleanedQuestion: question,
+	          confidenceScore: Math.max(detection.confidenceScore || 0, 0.2),
+	          ignoredNoise: false,
+	        };
+	        console.log("[useFloatingSession] handleAiAnswerClick: No confident active question; sending raw transcript to backend composer.", {
+	          evolving,
+	          detection,
+	          preDebounceDetection,
+	          semanticallyStable,
+	          snapshotTimestamp,
+	        });
+	      }
+	    }
 
     const preNormalizedQuestion = normalizeTranscriptText(
       preDebounceDetection.cleanedQuestion || "",
@@ -2298,33 +2236,19 @@ export function useFloatingSession() {
     const selectedAnswerTopic = deriveAnswerTopicFromText(
       `${selectedAnswerQuestion} ${selectedAnswerText}`,
     );
-    const followupReconstruction = reconstructWeakFollowupQuestion(
-      recentTranscriptWindow,
-      speakerSeparatedTranscript,
-      adaptiveContext.currentQuestion || question,
-    );
-    const effectiveCurrentQuestion =
-      followupReconstruction.reconstructedCurrentQuestion ||
-      adaptiveContext.currentQuestion ||
-      question;
-    console.log("[useFloatingSession] followupQuestionReconstruction", {
-      originalCurrentQuestion: question,
-      weakFollowupDetected: followupReconstruction.weakFollowupDetected,
-      reconstructedCurrentQuestion: followupReconstruction.reconstructedCurrentQuestion,
-      reconstructionChunksUsed: followupReconstruction.reconstructionChunksUsed,
-      selectedAnswerTopic,
-    });
+    const effectiveCurrentQuestion = adaptiveContext.currentQuestion || question;
 
     const rawTranscript =
       recentTranscriptWindow.length > 0
         ? recentTranscriptWindow.join("\n")
         : question;
+    const detectionHint = effectiveCurrentQuestion || rawTranscript.slice(-500);
 
-      const payload: AIAnswerRequestPayload = {
+    const payload: AIAnswerRequestPayload = {
       requestId: opRequestId,
       sessionId: info.sessionId,
       transcript: rawTranscript,
-      currentQuestion: effectiveCurrentQuestion,
+      ...(effectiveCurrentQuestion ? { currentQuestion: effectiveCurrentQuestion } : {}),
       recentTranscriptWindow,
       speakerSeparatedTranscript,
       ...(adaptiveContext.previousAiAnswers.length > 0
@@ -2343,17 +2267,22 @@ export function useFloatingSession() {
         ? { selectedAnswerCodeBlocks }
         : {}),
       ...(selectedAnswerTopic ? { selectedAnswerTopic } : {}),
-      activeQuestionDetection: {
-        activeQuestion: adaptiveContext.currentQuestion || question,
-        cleanedQuestion: effectiveCurrentQuestion,
-        isFollowUp: effectiveDetection.isFollowUp,
-        topicChanged: effectiveDetection.topicChanged,
-        confidenceScore: effectiveDetection.confidenceScore,
-        ignoredNoise: effectiveDetection.ignoredNoise,
-        ...(effectiveDetection.referencedHistoryTurnId
-          ? { referencedHistoryTurnId: effectiveDetection.referencedHistoryTurnId }
-          : {}),
-      },
+      answerClickMode: selectedAiMessage?.id ? "answer_followup" : "answer_latest_unanswered",
+      ...(detectionHint
+        ? {
+            activeQuestionDetection: {
+              activeQuestion: detectionHint,
+              cleanedQuestion: detectionHint,
+              isFollowUp: effectiveDetection.isFollowUp,
+              topicChanged: effectiveDetection.topicChanged,
+              confidenceScore: effectiveDetection.confidenceScore,
+              ignoredNoise: effectiveDetection.ignoredNoise,
+              ...(effectiveDetection.referencedHistoryTurnId
+                ? { referencedHistoryTurnId: effectiveDetection.referencedHistoryTurnId }
+                : {}),
+            },
+          }
+        : {}),
       answerMode: "auto",
       sourcePlatform: "tauri",
     };

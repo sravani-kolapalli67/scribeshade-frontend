@@ -16,6 +16,25 @@ interface AudioDeviceInfo {
   groupId?: string;
 }
 
+function isHeadsetMicrophone(label: string): boolean {
+  return /bluetooth|airpods|headset|earbuds|earphones/i.test(label);
+}
+
+function buildMicAudioConstraints(
+  preferredDeviceId: string,
+  preferredDeviceLabel: string,
+): MediaTrackConstraints {
+  const headsetMic = isHeadsetMicrophone(preferredDeviceLabel);
+  return {
+    ...(preferredDeviceId ? { deviceId: { ideal: preferredDeviceId } } : {}),
+    echoCancellation: !headsetMic,
+    noiseSuppression: !headsetMic,
+    autoGainControl: true,
+    channelCount: 1,
+    sampleRate: 48000,
+  };
+}
+
 export const useDeepgram = ({
   apiKey,
   model = "nova-3",
@@ -169,6 +188,8 @@ export const useDeepgram = ({
 
   const selectedDeviceIdRef = useRef(selectedDeviceId);
   useEffect(() => { selectedDeviceIdRef.current = selectedDeviceId; }, [selectedDeviceId]);
+  const audioDevicesRef = useRef<AudioDeviceInfo[]>(audioDevices);
+  useEffect(() => { audioDevicesRef.current = audioDevices; }, [audioDevices]);
 
   const startTranscription = useCallback(async () => {
     // Use the ref (not the closure-captured state) so retries always get the
@@ -226,16 +247,25 @@ export const useDeepgram = ({
           stream = cached!;
         } else {
           const preferredDeviceId = selectedDeviceIdRef.current;
+          const preferredDeviceLabel =
+            audioDevicesRef.current.find((device) => device.deviceId === preferredDeviceId)?.label ||
+            currentDeviceLabel;
+          const audioConstraints = buildMicAudioConstraints(
+            preferredDeviceId,
+            preferredDeviceLabel,
+          );
           stream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              ...(preferredDeviceId ? { deviceId: { ideal: preferredDeviceId } } : {}),
-              echoCancellation: true,
-              noiseSuppression: true,
-              autoGainControl: true,
-              channelCount: 1,
-              sampleRate: 48000,
-            },
+            audio: audioConstraints,
           });
+          if (import.meta.env.DEV) {
+            const track = stream.getAudioTracks()[0];
+            console.log("[useDeepgram] Mic capture constraints applied", {
+              deviceLabel: preferredDeviceLabel || "unknown",
+              headsetMic: isHeadsetMicrophone(preferredDeviceLabel),
+              requested: audioConstraints,
+              actual: track?.getSettings(),
+            });
+          }
           cachedMicStreamRef.current = stream;
         }
         ownsStreamRef.current = true;
@@ -427,7 +457,7 @@ export const useDeepgram = ({
   // isTranscribing intentionally removed from deps — use isTranscribingRef.current
   // for the guard so retry closures always read the live value, not a stale snapshot.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiKey, model, language, keyterms, onTranscript, inputStream]);
+  }, [apiKey, model, language, keyterms, onTranscript, inputStream, currentDeviceLabel]);
 
   // Keep a stable ref to the latest startTranscription so retry timers created
   // inside stale onclose closures always call the current version.

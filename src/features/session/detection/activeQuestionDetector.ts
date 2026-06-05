@@ -29,6 +29,17 @@ const TECH_TOPIC_RE = /\b(databricks|pyspark|spark|adf|azure devops|azure|sql|po
 const ADMIN_NOISE_RE =
   /\b(aadhaar|pan card|camera|show it|government id|audible|rejoin|wait a minute|hold)\b/i;
 
+export function stripLeadingConjunctionsAndFillers(text: string): string {
+  let cleaned = text.trim();
+  const regex = /^(?:and|or|then|also|but|so|now|plus|because|okay|ok|great|right|perfect|well|yes|no|wait|hey|hi|hello)\b\s*,?\s*/i;
+  let previous;
+  do {
+    previous = cleaned;
+    cleaned = cleaned.replace(regex, "");
+  } while (cleaned !== previous);
+  return cleaned;
+}
+
 function norm(text: string): string {
   return (text || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
 }
@@ -37,8 +48,9 @@ function isQuestionLike(text: string): boolean {
   const t = (text || "").trim();
   if (!t) return false;
   if (t.includes("?")) return true;
+  const stripped = stripLeadingConjunctionsAndFillers(t);
   return /^(what|why|how|when|where|which|who|can|could|would|should|is|are|do|does|did|explain|show|give|write|debug|optimi[sz]e|refactor)\b/i.test(
-    t,
+    stripped,
   );
 }
 

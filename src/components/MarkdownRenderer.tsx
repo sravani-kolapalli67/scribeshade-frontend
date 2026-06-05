@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Check, Copy, Code2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { isTauri } from "@/lib/utils";
+
 
 interface CodeBlockProps {
   children: string;
@@ -69,16 +71,64 @@ interface MarkdownRendererProps {
   className?: string;
 }
 
+function highlightWebOnlyTextNode(text: string): React.ReactNode {
+  // Only highlight on web. Tauri should keep native styling.
+  if (isTauri()) return text;
+
+  const markers = [
+    { raw: "QUESTION:", label: "QUESTION:" },
+    { raw: "ANSWER:", label: "ANSWER:" },
+    { raw: "Q:", label: "Q:" },
+    { raw: "A:", label: "A:" },
+  ];
+
+  const upper = text.toUpperCase();
+  if (!markers.some((m) => upper.includes(m.raw))) return text;
+
+  // Highlight only exact marker tokens.
+  const patterns = markers.map((m) => m.raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const re = new RegExp(`(${patterns.join("|")})`, "gi");
+
+  const parts = text.split(re);
+  if (parts.length <= 1) return text;
+
+    return parts.map((part, idx) => {
+    const isMarker = markers.some((m) => part.toUpperCase() === m.raw.toUpperCase());
+    if (!isMarker) return <span key={idx}>{part}</span>;
+    return (
+      <span
+
+        key={idx}
+        className="px-1.5 py-0.5 rounded bg-brand-muted text-brand-active font-bold border border-brand-subtle"
+      >
+        {part}
+      </span>
+    );
+  });
+}
+
+
 export const MarkdownRenderer = ({
   content,
   className = "",
 }: MarkdownRendererProps) => {
+  const isWeb = !isTauri();
+  const enhancedClassName = isWeb
+    ? `${className} web-generated-markdown`
+    : className;
+
   return (
-    <div className={`markdown-content ${className}`}>
+    <div className={`markdown-content ${enhancedClassName}`}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
+          // Highlight web-only markers inside text.
+          // ReactMarkdown calls `text` for plain text nodes.
+          text({ children }: any) {
+            return typeof children === "string" ? highlightWebOnlyTextNode(children) : children;
+          },
           // Use the custom CodeBlock for multi-line code
+
           code({ node, inline, className, children, ...props }: any) {
             return !inline ? (
               <CodeBlock className={className}>
@@ -95,6 +145,7 @@ export const MarkdownRenderer = ({
           },
           // Custom heading styles
           h1: ({ children }) => (
+
             <h1 className="text-2xl font-bold mt-8 mb-4 text-gray-900 border-b border-gray-100 pb-2">
               {children}
             </h1>

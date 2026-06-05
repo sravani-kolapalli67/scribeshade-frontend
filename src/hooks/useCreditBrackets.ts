@@ -1,63 +1,27 @@
-import { useState, useEffect } from "react";
+import { useEffect } from "react";
+import { useAppDispatch, useAppSelector } from "@/store/hooks";
+import {
+  fetchCreditBrackets,
+  type CreditBracket,
+} from "@/store/pricingSlice";
 
-export interface CreditBracket {
-  id: string;
-  bracketMinutes: number;
-  creditsFull: string;
-  creditsHalf: string;
-  creditsPerMinute: string;
-  graceZoneMinutes: number;
-  isActive: boolean;
-}
+export type { CreditBracket } from "@/store/pricingSlice";
 
 interface UseCreditBracketsReturn {
   brackets: CreditBracket[];
   isLoading: boolean;
 }
 
-// Module-level cache — brackets don't change per request, no auth needed
-let cachedBrackets: CreditBracket[] | null = null;
-let isFetching = false;
-const listeners: Array<(b: CreditBracket[]) => void> = [];
-
-function subscribeBrackets(cb: (b: CreditBracket[]) => void) {
-  if (cachedBrackets) { cb(cachedBrackets); return () => {}; }
-  listeners.push(cb);
-  if (!isFetching) {
-    isFetching = true;
-    fetch(`${import.meta.env.VITE_BACKEND_URL}/api/credits/brackets`)
-      .then((r) => r.json())
-      .then((json) => {
-        cachedBrackets = (json.data ?? json).filter((b: CreditBracket) => b.isActive);
-        listeners.splice(0).forEach((fn) => fn(cachedBrackets!));
-      })
-      .catch(() => {
-        isFetching = false;
-        listeners.splice(0);
-      });
-  }
-  return () => {
-    const idx = listeners.indexOf(cb);
-    if (idx !== -1) listeners.splice(idx, 1);
-  };
-}
-
 export function useCreditBrackets(): UseCreditBracketsReturn {
-  const [brackets, setBrackets] = useState<CreditBracket[]>(cachedBrackets ?? []);
-  const [isLoading, setIsLoading] = useState(!cachedBrackets);
+  const dispatch = useAppDispatch();
+  const brackets = useAppSelector((state) => state.pricing.creditBrackets);
+  const status = useAppSelector((state) => state.pricing.status);
 
   useEffect(() => {
-    if (cachedBrackets) {
-      setBrackets(cachedBrackets);
-      setIsLoading(false);
-      return;
+    if (status === "idle") {
+      dispatch(fetchCreditBrackets());
     }
-    const unsub = subscribeBrackets((b) => {
-      setBrackets(b);
-      setIsLoading(false);
-    });
-    return unsub;
-  }, []);
+  }, [dispatch, status]);
 
-  return { brackets, isLoading };
+  return { brackets, isLoading: status === "idle" || status === "loading" };
 }

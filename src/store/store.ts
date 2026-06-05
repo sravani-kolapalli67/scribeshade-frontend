@@ -6,6 +6,7 @@ import settingsReducer from "@/features/settings/slices/settingsSlice";
 import overlayReducer from "@/features/launcher/slices/overlaySlice";
 import sessionFlowReducer from "@/features/session/slices/sessionFlowSlice";
 import floatingSessionReducer from "@/features/session/slices/floatingSessionSlice";
+import pricingReducer from "./pricingSlice";
 
 export const store = configureStore({
   reducer: {
@@ -16,9 +17,9 @@ export const store = configureStore({
     overlay:         overlayReducer,
     sessionFlow:     sessionFlowReducer,
     floatingSession: floatingSessionReducer,
+    pricing:         pricingReducer,
   },
 });
 
 export type RootState = ReturnType<typeof store.getState>;
 export type AppDispatch = typeof store.dispatch;
-

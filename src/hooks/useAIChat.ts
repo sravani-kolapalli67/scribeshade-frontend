@@ -42,6 +42,26 @@ const NO_QUESTION_MESSAGE =
 const NO_QUESTION_HEURISTIC =
   /(no interview questions?\s+(?:are|were)?\s*visible|no clear question|please provide|share the actual interview|clarify|not clearly visible)/i;
 
+function sanitizeGeneratedQuestionTitle(text: string): string {
+  return (text || "")
+    .replace(/\[(?:user|candidate|interviewer|assistant|system)\]\s*:\s*/gi, "")
+    .replace(/(^|[.!?]\s+)(?:candidate|user|interviewer|assistant|system)\s*:\s*/gi, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function removeEmptyAiPlaceholders(messages: Message[]): Message[] {
+  return messages.filter((message) => {
+    if (message.sender !== "AI") return true;
+    if (message.text.trim()) return true;
+    if (message.question?.trim()) return true;
+    if (message.questionMeta) return true;
+    if (message.snapshotId) return true;
+    if (message.originalGenerationContext?.originalQuestion?.trim()) return true;
+    if (message.originalGenerationContext?.currentQuestion?.trim()) return true;
+    return false;
+  });
+}
 
 type AIAnswerRequestInput = string | AIAnswerRequestPayload;
 type OriginalGenerationContext = NonNullable<Message["originalGenerationContext"]>;
@@ -365,7 +385,7 @@ export function parseAnswerContent(rawText: string, fallbackQuestion?: string): 
   );
 
   if (structuredMatch) {
-    const question = structuredMatch[1].trim();
+    const question = sanitizeGeneratedQuestionTitle(structuredMatch[1]);
     const answer = structuredMatch[2].trim();
     return {
       question: question || fallbackQuestion?.trim() || "",
@@ -383,9 +403,9 @@ export function parseAnswerContent(rawText: string, fallbackQuestion?: string): 
     // Partial: QUESTION content is streaming but ANSWER hasn't arrived.
     // Stream the AI-generated/cleaned question into the UI while the answer
     // is still being generated.
-    const partialQuestion = orphanQMatch[1]
+    const partialQuestion = sanitizeGeneratedQuestionTitle(orphanQMatch[1]
       .replace(/\*{0,2}\s*ANSWER\s*:?\s*\*{0,2}[\s\S]*$/i, "")
-      .trim();
+      .trim());
     return {
       question: partialQuestion || fallbackQuestion?.trim() || "",
       answer: "",
@@ -476,8 +496,9 @@ async function consumeSegmentedStream(
         // on new segment cards (mirroring what handleAiAnswerSingle does).
         const { question: extractedQuestion } = parseAnswerContent(rawText);
         const displayText = rawText;
-        const displayQuestion =
-          extractedQuestion || streamQuestionMeta?.displayQuestion || "";
+        const displayQuestion = sanitizeGeneratedQuestionTitle(
+          extractedQuestion || streamQuestionMeta?.displayQuestion || "",
+        );
 
         const idx = next.findIndex((m) => m.id === sid);
         if (idx >= 0) {
@@ -634,7 +655,6 @@ export const useAIChat = () => {
   const pendingLoadingResetRef = useRef<(() => void) | null>(null);
 
   const aiChatRef = useRef<Message[]>([]);
-  const questionHistoryRef = useRef<{ key: string; t: number }[]>([]);
 
   useEffect(() => {
     aiChatRef.current = aiChat;
@@ -803,22 +823,28 @@ export const useAIChat = () => {
   const applyQuestionGuardrail = useCallback(
     (
       newMessageIds: string[],
-      options: { fallbackQuestion?: string; dedupeWindowMs?: number } = {},
+      options: { fallbackQuestion?: string } = {},
     ) => {
       if (!newMessageIds.length) return;
 
-      const now = Date.now();
-      const dedupeWindowMs = options.dedupeWindowMs ?? 45_000;
-
       setAiChat((prev) => {
         const existingNewIds = new Set(newMessageIds);
-        const recentHistory = questionHistoryRef.current.filter(
-          (item) => now - item.t < dedupeWindowMs,
-        );
-        const seenKeys = new Set(recentHistory.map((item) => item.key));
+        const existingVisibleKeys = new Set<string>();
+
+        for (const msg of prev) {
+          if (existingNewIds.has(msg.id) || msg.sender !== "AI") continue;
+
+          const visibleCandidate =
+            msg.question?.trim() || extractQuestionCandidate(msg.text);
+          const visibleKey = normalizeQuestionKey(visibleCandidate || "");
+
+          if (visibleKey) {
+            existingVisibleKeys.add(visibleKey);
+          }
+        }
+
         const batchKeys = new Set<string>();
         const next: Message[] = [];
-        const keptHistory: { key: string; t: number }[] = [];
 
         for (const msg of prev) {
           if (!existingNewIds.has(msg.id)) {
@@ -838,21 +864,16 @@ export const useAIChat = () => {
             continue;
           }
 
-          const duplicate = seenKeys.has(key) || batchKeys.has(key);
+          const duplicate = existingVisibleKeys.has(key) || batchKeys.has(key);
           if (duplicate && !isLikelyFollowUpQuestion(candidate)) {
             console.log("[useAIChat] Dropped duplicate AI question card:", candidate);
             continue;
           }
 
           batchKeys.add(key);
-          seenKeys.add(key);
-          keptHistory.push({ key, t: now });
           next.push({ ...msg, question: msg.question || candidate });
         }
 
-        questionHistoryRef.current = [...recentHistory, ...keptHistory].slice(
-          -100,
-        );
         return next;
       });
     },
@@ -914,7 +935,7 @@ export const useAIChat = () => {
             transcript:
               contextPayload.transcript ||
               contextPayload.currentQuestion ||
-              "screen visible interview question",
+              "screen_analysis",
             ...contextPayload,
           });
           formData.append("contextPayload", JSON.stringify(normalizedContext));
@@ -1060,11 +1081,11 @@ export const useAIChat = () => {
           console.log(`[useAIChat] handleAnalyzeScreen: finally block for request ID: ${reqId}. Resetting isAnalyzing.`);
           pendingLoadingResetRef.current = null;
           setIsAnalyzing(false);
-        safeSetAiChat((prev) => prev.filter((m) => m.sender !== "AI" || m.text.trim() !== ""));
+          safeSetAiChat(removeEmptyAiPlaceholders);
         } else {
           console.log(`[useAIChat] handleAnalyzeScreen: request ID mismatch in finally block (already superseded). Active: ${activeRequestIdRef.current}, Current: ${reqId}`);
           // Loading was already reset by startNewRequest — just clean empty cards.
-          safeSetAiChat((prev) => prev.filter((m) => m.sender !== "AI" || m.text.trim() !== ""));
+          safeSetAiChat(removeEmptyAiPlaceholders);
         }
       }
     },
@@ -1088,23 +1109,30 @@ export const useAIChat = () => {
       );
       const continuity = applyContinuityToQuestion(rawQuestion, "button", "transcript");
       const normalizedQuestion = continuity.resolvedQuestion || rawQuestion;
+      const fallbackTranscriptInput =
+        basePayload.transcript ||
+        (basePayload.recentTranscriptWindow || []).join("\n") ||
+        (basePayload.speakerSeparatedTranscript || [])
+          .map((entry) => entry.content)
+          .join("\n");
+      const generationInput = normalizedQuestion.trim() || fallbackTranscriptInput.trim();
       if (import.meta.env.DEV) {
         console.log("[AI Answer Debug][FE] Raw input request:", request);
         console.log("[AI Answer Debug][FE] Base sanitized payload:", basePayload);
         console.log("[AI Answer Debug][FE] Resolved query before normalization:", resolvedFromPayload);
       }
-      console.log(`[useAIChat] handleAiAnswer triggered. sessionId: ${sessionId}, question: "${normalizedQuestion.slice(0, 100)}...", model: ${aiModel}`);
-      if (!normalizedQuestion.trim()) {
-        console.log("[useAIChat] handleAiAnswer: Question is empty. Aborting.");
+      console.log(`[useAIChat] handleAiAnswer triggered. sessionId: ${sessionId}, question: "${generationInput.slice(0, 100)}...", model: ${aiModel}`);
+      if (!generationInput.trim()) {
+        console.log("[useAIChat] handleAiAnswer: Transcript input is empty. Aborting.");
         return;
       }
 
       // Same-question dedup window (4 s).
       const now = Date.now();
-      const dedupeKey = normalizedQuestion.trim().toLowerCase();
+      const dedupeKey = generationInput.trim().toLowerCase();
       const recent = recentQuestionsRef.current.filter((r) => now - r.t < 4000);
       if (recent.some((r) => r.q === dedupeKey)) {
-        console.log("[useAIChat] handleAiAnswer: Suppressed duplicate question (within 4s dedup window):", normalizedQuestion.slice(0, 60));
+        console.log("[useAIChat] handleAiAnswer: Suppressed duplicate question (within 4s dedup window):", generationInput.slice(0, 60));
         return;
       }
       recentQuestionsRef.current = [...recent, { q: dedupeKey, t: now }].slice(-10);
@@ -1114,7 +1142,8 @@ export const useAIChat = () => {
         ...basePayload,
         requestId,
         sessionId,
-        currentQuestion: normalizedQuestion,
+        transcript: basePayload.transcript || generationInput,
+        ...(normalizedQuestion.trim() ? { currentQuestion: normalizedQuestion } : {}),
       });
       if (import.meta.env.DEV) {
         console.log("[AI Answer Debug][FE] Final normalized payload before routing:", normalizedPayload);
@@ -1132,7 +1161,7 @@ export const useAIChat = () => {
           aiModel,
         );
         previousContextRef.current = {
-          transcript: normalizedQuestion,
+          transcript: generationInput,
           timestamp: Date.now(),
         };
         return;
@@ -1142,7 +1171,7 @@ export const useAIChat = () => {
       // Use 'button' mode for manual clicks to bypass noise classification
       const decision = prepareGeneration(
         {
-          transcript: normalizedQuestion,
+          transcript: generationInput,
           mode: "button",
           sessionId,
           aiModel,
@@ -1154,34 +1183,34 @@ export const useAIChat = () => {
         if (import.meta.env.DEV) {
           console.log("[AI Answer Debug][FE] Generation blocked by pipeline:", decision);
         }
-        console.log(`[useAIChat] handleAiAnswer: Pipeline blocked generation. Reason: ${decision.reason}`);
-        return;
+        console.log(`[useAIChat] handleAiAnswer: Pipeline produced block reason but backend segmenter will handle it. Reason: ${decision.reason}`);
       }
       if (import.meta.env.DEV) {
         console.log("[AI Answer Debug][FE] Generation decision:", decision);
       }
 
-      const segmentId = generateSegmentId(decision.groupedTranscript);
-      if (!generationGuardRef.current.canStartGeneration(segmentId, decision.groupedTranscript)) {
+      const groupedTranscript = decision.groupedTranscript?.trim() || generationInput;
+      const segmentId = generateSegmentId(groupedTranscript);
+      if (!generationGuardRef.current.canStartGeneration(segmentId, groupedTranscript)) {
         console.log(`[useAIChat] handleAiAnswer: Generation guard blocked duplicate segment.`);
         return;
       }
 
-      generationGuardRef.current.lockGeneration(segmentId, decision.groupedTranscript);
+      generationGuardRef.current.lockGeneration(segmentId, groupedTranscript);
 
       try {
         await handleAiAnswerSingleRef.current(
           sessionId,
           sanitizeAIAnswerPayload({
             ...normalizedPayload,
-            transcript: normalizedPayload.transcript || decision.groupedTranscript,
-            currentQuestion: decision.groupedTranscript,
+            transcript: normalizedPayload.transcript || groupedTranscript,
+            ...(normalizedQuestion.trim() ? { currentQuestion: normalizedQuestion } : {}),
           }),
           aiModel,
         );
 
         // Update previous context after successful generation
-        previousContextRef.current = { transcript: normalizedQuestion, timestamp: Date.now() };
+        previousContextRef.current = { transcript: generationInput, timestamp: Date.now() };
       } finally {
         generationGuardRef.current.releaseGeneration(segmentId);
       }
@@ -1198,6 +1227,27 @@ export const useAIChat = () => {
     ) => {
       const resolvedQuestion = resolveQueryFromAIAnswerPayload(payload);
       if (!resolvedQuestion.trim()) return;
+      const resolvedQuestionKey = normalizeQuestionKey(resolvedQuestion);
+      const existingQuestionCard = aiChatRef.current.find((message) => {
+        if (message.sender !== "AI") return false;
+        const renderedText = message.text?.trim() || "";
+        if (
+          renderedText === NO_QUESTION_MESSAGE ||
+          /^sorry,\s+i couldn't/i.test(renderedText) ||
+          /^i couldn't generate/i.test(renderedText)
+        ) {
+          return false;
+        }
+        const candidate =
+          message.question?.trim() ||
+          extractQuestionCandidate(message.text || "");
+        if (!candidate) return false;
+        return normalizeQuestionKey(candidate) === resolvedQuestionKey;
+      });
+      if (existingQuestionCard && !isLikelyFollowUpQuestion(resolvedQuestion)) {
+        console.log("[useAIChat] handleAiAnswer: Suppressed duplicate AI card for question:", resolvedQuestion);
+        return;
+      }
 
       const { controller, reqId } = startNewRequest();
       const requestId = payload.requestId || createRequestId();
@@ -1234,7 +1284,7 @@ export const useAIChat = () => {
         sender: "AI",
         text: "",
         time: baseTime,
-        question: "",
+        question: resolvedQuestion,
         originalGenerationContext: buildOriginalGenerationContextFromPayload(
           payload,
           isTauri() ? "tauri" : "web",
@@ -1274,7 +1324,11 @@ export const useAIChat = () => {
         const reader = response.body?.getReader();
         if (!reader) throw new Error("No reader available");
 
-        const { sentinelOnly, questionMeta } = await consumeSegmentedStream(
+        const {
+          activeIds: renderedIds,
+          sentinelOnly,
+          questionMeta,
+        } = await consumeSegmentedStream(
           reader,
           messageId,
           setAiChat,
@@ -1291,22 +1345,22 @@ export const useAIChat = () => {
         console.log("[useAIChat] handleAiAnswer: Stream consumption completed. sentinelOnly:", sentinelOnly);
 
         if (sentinelOnly) {
-          // Backend cleanly said there was no interview question in the input.
-          console.log(`[useAIChat] handleAiAnswer: Sentinel-only response. Showing no-question state on card ${messageId}.`);
-          safeSetAiChat((prev) =>
-            prev.map((msg) =>
-              msg.id === messageId
-                ? {
-                    ...msg,
-                    text: NO_QUESTION_MESSAGE,
-                    question: questionMeta?.displayQuestion || "",
-                    ...(questionMeta ? { questionMeta } : {}),
-                  }
-                : msg,
-            ),
+          console.log(`[useAIChat] handleAiAnswer: Sentinel-only response. Removing pending card ${messageId}.`);
+          const sentinelDedupeKey = resolvedQuestion.trim().toLowerCase();
+          const normalizedSentinelKey = normalizeQuestionKey(resolvedQuestion);
+          recentQuestionsRef.current = recentQuestionsRef.current.filter(
+            (entry) =>
+              entry.q !== sentinelDedupeKey &&
+              normalizeQuestionKey(entry.q) !== normalizedSentinelKey,
           );
+          safeSetAiChat((prev) => prev.filter((msg) => msg.id !== messageId));
           return;
         }
+
+        applyQuestionGuardrail(
+          renderedIds.length > 0 ? renderedIds : [messageId],
+          { fallbackQuestion: resolvedQuestion },
+        );
 
         const answerText =
           aiChatRef.current.find((m) => m.id === messageId)?.text?.trim() || "";
@@ -1350,15 +1404,15 @@ export const useAIChat = () => {
           console.log(`[useAIChat] handleAiAnswerSingle: finally block for request ID: ${reqId}. Resetting isAnswering.`);
           pendingLoadingResetRef.current = null;
           setIsAnswering(false);
-          safeSetAiChat((prev) => prev.filter((m) => m.sender !== "AI" || m.text.trim() !== ""));
+          safeSetAiChat(removeEmptyAiPlaceholders);
         } else {
           console.log(`[useAIChat] handleAiAnswerSingle: request ID mismatch (already superseded). Active: ${activeRequestIdRef.current}, Current: ${reqId}`);
-          safeSetAiChat((prev) => prev.filter((m) => m.sender !== "AI" || m.text.trim() !== ""));
+          safeSetAiChat(removeEmptyAiPlaceholders);
         }
         operationRegistryRef.current.release(sessionId, "ai-answer", requestId);
       }
     },
-    [commitContinuityFromAnswer, createRequestId, safeSetAiChat, startNewRequest],
+    [applyQuestionGuardrail, commitContinuityFromAnswer, createRequestId, safeSetAiChat, startNewRequest],
   );
   // Keep the ref in sync so handleAiAnswer always calls the latest callback.
   handleAiAnswerSingleRef.current = handleAiAnswerSingle;
@@ -1515,11 +1569,7 @@ export const useAIChat = () => {
             -AI_ANSWER_LIMITS.recentTranscriptWindowMax,
           ) ||
         [];
-      const transcriptForRequest =
-        contextPayload?.transcript?.trim() ||
-        (recentTranscriptWindow.length > 0
-          ? recentTranscriptWindow.join("\n")
-          : resolvedQuery);
+      const transcriptForRequest = resolvedQuery;
       const runtimePlatform: "web" | "tauri" = isTauri() ? "tauri" : "web";
       console.log("[useAIChat] handleCustomQuery: Context built.", {
         previousAiAnswersCount: previousAiAnswers.length,
@@ -1577,8 +1627,8 @@ export const useAIChat = () => {
                 previousCodeBlocks,
                 sourcePlatform: runtimePlatform,
                 answerMode: "auto",
+                isCustomQuery: true,
               }),
-              isCustomQuery: true,
               aiModel,
             }),
             signal: controller.signal,
@@ -1602,8 +1652,8 @@ export const useAIChat = () => {
                 previousCodeBlocks,
                 sourcePlatform: runtimePlatform,
                 answerMode: "auto",
+                isCustomQuery: true,
               }),
-              isCustomQuery: true,
               aiModel,
             });
         }
@@ -1657,10 +1707,10 @@ export const useAIChat = () => {
           console.log(`[useAIChat] handleCustomQuery: finally block for request ID: ${reqId}. Resetting isAnswering.`);
           pendingLoadingResetRef.current = null;
           setIsAnswering(false);
-          setAiChat((prev) => prev.filter((m) => m.sender !== "AI" || m.text.trim() !== ""));
+          setAiChat(removeEmptyAiPlaceholders);
         } else {
           console.log(`[useAIChat] handleCustomQuery: request ID mismatch (already superseded). Active: ${activeRequestIdRef.current}, Current: ${reqId}`);
-          setAiChat((prev) => prev.filter((m) => m.sender !== "AI" || m.text.trim() !== ""));
+          setAiChat(removeEmptyAiPlaceholders);
         }
       }
     },
@@ -1860,10 +1910,10 @@ export const useAIChat = () => {
           console.log(`[useAIChat] handleRegenerate: finally block for request ID: ${reqId}. Resetting isAnswering.`);
           pendingLoadingResetRef.current = null;
           setIsAnswering(false);
-          setAiChat((prev) => prev.filter((m) => m.sender !== "AI" || m.text.trim() !== ""));
+          setAiChat(removeEmptyAiPlaceholders);
         } else {
           console.log(`[useAIChat] handleRegenerate: request ID mismatch (already superseded). Active: ${activeRequestIdRef.current}, Current: ${reqId}`);
-          setAiChat((prev) => prev.filter((m) => m.sender !== "AI" || m.text.trim() !== ""));
+          setAiChat(removeEmptyAiPlaceholders);
         }
       }
     },

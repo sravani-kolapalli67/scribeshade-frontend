@@ -49,6 +49,7 @@ export interface AIAnswerRequestPayload {
   sessionId?: string;
   currentQuestion?: string;
   patchedTranscript?: string;
+  isCustomQuery?: boolean;
   recentTranscriptWindow?: string[];
   speakerSeparatedTranscript?: AIAnswerSpeakerEntry[];
   previousAiAnswer?: string;
@@ -59,6 +60,14 @@ export interface AIAnswerRequestPayload {
   selectedAnswerText?: string;
   selectedAnswerCodeBlocks?: string[];
   selectedAnswerTopic?: string;
+  selectedIntentId?: string;
+  selectedAnswerIntentId?: string;
+  answerClickMode?:
+    | "answer_latest_unanswered"
+    | "answer_selected_intent"
+    | "reanswer_previous"
+    | "regenerate_answer"
+    | "answer_followup";
   answerMode?:
     | "auto"
     | "theory_only"
@@ -202,8 +211,12 @@ export function sanitizeAIAnswerPayload(
     ...(selectedAnswerText ? { selectedAnswerText } : {}),
     ...(selectedAnswerCodeBlocks.length > 0 ? { selectedAnswerCodeBlocks } : {}),
     ...(selectedAnswerTopic ? { selectedAnswerTopic } : {}),
+    ...(payload.selectedIntentId ? { selectedIntentId: payload.selectedIntentId } : {}),
+    ...(payload.selectedAnswerIntentId ? { selectedAnswerIntentId: payload.selectedAnswerIntentId } : {}),
+    ...(payload.answerClickMode ? { answerClickMode: payload.answerClickMode } : {}),
     ...(payload.answerMode ? { answerMode: payload.answerMode } : {}),
     ...(payload.sourcePlatform ? { sourcePlatform: payload.sourcePlatform } : {}),
+    ...(payload.isCustomQuery ? { isCustomQuery: true } : {}),
     ...(payload.isRegenerate ? { isRegenerate: true } : {}),
     ...(regenerateTargetAnswerId ? { regenerateTargetAnswerId } : {}),
     ...(regenerateInstruction ? { regenerateInstruction } : {}),
@@ -217,6 +230,17 @@ export function resolveQueryFromAIAnswerPayload(
   return (
     payload.patchedTranscript?.trim() ||
     payload.currentQuestion?.trim() ||
-    payload.transcript.trim()
+    payload.transcript.trim() ||
+    (payload.recentTranscriptWindow || []).join("\n").trim()
+  );
+}
+
+export function resolveTranscriptFromAIAnswerPayload(
+  payload: AIAnswerRequestPayload,
+): string {
+  return (
+    payload.transcript.trim() ||
+    payload.currentQuestion?.trim() ||
+    (payload.recentTranscriptWindow || []).join("\n").trim()
   );
 }

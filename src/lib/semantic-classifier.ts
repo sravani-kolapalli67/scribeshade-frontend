@@ -287,6 +287,17 @@ function startsWithMarker(text: string, markers: readonly string[]): boolean {
   return markers.some((m) => norm.startsWith(m));
 }
 
+export function stripLeadingConjunctionsAndFillers(text: string): string {
+  let cleaned = text.trim();
+  const regex = /^(?:and|or|then|also|but|so|now|plus|because|okay|ok|great|right|perfect|well|yes|no|wait|hey|hi|hello)\b\s*,?\s*/i;
+  let previous;
+  do {
+    previous = cleaned;
+    cleaned = cleaned.replace(regex, "");
+  } while (cleaned !== previous);
+  return cleaned;
+}
+
 /** Check if text is noise (very short, STT artifacts, non-question fragments). */
 function isNoise(text: string): boolean {
   const norm = normalize(text);
@@ -299,8 +310,9 @@ function isNoise(text: string): boolean {
     if (noiseCount / Math.max(words.length, 1) >= 0.6) return true;
     // Short + no question mark + no question word = likely noise
     if (!norm.includes('?')) {
+      const stripped = stripLeadingConjunctionsAndFillers(norm);
       const questionStarters = ['who', 'what', 'when', 'where', 'why', 'how'];
-      if (!questionStarters.some((q) => norm.startsWith(q))) return true;
+      if (!questionStarters.some((q) => stripped.startsWith(q))) return true;
     }
   }
 
@@ -408,7 +420,8 @@ function isNewQuestionStart(text: string): boolean {
     'can you', 'could you', 'would you', 'do you',
     'is there', 'are there', 'does',
   ];
-  return questionStarters.some((s) => norm.startsWith(s)) || /^\d+[.)]\s/.test(norm);
+  const stripped = stripLeadingConjunctionsAndFillers(norm);
+  return questionStarters.some((s) => stripped.startsWith(s)) || /^\d+[.)]\s/.test(norm);
 }
 
 /**
