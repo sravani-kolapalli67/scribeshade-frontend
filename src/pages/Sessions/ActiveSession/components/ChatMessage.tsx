@@ -75,7 +75,7 @@ const CodeBlock = ({
   return (
     <div
       className={cn(
-        "rounded-lg overflow-hidden my-4 border",
+        "rounded-lg overflow-hidden max-w-full my-4 border",
         isFullscreen
           ? "bg-black/40 border-white/10"
           : "bg-slate-50/50 border-slate-200",
@@ -106,7 +106,7 @@ const CodeBlock = ({
           )}
         </button>
       </div>
-      <div className="text-[13px] leading-relaxed">{children}</div>
+      <div className="relative max-w-full overflow-x-auto overflow-y-auto text-[13px] leading-relaxed [scrollbar-gutter:stable]">{children}</div>
     </div>
   );
 };
@@ -334,6 +334,9 @@ export const ChatMessage = ({
               fontSize: "13px",
               lineHeight: "1.6",
               borderRadius: "0",
+              overflowX: "auto",
+              whiteSpace: "pre",
+              wordBreak: "normal",
             }}
           />
         </CodeBlock>
@@ -363,7 +366,7 @@ export const ChatMessage = ({
           <Star className="h-4.5 w-4.5 fill-amber-400 text-amber-400" />
         </div>
         <div className={cn(
-          "flex-1 rounded-xl border p-4",
+          "flex-1 min-w-0 rounded-xl border p-4 break-words [overflow-wrap:anywhere]",
           isFullscreen
             ? "border-white/10 bg-white/5"
             : "border-slate-200 bg-white"

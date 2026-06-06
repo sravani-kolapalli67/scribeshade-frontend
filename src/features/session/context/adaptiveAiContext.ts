@@ -1,11 +1,12 @@
 import { extractCodeBlocks, normalizeSpeakerType } from "@/types/ai-answer";
+import { normalizeSttTranscript } from "@/features/session/transcript/stt-normalizer";
 
 const CONNECTOR_TAIL_RE = /\b(and|or|then|also|plus|because|so|where)\s*$/i;
 const INCOMPLETE_TAIL_RE = /\b(for|to|of|in|and|or|where|with)\s*$/i;
 const QUESTION_LIKE_RE =
-  /^(what|why|how|when|where|which|who|can|could|would|should|is|are|do|does|did|explain|describe|tell me|walk me)\b/i;
+  /^(what|why|how|when|where|which|who|can|could|would|should|is|are|do|does|did|explain|describe|tell me|walk me|write|implement|create|build|show|give)\b/i;
 const INTERVIEW_PROMPT_START_RE =
-  /\b(before we start|technical round|quick intro|introduce|tell me|explain|describe|walk me|can you|could you|would you|what|how|why|where|when)\b/i;
+  /\b(before we start|technical round|quick intro|introduce|tell me|explain|describe|walk me|can you|could you|would you|what|how|why|where|when|write|implement|create|build|show|give)\b/i;
 
 export interface AdaptiveTranscriptEntry {
   sender: "User" | "Interviewer";
@@ -126,10 +127,12 @@ function dedupeAndMergeEntries(
     if (
       prev &&
       prev.sender === current.sender &&
-      typeof prev.timestamp === "number" &&
-      typeof current.timestamp === "number" &&
-      current.timestamp - prev.timestamp <= 2500 &&
-      areNearDuplicateTexts(prev.text, current.text)
+      areNearDuplicateTexts(prev.text, current.text) &&
+      (
+        typeof prev.timestamp !== "number" ||
+        typeof current.timestamp !== "number" ||
+        current.timestamp - prev.timestamp <= 2500
+      )
     ) {
       if ((current.text || "").trim().length > (prev.text || "").trim().length) {
         deduped[deduped.length - 1] = current;
@@ -304,7 +307,7 @@ export function buildAdaptiveAiContext(input: {
     .filter((entry) => (entry.text || "").trim().length > 0)
     .map((entry) => ({
       sender: entry.sender,
-      text: entry.text.trim(),
+      text: normalizeSttTranscript(entry.text),
       ...(typeof entry.timestamp === "number"
         ? { timestamp: entry.timestamp }
         : {}),
@@ -318,8 +321,7 @@ export function buildAdaptiveAiContext(input: {
     : transcriptMessages;
   const mergedScoped = dedupeAndMergeEntries(scoped);
   const mergedAll = dedupeAndMergeEntries(transcriptMessages);
-  let selectedSource = mergedScoped.length > 0 ? mergedScoped : mergedAll;
-  let usingScopedSource = mergedScoped.length > 0;
+  const selectedSource = mergedScoped.length > 0 ? mergedScoped : mergedAll;
 
   let windowSizeUsed = 20;
   let expandedReason: AdaptiveContextResult["expandedReason"] = "base";
@@ -329,17 +331,13 @@ export function buildAdaptiveAiContext(input: {
   if (selected.length < 10 || selectedChars < 300) {
     windowSizeUsed = 40;
     expandedReason = "small_context";
-    if (usingScopedSource && mergedAll.length > mergedScoped.length) {
-      selectedSource = mergedAll;
-      usingScopedSource = false;
-    }
     selected = pickWindow(selectedSource, windowSizeUsed, 180_000);
   }
 
   let interviewerQuestion = buildInterviewerCompoundQuestion(selected);
   let transcriptQuestion = interviewerQuestion || buildTranscriptCompoundQuestion(selected);
-  const fallbackQuestion = (input.fallbackQuestion || "").trim();
-  const liveInterimQuestion = (input.liveInterimQuestion || "").trim();
+  const fallbackQuestion = normalizeSttTranscript(input.fallbackQuestion || "");
+  const liveInterimQuestion = normalizeSttTranscript(input.liveInterimQuestion || "");
   if (transcriptQuestion && fallbackQuestion) {
     transcriptQuestion = mergeFallbackTailIntoCompound(
       transcriptQuestion,
@@ -361,10 +359,6 @@ export function buildAdaptiveAiContext(input: {
   if (isLikelyIncomplete(currentQuestion) && windowSizeUsed < 60) {
     windowSizeUsed = 60;
     expandedReason = "weak_question";
-    if (usingScopedSource && mergedAll.length > mergedScoped.length) {
-      selectedSource = mergedAll;
-      usingScopedSource = false;
-    }
     selected = pickWindow(selectedSource, windowSizeUsed, 240_000);
     interviewerQuestion = buildInterviewerCompoundQuestion(selected);
     transcriptQuestion = interviewerQuestion || buildTranscriptCompoundQuestion(selected);

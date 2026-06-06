@@ -39,6 +39,11 @@ import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { ModelSelector } from "@/pages/Sessions/ActiveSession/components/ModelSelector";
 import { BuyCreditsDialog } from "@/components/Billing/BuyCreditsDialog";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 
 export interface ActivateResponseData {
   maxAllowedMinutes: number | null;
@@ -184,14 +189,14 @@ export function ConnectDialog({
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onCancel()}>
-      <DialogContent className="sm:max-w-lg border-none shadow-2xl rounded-3xl p-0 overflow-hidden bg-background" aria-describedby={undefined}>
-        <DialogHeader className="pt-6 px-7 pb-0">
+      <DialogContent className="sm:max-w-lg max-h-[calc(100dvh-2rem)] flex flex-col gap-0 border-none shadow-2xl rounded-3xl p-0 overflow-hidden bg-background" aria-describedby={undefined}>
+        <DialogHeader className="shrink-0 pt-6 px-7 pb-0">
           <DialogTitle className="text-xl font-bold tracking-tight">
             Connect
           </DialogTitle>
         </DialogHeader>
 
-        <div className="px-7 pb-7 pt-3 space-y-5">
+        <div className="min-h-0 overflow-y-auto overscroll-contain px-7 pb-7 pt-3 space-y-5">
           {/* Context Summary */}
           <p className="text-sm text-muted-foreground leading-relaxed">
             This is an Interview Session at{" "}
@@ -202,12 +207,26 @@ export function ConnectDialog({
               <>
                 {" "}
                 with{" "}
-                <span
-                  className="text-primary font-semibold underline underline-offset-2 cursor-pointer"
-                  title={extraContext}
-                >
-                  extra context
-                </span>
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <button
+                      type="button"
+                      className="text-primary font-semibold underline underline-offset-2 cursor-pointer"
+                    >
+                      extra context
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent
+                    align="start"
+                    side="bottom"
+                    collisionPadding={16}
+                    className="w-[min(34rem,calc(100vw-2rem))] max-h-[min(60dvh,30rem)] overflow-y-auto overscroll-contain p-4"
+                  >
+                    <p className="whitespace-pre-wrap break-words text-sm leading-6 text-foreground">
+                      {extraContext}
+                    </p>
+                  </PopoverContent>
+                </Popover>
                 .
               </>
             )}

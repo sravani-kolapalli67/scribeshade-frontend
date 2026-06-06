@@ -1183,7 +1183,7 @@ export function DataTable<TData extends ExportableData, TValue>({
       // Prevent row click if clicking on interactive elements (buttons, links, etc.)
       const target = event.target as HTMLElement;
       const isInteractiveElement = target.closest(
-        'button, a, input, select, textarea, [role="button"], [role="link"]',
+        'button, a, input, select, textarea, [role="button"], [role="link"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"]',
       );
 
       if (isInteractiveElement) {

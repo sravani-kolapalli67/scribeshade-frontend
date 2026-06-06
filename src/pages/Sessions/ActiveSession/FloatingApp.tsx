@@ -166,7 +166,7 @@ const CodeBlock = ({
     : String(codeString);
 
   return (
-    <div className="rounded-xl overflow-hidden mb-4 border bg-[#313030] border-white/10 shadow-lg">
+    <div className="rounded-xl overflow-hidden max-w-full mb-4 border bg-[#313030] border-white/10 shadow-lg">
       <div className="px-3 py-1.5 flex items-center justify-between border-b bg-white/5 border-white/10">
         <div className="flex items-center gap-2">
           <div className="flex gap-1">
@@ -195,7 +195,7 @@ const CodeBlock = ({
           )}
         </button>
       </div>
-      <div className="p-0 m-0 text-[13px] font-mono leading-relaxed overflow-x-auto overflow-y-hidden overscroll-x-contain [scrollbar-gutter:stable]">
+      <div className="p-0 m-0 relative max-w-full text-[13px] font-mono leading-relaxed overflow-x-auto overflow-y-auto overscroll-x-contain [scrollbar-gutter:stable]">
         <SyntaxHighlighter
           language={language?.toLowerCase() || "javascript"}
           style={oneDark}
@@ -662,7 +662,7 @@ const AnswerArea: React.FC<{
             {/* Markdown Content */}
             <div
               className={[
-                "text-[15px] leading-relaxed font-medium text-white wrap-break-word",
+                "text-[15px] leading-relaxed font-medium text-white break-words [overflow-wrap:anywhere]",
                 "[&_p]:mb-3 [&_p:last-child]:mb-0",
                 "[&_ul]:pl-1 [&_ul]:mb-3 [&_ul]:space-y-2 [&_ul]:list-none",
                 "[&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:mb-3 [&_ol]:space-y-2",
@@ -670,7 +670,7 @@ const AnswerArea: React.FC<{
                 "[&_em]:text-amber-200 [&_em]:not-italic [&_em]:font-semibold",
                 "[&_a]:text-blue-300 [&_a]:underline",
                 "[&_blockquote]:border-l-2 [&_blockquote]:border-blue-400/50 [&_blockquote]:pl-3 [&_blockquote]:text-white/80 [&_blockquote]:italic",
-                "[&_table]:w-full [&_table]:my-3 [&_table]:text-[13px] [&_table]:border-collapse",
+                "[&_table]:block [&_table]:w-full [&_table]:max-w-full [&_table]:overflow-x-auto [&_table]:my-3 [&_table]:text-[13px] [&_table]:border-collapse",
                 "[&_th]:border [&_th]:border-white/10 [&_th]:bg-white/5 [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:font-bold",
                 "[&_td]:border [&_td]:border-white/10 [&_td]:px-2 [&_td]:py-1",
               ].join(" ")}

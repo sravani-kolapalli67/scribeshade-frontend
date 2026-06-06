@@ -39,8 +39,6 @@ const NO_QUESTION_MARKER = /={3,}\s*NO_NEW_QUESTION\s*={3,}/i;
 const QUESTION_META_MARKER = /={3,}QUESTION_META=([^\n]+?)={3,}\n?/i;
 const NO_QUESTION_MESSAGE =
   "No question found on this screen. If you have a question, let me know.";
-const NO_QUESTION_HEURISTIC =
-  /(no interview questions?\s+(?:are|were)?\s*visible|no clear question|please provide|share the actual interview|clarify|not clearly visible)/i;
 
 function sanitizeGeneratedQuestionTitle(text: string): string {
   return (text || "")
@@ -140,6 +138,8 @@ function buildOriginalGenerationContextFromPayload(
           ),
         }
       : {}),
+    ...(payload.requestId ? { requestId: payload.requestId } : {}),
+    ...(payload.answerClickMode ? { answerClickMode: payload.answerClickMode } : {}),
     answerMode: payload.answerMode || "auto",
     sourcePlatform: payload.sourcePlatform || fallbackSourcePlatform,
     generatedAnswerText: "",
@@ -823,7 +823,7 @@ export const useAIChat = () => {
   const applyQuestionGuardrail = useCallback(
     (
       newMessageIds: string[],
-      options: { fallbackQuestion?: string } = {},
+      options: { fallbackQuestion?: string; allowDuplicateQuestionText?: boolean } = {},
     ) => {
       if (!newMessageIds.length) return;
 
@@ -865,8 +865,8 @@ export const useAIChat = () => {
           }
 
           const duplicate = existingVisibleKeys.has(key) || batchKeys.has(key);
-          if (duplicate && !isLikelyFollowUpQuestion(candidate)) {
-            console.log("[useAIChat] Dropped duplicate AI question card:", candidate);
+          if (duplicate && !options.allowDuplicateQuestionText && !isLikelyFollowUpQuestion(candidate)) {
+            console.log("[useAIChat] Dropped duplicate AI question card:", { question: candidate, allowDuplicateQuestionText: !!options.allowDuplicateQuestionText });
             continue;
           }
 
@@ -925,67 +925,65 @@ export const useAIChat = () => {
           lastConversationMode: "screenshot",
           lastUpdatedAt: Date.now(),
         };
-        const formData = new FormData();
-        formData.append("screenshot", screenshotBlob, "screenshot.jpg");
-        if (aiModel) {
-          formData.append("aiModel", aiModel);
-        }
-        if (contextPayload) {
-          const normalizedContext = sanitizeAIAnswerPayload({
-            transcript:
-              contextPayload.transcript ||
-              contextPayload.currentQuestion ||
-              "screen_analysis",
-            ...contextPayload,
+        const screenRequestContext = sanitizeAIAnswerPayload({
+          transcript: "Analyze and answer the interview task visible in the screenshot.",
+          currentQuestion:
+            "Analyze and answer the interview task visible in the screenshot.",
+          sourcePlatform: contextPayload?.sourcePlatform,
+          answerMode: contextPayload?.answerMode || "auto",
+        });
+        if (import.meta.env.DEV) {
+          console.log("[Analyze Screen][Context][FE]", {
+            sessionId,
+            screenshotAuthoritative: true,
+            staleTranscriptContextDropped: true,
           });
-          formData.append("contextPayload", JSON.stringify(normalizedContext));
-          if (import.meta.env.DEV) {
-            console.log("[Analyze Screen][Context][FE]", {
-              sessionId,
-              windowCount: normalizedContext.recentTranscriptWindow?.length || 0,
-              previousAiAnswersCount: normalizedContext.previousAiAnswers?.length || 0,
-            });
-          }
         }
 
         const targetUrl = `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionId}/analyze-screen`;
-        console.log(`[useAIChat] handleAnalyzeScreen: Dispatching POST to ${targetUrl}`);
-        const response = await fetch(
-          targetUrl,
-          {
+        let renderedIds: string[] = [];
+        let analyzeSentinel = false;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const formData = new FormData();
+          formData.append("screenshot", screenshotBlob, "screenshot.jpg");
+          if (aiModel) {
+            formData.append("aiModel", aiModel);
+          }
+          formData.append("contextPayload", JSON.stringify(screenRequestContext));
+
+          console.log(`[useAIChat] handleAnalyzeScreen: Dispatching POST to ${targetUrl}`, {
+            attempt: attempt + 1,
+          });
+          const response = await fetch(targetUrl, {
             method: "POST",
             body: formData,
             signal: controller.signal,
-          },
-        );
+          });
 
-        if (!response.ok) {
-          console.error(`[useAIChat] handleAnalyzeScreen: Server returned status ${response.status}`);
-          throw new Error(`Analysis failed: ${response.status}`);
+          if (!response.ok) {
+            console.error(`[useAIChat] handleAnalyzeScreen: Server returned status ${response.status}`);
+            throw new Error(`Analysis failed: ${response.status}`);
+          }
+
+          const reader = response.body?.getReader();
+          if (!reader) throw new Error("No reader available");
+          const consumed = await consumeSegmentedStream(
+            reader,
+            messageId,
+            setAiChat,
+            baseTime,
+            controller.signal,
+          );
+          renderedIds = consumed.activeIds;
+          analyzeSentinel = consumed.sentinelOnly;
+          if (!analyzeSentinel) break;
+          console.warn("[useAIChat] Analyze Screen returned sentinel; retrying with authoritative context", {
+            sessionId,
+          });
         }
 
-        console.log("[useAIChat] handleAnalyzeScreen: Server responded OK. Obtaining stream reader.");
-        const reader = response.body?.getReader();
-        if (!reader) throw new Error("No reader available");
-
-        const { activeIds: renderedIds, sentinelOnly: analyzeSentinel } = await consumeSegmentedStream(
-          reader,
-          messageId,
-          setAiChat,
-          baseTime,
-          controller.signal,
-        );
-
         if (analyzeSentinel) {
-          console.log(`[useAIChat] handleAnalyzeScreen: Sentinel-only response. Showing no-question message on card ${messageId}.`);
-          safeSetAiChat((prev) =>
-            prev.map((msg) =>
-              msg.id === messageId
-                ? { ...msg, text: NO_QUESTION_MESSAGE, question: "" }
-                : msg,
-            ),
-          );
-          return;
+          throw new Error("Analyze Screen returned no answer after retry");
         }
 
         if (controller.signal.aborted) {
@@ -1001,19 +999,7 @@ export const useAIChat = () => {
           conversationContinuityRef.current.lastResolvedQuestion || "Analyze this screen";
         commitContinuityFromAnswer(continuityQuestion, answerText, "screenshot");
 
-        // Guardrail: if the model ignored sentinel rules and returned a
-        // clarification blob, normalize it to one soft no-question message.
-        setAiChat((prev) =>
-          prev.map((msg) => {
-            if (!renderedIds.includes(msg.id)) return msg;
-            const raw = msg.text?.trim() || "";
-            if (!raw) return msg;
-            if (!NO_QUESTION_HEURISTIC.test(raw)) return msg;
-            return { ...msg, text: NO_QUESTION_MESSAGE, question: "" };
-          }),
-        );
-
-        // Fallback: if the stream produced no renderable cards, show a helpful message
+        // A successful Analyze Screen call must leave a rendered answer card.
         safeSetAiChat((prev) => {
           if (renderedIds.length > 0) {
             const allHaveText = renderedIds.every((rid) =>
@@ -1026,14 +1012,14 @@ export const useAIChat = () => {
             renderedIds.find((rid) => !prev.find((m) => m.id === rid)?.text?.trim()) ??
             (prev.find((m) => m.id === messageId) ? messageId : null);
 
-          console.log(`[useAIChat] handleAnalyzeScreen: Stream ended with no content/unrendered cards. Showing fallback text on card ID: ${emptyCardId}`);
+          console.log(`[useAIChat] handleAnalyzeScreen: Stream ended with no content/unrendered cards. Keeping explicit failure on card ID: ${emptyCardId}`);
           if (!emptyCardId) {
             return [
               ...prev,
               {
                 id: messageId,
                 sender: "AI" as const,
-                text: NO_QUESTION_MESSAGE,
+                text: "Screen analysis returned no content. Please retry once.",
                 time: baseTime,
               },
             ];
@@ -1041,7 +1027,11 @@ export const useAIChat = () => {
 
           return prev.map((msg) =>
             msg.id === emptyCardId
-              ? { ...msg, text: NO_QUESTION_MESSAGE, question: "" }
+              ? {
+                  ...msg,
+                  text: "Screen analysis returned no content. Please retry once.",
+                  question: "",
+                }
               : msg,
           );
         });
@@ -1116,6 +1106,10 @@ export const useAIChat = () => {
           .map((entry) => entry.content)
           .join("\n");
       const generationInput = normalizedQuestion.trim() || fallbackTranscriptInput.trim();
+      const allowsRepeatedQuestionCard =
+        basePayload.answerClickMode === "answer_followup" ||
+        !!basePayload.selectedAnswerId ||
+        !!basePayload.selectedAnswerQuestion;
       if (import.meta.env.DEV) {
         console.log("[AI Answer Debug][FE] Raw input request:", request);
         console.log("[AI Answer Debug][FE] Base sanitized payload:", basePayload);
@@ -1131,11 +1125,13 @@ export const useAIChat = () => {
       const now = Date.now();
       const dedupeKey = generationInput.trim().toLowerCase();
       const recent = recentQuestionsRef.current.filter((r) => now - r.t < 4000);
-      if (recent.some((r) => r.q === dedupeKey)) {
+      if (!allowsRepeatedQuestionCard && recent.some((r) => r.q === dedupeKey)) {
         console.log("[useAIChat] handleAiAnswer: Suppressed duplicate question (within 4s dedup window):", generationInput.slice(0, 60));
         return;
       }
-      recentQuestionsRef.current = [...recent, { q: dedupeKey, t: now }].slice(-10);
+      if (!allowsRepeatedQuestionCard) {
+        recentQuestionsRef.current = [...recent, { q: dedupeKey, t: now }].slice(-10);
+      }
 
       const requestId = createRequestId();
       const normalizedPayload = sanitizeAIAnswerPayload({
@@ -1228,6 +1224,10 @@ export const useAIChat = () => {
       const resolvedQuestion = resolveQueryFromAIAnswerPayload(payload);
       if (!resolvedQuestion.trim()) return;
       const resolvedQuestionKey = normalizeQuestionKey(resolvedQuestion);
+      const allowDuplicateQuestionText =
+        payload.answerClickMode === "answer_followup" ||
+        !!payload.selectedAnswerId ||
+        !!payload.selectedAnswerQuestion;
       const existingQuestionCard = aiChatRef.current.find((message) => {
         if (message.sender !== "AI") return false;
         const renderedText = message.text?.trim() || "";
@@ -1244,8 +1244,8 @@ export const useAIChat = () => {
         if (!candidate) return false;
         return normalizeQuestionKey(candidate) === resolvedQuestionKey;
       });
-      if (existingQuestionCard && !isLikelyFollowUpQuestion(resolvedQuestion)) {
-        console.log("[useAIChat] handleAiAnswer: Suppressed duplicate AI card for question:", resolvedQuestion);
+      if (existingQuestionCard && !allowDuplicateQuestionText && !isLikelyFollowUpQuestion(resolvedQuestion)) {
+        console.log("[useAIChat] handleAiAnswer: Suppressed duplicate AI card for question:", { question: resolvedQuestion, allowDuplicateQuestionText });
         return;
       }
 
@@ -1296,46 +1296,77 @@ export const useAIChat = () => {
 
       try {
         const targetUrl = `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionId}/ai-answer`;
-        const requestBody = { ...payload, requestId, sessionId, aiModel };
-        if (import.meta.env.DEV) {
-          console.log("[AI Answer Debug][FE] POST /ai-answer body:", requestBody);
-        }
-        console.log(`[useAIChat] handleAiAnswer: Dispatching POST to ${targetUrl} with body:`, requestBody);
-        const response = await fetch(
-          targetUrl,
-          {
+        let renderedIds: string[] = [];
+        let sentinelOnly = false;
+        let questionMeta: QuestionMeta | undefined;
+
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const attemptRequestId = attempt === 0 ? requestId : createRequestId();
+          const attemptPayload =
+            attempt === 0
+              ? payload
+              : sanitizeAIAnswerPayload({
+                  ...payload,
+                  requestId: attemptRequestId,
+                  transcript: payload.transcript || resolvedQuestion,
+                  currentQuestion: resolvedQuestion,
+                  activeQuestionDetection: {
+                    activeQuestion: resolvedQuestion,
+                    cleanedQuestion: resolvedQuestion,
+                    isFollowUp: payload.activeQuestionDetection?.isFollowUp || false,
+                    topicChanged: false,
+                    confidenceScore: 1,
+                    ignoredNoise: false,
+                  },
+                });
+          const requestBody = {
+            ...attemptPayload,
+            requestId: attemptRequestId,
+            sessionId,
+            aiModel,
+          };
+          if (import.meta.env.DEV) {
+            console.log("[AI Answer Debug][FE] POST /ai-answer body:", requestBody);
+          }
+          console.log(`[useAIChat] handleAiAnswer: Dispatching POST to ${targetUrl}`, {
+            attempt: attempt + 1,
+            requestId: attemptRequestId,
+          });
+          const response = await fetch(targetUrl, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "x-request-id": requestId,
+              "x-request-id": attemptRequestId,
               "x-session-id": sessionId,
             },
             body: JSON.stringify(requestBody),
             signal: controller.signal,
-          },
-        );
+          });
 
-        if (!response.ok) {
-          console.error(`[useAIChat] handleAiAnswer: Server returned status ${response.status}`);
-          throw new Error("AI request failed");
+          if (!response.ok) {
+            console.error(`[useAIChat] handleAiAnswer: Server returned status ${response.status}`);
+            throw new Error("AI request failed");
+          }
+
+          const reader = response.body?.getReader();
+          if (!reader) throw new Error("No reader available");
+          const consumed = await consumeSegmentedStream(
+            reader,
+            messageId,
+            setAiChat,
+            baseTime,
+            controller.signal,
+            newAiMessage.originalGenerationContext,
+          );
+          renderedIds = consumed.activeIds;
+          sentinelOnly = consumed.sentinelOnly;
+          questionMeta = consumed.questionMeta;
+          if (!sentinelOnly) break;
+          console.warn("[useAIChat] AI Answer returned sentinel; retrying with authoritative question", {
+            sessionId,
+            question: resolvedQuestion,
+          });
         }
-
-        console.log("[useAIChat] handleAiAnswer: Server responded OK. Obtaining stream reader.");
-        const reader = response.body?.getReader();
-        if (!reader) throw new Error("No reader available");
-
-        const {
-          activeIds: renderedIds,
-          sentinelOnly,
-          questionMeta,
-        } = await consumeSegmentedStream(
-          reader,
-          messageId,
-          setAiChat,
-          baseTime,
-          controller.signal,
-          newAiMessage.originalGenerationContext,
-        );
 
         if (controller.signal.aborted) {
           console.log(`[useAIChat] handleAiAnswer: Signal aborted during stream consumption for request: ${reqId}`);
@@ -1345,7 +1376,6 @@ export const useAIChat = () => {
         console.log("[useAIChat] handleAiAnswer: Stream consumption completed. sentinelOnly:", sentinelOnly);
 
         if (sentinelOnly) {
-          console.log(`[useAIChat] handleAiAnswer: Sentinel-only response. Removing pending card ${messageId}.`);
           const sentinelDedupeKey = resolvedQuestion.trim().toLowerCase();
           const normalizedSentinelKey = normalizeQuestionKey(resolvedQuestion);
           recentQuestionsRef.current = recentQuestionsRef.current.filter(
@@ -1353,13 +1383,12 @@ export const useAIChat = () => {
               entry.q !== sentinelDedupeKey &&
               normalizeQuestionKey(entry.q) !== normalizedSentinelKey,
           );
-          safeSetAiChat((prev) => prev.filter((msg) => msg.id !== messageId));
-          return;
+          throw new Error("AI Answer returned no answer after retry");
         }
 
         applyQuestionGuardrail(
           renderedIds.length > 0 ? renderedIds : [messageId],
-          { fallbackQuestion: resolvedQuestion },
+          { fallbackQuestion: resolvedQuestion, allowDuplicateQuestionText },
         );
 
         const answerText =
@@ -1424,15 +1453,13 @@ export const useAIChat = () => {
       aiModel: string,
       contextPayload?: Partial<AIAnswerRequestPayload>,
     ) => {
-      const normalizedQuery = normalizeSttTranscript(query);
-      const continuity = applyContinuityToQuestion(normalizedQuery, "manual", "manual");
-      const resolvedQuery = continuity.resolvedQuestion || normalizedQuery;
+      const resolvedQuery = normalizeSttTranscript(query).trim();
       console.log(`[useAIChat] handleCustomQuery triggered. sessionId: ${sessionId}, query: "${resolvedQuery}", model: ${aiModel}`);
       if (import.meta.env.DEV) {
         console.log("[AI Answer Debug][FE][Manual] Raw manual query:", query);
-        console.log("[AI Answer Debug][FE][Manual] Normalized manual query:", normalizedQuery);
+        console.log("[AI Answer Debug][FE][Manual] Authoritative manual query:", resolvedQuery);
       }
-      if (!resolvedQuery.trim()) {
+      if (!resolvedQuery) {
         console.log("[useAIChat] handleCustomQuery: Query is empty. Aborting.");
         return;
       }
@@ -1507,7 +1534,7 @@ export const useAIChat = () => {
           hour: "2-digit",
           minute: "2-digit",
         }),
-        question: query,
+        question: resolvedQuery,
       };
 
       // Spawn placeholder AI response card immediately
@@ -1714,7 +1741,7 @@ export const useAIChat = () => {
         }
       }
     },
-    [applyContinuityToQuestion, commitContinuityFromAnswer, createRequestId, startNewRequest],
+    [commitContinuityFromAnswer, createRequestId, startNewRequest],
   );
 
   const handleRegenerate = useCallback(

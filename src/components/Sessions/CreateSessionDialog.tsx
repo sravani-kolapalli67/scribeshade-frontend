@@ -226,8 +226,8 @@ export default function CreateSessionDialog({
         }}
       >
 
-        <DialogContent className="sm:max-w-2xl border-none shadow-2xl rounded-3xl p-0 overflow-hidden bg-background" aria-describedby={undefined}>
-          <DialogHeader className="pt-6 px-8 pb-0 relative">
+        <DialogContent className="sm:max-w-2xl max-h-[calc(100dvh-2rem)] flex flex-col gap-0 border-none shadow-2xl rounded-3xl p-0 overflow-hidden bg-background" aria-describedby={undefined}>
+          <DialogHeader className="shrink-0 pt-6 px-8 pb-0 relative">
             <div className="flex items-center justify-between mb-2">
               <div className="space-y-1">
                 <DialogTitle className="text-2xl font-bold tracking-tight">
@@ -263,7 +263,7 @@ export default function CreateSessionDialog({
             </div>
           </DialogHeader>
 
-          <div className="px-8 pb-8 pt-4">
+          <div className="min-h-0 overflow-y-auto overscroll-contain px-8 pb-8 pt-4">
             {step === 1 && (
               <Step1_JobDetails data={sessionData} onChange={updateData} />
             )}

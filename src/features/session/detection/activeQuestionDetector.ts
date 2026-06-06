@@ -20,9 +20,9 @@ type TranscriptEntry = {
 };
 
 const FOLLOWUP_SIGNAL_RE =
-  /\b(how exactly|explain more|explain this|explain that|explain the code|explain this code|explain that code|explain the code again|you mentioned|you said|same thing|continue|continue from|what about that|why did|why was|why was that|why that|why this is used|optimi[sz]e this|debug this|fix this|previous answer|above answer|the code|that code|the query|that query|database part|architecture part)\b/i;
+  /\b(how exactly|explain more|explain this|explain that|explain the code|explain this code|explain that code|explain the code again|that function|this function|the function you wrote|function that you (?:have )?written|how this works|in context of|you mentioned|you said|same thing|continue|continue from|what about that|why did|why was|why was that|why that|why this is used|optimi[sz]e this|debug this|fix this|previous answer|above answer|the code|that code|the query|that query|database part|architecture part)\b/i;
 const WEAK_DEICTIC_RE =
-  /^(that|it|this|continue|continue from .{1,80}|same thing|explain it|explain this|explain that|explain the code|why|why this is used|optimi[sz]e this|debug this)\??$/i;
+  /^(that|it|this|continue|continue from .{1,80}|same thing|explain it|explain this|explain that|explain the code|explain that function|explain this function|why|why this is used|optimi[sz]e this|debug this)\??$/i;
 
 const CONNECTOR_RE = /\b(and|then|also|plus|because|so)\s*$/i;
 const TECH_TOPIC_RE = /\b(databricks|pyspark|spark|adf|azure devops|azure|sql|postgres|postgresql|mongodb|node|react|api|code|query|database|architecture|backend|frontend)\b/i;

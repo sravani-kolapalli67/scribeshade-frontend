@@ -41,10 +41,7 @@ import {
 import { BuyCreditsDialog } from "@/components/Billing/BuyCreditsDialog";
 import { useCreditsBalance } from "@/hooks/useCreditsBalance";
 import { useCreditBrackets } from "@/hooks/useCreditBrackets";
-import {
-  type AIAnswerRequestPayload,
-  extractCodeBlocks,
-} from "@/types/ai-answer";
+import type { AIAnswerRequestPayload } from "@/types/ai-answer";
 import { detectActiveQuestion } from "@/features/session/detection/activeQuestionDetector";
 import { extractInterviewKeywordsFromParts } from "@/utils/keywordExtractor";
 import { buildAdaptiveAiContext } from "@/features/session/context/adaptiveAiContext";
@@ -134,15 +131,6 @@ function buildOverlayTranscript(messages: Message[]): string {
   return joined.slice(joined.length - OVERLAY_TRANSCRIPT_MAX_CHARS);
 }
 
-function deriveAnswerTopicFromText(text: string): string {
-  const t = (text || "").toLowerCase();
-  if (/\b(mongoose|mongodb|mongo|aggregation|pipeline|nosql|collection|schema|event logs?|user events?)\b/.test(t)) return "mongodb";
-  if (/\b(sql|postgres|postgresql|select|join|table|index)\b/.test(t)) return "sql";
-  if (/\b(react|jsx|hooks|component)\b/.test(t)) return "react";
-  if (/\b(pyspark|spark|datalake|databricks)\b/.test(t)) return "pyspark";
-  if (/\b(node|express|api|backend)\b/.test(t)) return "backend";
-  return "general";
-}
 
 /**
  * Deduplicates repeated adjacent phrases within a single transcript string (up to 6 words).
@@ -1729,25 +1717,7 @@ export default function ActiveSession() {
       recentTranscriptWindow.length > 0
         ? recentTranscriptWindow.join("\n")
         : bestCurrentQuestion;
-    const selectedAiMessage =
-      (lastInteractedAiMessageIdRef.current
-        ? aiChat.find(
-            (m) =>
-              m.id === lastInteractedAiMessageIdRef.current &&
-              m.sender === "AI" &&
-              m.text?.trim(),
-          )
-        : null) ||
-      [...aiChat].reverse().find((m) => m.sender === "AI" && m.text?.trim()) ||
-      null;
-    const selectedAnswerText = selectedAiMessage?.text?.trim() || "";
-    const selectedAnswerQuestion = selectedAiMessage?.question?.trim() || "";
-    const selectedAnswerCodeBlocks = selectedAnswerText
-      ? extractCodeBlocks(selectedAnswerText)
-      : [];
-    const selectedAnswerTopic = deriveAnswerTopicFromText(
-      `${selectedAnswerQuestion} ${selectedAnswerText}`,
-    );
+    const selectedAnswerQuestion = "";
     const effectiveCurrentQuestion = bestCurrentQuestion;
     const activeDetection = detectActiveQuestion({
       liveInterimText: interviewerInterim || "",
@@ -1764,7 +1734,6 @@ export default function ActiveSession() {
         })),
       cutoffTimestamp: snapshotTimestamp - CONTEXT_WINDOW_MS,
       selectedAnswerQuestion,
-      selectedAnswerId: selectedAiMessage?.id,
     });
     const effectiveDetection = {
       ...activeDetection,
@@ -1791,14 +1760,7 @@ export default function ActiveSession() {
       ...(adaptiveContext.previousCodeBlocks?.length
         ? { previousCodeBlocks: adaptiveContext.previousCodeBlocks }
         : {}),
-      ...(selectedAiMessage?.id ? { selectedAnswerId: selectedAiMessage.id } : {}),
-      ...(selectedAnswerQuestion ? { selectedAnswerQuestion } : {}),
-      ...(selectedAnswerText ? { selectedAnswerText } : {}),
-      ...(selectedAnswerCodeBlocks.length > 0
-        ? { selectedAnswerCodeBlocks }
-        : {}),
-      ...(selectedAnswerTopic ? { selectedAnswerTopic } : {}),
-      answerClickMode: selectedAiMessage?.id ? "answer_followup" : "answer_latest_unanswered",
+      answerClickMode: "answer_latest_unanswered",
       ...(detectionHint
         ? {
             activeQuestionDetection: {
@@ -1822,6 +1784,9 @@ export default function ActiveSession() {
       buildContextMs: Date.now() - contextBuildStartedAt,
       windowSizeUsed: adaptiveContext.windowSizeUsed,
       expandedReason: adaptiveContext.expandedReason,
+      selectedContextSuppressed: true,
+      suppressedReason: "normal_ai_answer_latest_transcript",
+      activeQuestionDetectionIsFollowUp: effectiveDetection.isFollowUp,
     });
 
     isExecutingRef.current = true;

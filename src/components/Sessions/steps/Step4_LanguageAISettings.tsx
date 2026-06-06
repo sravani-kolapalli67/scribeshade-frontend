@@ -138,7 +138,7 @@ export function Step4_LanguageAISettings({ data, onChange }: Step4Props) {
         <Textarea
           id="instructions"
           placeholder="Be more technical, use a more casual tone, use JavaScript when generating code examples, etc."
-          className="min-h-32 rounded-xl bg-background border-border/80 p-4 text-[14px] leading-relaxed resize-none shadow-sm focus:ring-primary/10"
+          className="field-sizing-fixed h-32 min-h-32 max-h-32 overflow-y-auto rounded-xl bg-background border-border/80 p-4 text-[14px] leading-relaxed resize-none shadow-sm focus:ring-primary/10"
           value={data.instructions}
           onChange={(e) => onChange("instructions", e.target.value)}
         />

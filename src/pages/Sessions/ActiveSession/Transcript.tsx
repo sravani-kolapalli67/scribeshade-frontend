@@ -37,6 +37,13 @@ export interface Message {
     selectedAnswerText?: string;
     selectedAnswerCodeBlocks?: string[];
     selectedAnswerTopic?: string;
+    requestId?: string;
+    answerClickMode?:
+      | "answer_latest_unanswered"
+      | "answer_selected_intent"
+      | "reanswer_previous"
+      | "regenerate_answer"
+      | "answer_followup";
     answerMode?:
       | "auto"
       | "theory_only"

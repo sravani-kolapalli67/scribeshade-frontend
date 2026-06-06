@@ -64,10 +64,7 @@ import {
   createSessionTransitionGuard,
   type SessionLifecycleState,
 } from "@/features/session/runtime/sessionRuntime";
-import {
-  type AIAnswerRequestPayload,
-  extractCodeBlocks,
-} from "@/types/ai-answer";
+import type { AIAnswerRequestPayload } from "@/types/ai-answer";
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "";
 const DEEPGRAM_API_KEY = import.meta.env.VITE_DEEPGRAM_API_KEY || "";
@@ -270,15 +267,6 @@ function areNearDuplicateTexts(a: string, b: string): boolean {
   return false;
 }
 
-function deriveAnswerTopicFromText(text: string): string {
-  const t = (text || "").toLowerCase();
-  if (/\b(mongoose|mongodb|mongo|aggregation|pipeline|nosql|collection|schema|event logs?|user events?)\b/.test(t)) return "mongodb";
-  if (/\b(sql|postgres|postgresql|select|join|table|index)\b/.test(t)) return "sql";
-  if (/\b(react|jsx|hooks|component)\b/.test(t)) return "react";
-  if (/\b(pyspark|spark|datalake|databricks)\b/.test(t)) return "pyspark";
-  if (/\b(node|express|api|backend)\b/.test(t)) return "backend";
-  return "general";
-}
 
 function endsWithConnector(text: string): boolean {
   const t = (text || "").trim().toLowerCase();
@@ -1934,6 +1922,9 @@ export function useFloatingSession() {
 
   const handleAiAnswerClick = useCallback(async () => {
     console.log("[AI Answer][Click] received", {
+      clickSource: "button",
+      isDuplicateSuppressed: false,
+      requestId: null,
       hasSession: !!sessionInfoRef.current?.sessionId,
       isRefLocked: isAiAnswerRunningRef.current,
       isEmitting: isEmittingRef.current,
@@ -1951,6 +1942,9 @@ export function useFloatingSession() {
 
     if (isAiAnswerRunningRef.current || isEmittingRef.current || isAnswering || isAiAnswerUiLocked) {
       console.log("[AI Answer][Dedup] duplicate click ignored", {
+        clickSource: "button",
+        isDuplicateSuppressed: true,
+        requestId: null,
         reason: isAiAnswerRunningRef.current
           ? "ref_locked"
           : isEmittingRef.current
@@ -1977,6 +1971,8 @@ export function useFloatingSession() {
     );
     if (!opAcquire.acquired) {
       console.log("[AI Answer][Dedup] duplicate ai-answer ignored (operation registry)", {
+        clickSource: "button",
+        isDuplicateSuppressed: true,
         sessionId: info.sessionId,
         requestId: opRequestId,
       });
@@ -2017,14 +2013,6 @@ export function useFloatingSession() {
     console.log("[useFloatingSession] Creating transcript snapshot at timestamp:", snapshotTimestamp);
     console.log("[useFloatingSession] Snapshot contains", msgsSnapshot.length, "messages");
 
-    const safeResponseIndexForDetection =
-      aiResponses.length > 0
-        ? Math.min(currentResponseIndex, aiResponses.length - 1)
-        : 0;
-    const selectedAiMessageForDetection =
-      aiResponses[safeResponseIndexForDetection] ||
-      [...aiChat].reverse().find((m) => m.sender === "AI" && m.text?.trim()) ||
-      null;
 
     const cutoff =
       lastAnswerTimestampRef.current !== null
@@ -2040,8 +2028,7 @@ export function useFloatingSession() {
           timestamp: m.timestamp,
         })),
       cutoffTimestamp: cutoff,
-      selectedAnswerQuestion: selectedAiMessageForDetection?.question?.trim() || "",
-      selectedAnswerId: selectedAiMessageForDetection?.id,
+      selectedAnswerQuestion: "",
     });
 
     let question = detection.cleanedQuestion.trim();
@@ -2190,6 +2177,9 @@ export function useFloatingSession() {
       source,
       model: selectedModelRef.current,
       snapshotTimestamp,
+      selectedContextSuppressed: true,
+      suppressedReason: "normal_ai_answer_latest_transcript",
+      activeQuestionDetectionIsFollowUp: effectiveDetection.isFollowUp,
     });
 
     const recentMessages = msgsSnapshot
@@ -2220,22 +2210,7 @@ export function useFloatingSession() {
     const recentTranscriptWindow = adaptiveContext.recentTranscriptWindow;
     const speakerSeparatedTranscript = adaptiveContext.speakerSeparatedTranscript;
 
-    const safeResponseIndex =
-      aiResponses.length > 0
-        ? Math.min(currentResponseIndex, aiResponses.length - 1)
-        : 0;
-    const selectedAiMessage =
-      aiResponses[safeResponseIndex] ||
-      [...aiChat].reverse().find((m) => m.sender === "AI" && m.text?.trim()) ||
-      null;
-    const selectedAnswerText = selectedAiMessage?.text?.trim() || "";
-    const selectedAnswerQuestion = selectedAiMessage?.question?.trim() || "";
-    const selectedAnswerCodeBlocks = selectedAnswerText
-      ? extractCodeBlocks(selectedAnswerText)
-      : [];
-    const selectedAnswerTopic = deriveAnswerTopicFromText(
-      `${selectedAnswerQuestion} ${selectedAnswerText}`,
-    );
+    const selectedAnswerQuestion = "";
     const effectiveCurrentQuestion = adaptiveContext.currentQuestion || question;
 
     const rawTranscript =
@@ -2260,14 +2235,7 @@ export function useFloatingSession() {
       ...(adaptiveContext.previousCodeBlocks?.length
         ? { previousCodeBlocks: adaptiveContext.previousCodeBlocks }
         : {}),
-      ...(selectedAiMessage?.id ? { selectedAnswerId: selectedAiMessage.id } : {}),
-      ...(selectedAnswerQuestion ? { selectedAnswerQuestion } : {}),
-      ...(selectedAnswerText ? { selectedAnswerText } : {}),
-      ...(selectedAnswerCodeBlocks.length > 0
-        ? { selectedAnswerCodeBlocks }
-        : {}),
-      ...(selectedAnswerTopic ? { selectedAnswerTopic } : {}),
-      answerClickMode: selectedAiMessage?.id ? "answer_followup" : "answer_latest_unanswered",
+      answerClickMode: "answer_latest_unanswered",
       ...(detectionHint
         ? {
             activeQuestionDetection: {
@@ -2293,6 +2261,9 @@ export function useFloatingSession() {
         buildContextMs: Date.now() - contextBuildStartedAt,
         windowSizeUsed: adaptiveContext.windowSizeUsed,
         expandedReason: adaptiveContext.expandedReason,
+        selectedContextSuppressed: true,
+        suppressedReason: "normal_ai_answer_latest_transcript",
+        activeQuestionDetectionIsFollowUp: effectiveDetection.isFollowUp,
       });
 
       console.log("[AI Answer][Request] start", {
