@@ -113,6 +113,16 @@ export function extractCodeBlocks(text: string): string[] {
 export function sanitizeAIAnswerPayload(
   payload: AIAnswerRequestPayload,
 ): AIAnswerRequestPayload {
+  const regenerateMode =
+    payload.isRegenerate === true ||
+    payload.answerClickMode === "regenerate_answer" ||
+    payload.answerClickMode === "reanswer_previous";
+  const selectedFollowupMode =
+    payload.answerClickMode === "answer_followup";
+  const previousAnswerMode =
+    regenerateMode ||
+    selectedFollowupMode ||
+    payload.activeQuestionDetection?.isFollowUp === true;
   const transcript = (payload.transcript || "").trim();
   const currentQuestion = payload.currentQuestion?.trim() || undefined;
   const patchedTranscript = payload.patchedTranscript?.trim() || undefined;
@@ -203,14 +213,18 @@ export function sanitizeAIAnswerPayload(
     ...(speakerSeparatedTranscript.length > 0
       ? { speakerSeparatedTranscript }
       : {}),
-    ...(previousAiAnswer ? { previousAiAnswer } : {}),
-    ...(previousAiAnswers.length > 0 ? { previousAiAnswers } : {}),
-    ...(previousCodeBlocks.length > 0 ? { previousCodeBlocks } : {}),
-    ...(payload.selectedAnswerId ? { selectedAnswerId: payload.selectedAnswerId } : {}),
-    ...(selectedAnswerQuestion ? { selectedAnswerQuestion } : {}),
-    ...(selectedAnswerText ? { selectedAnswerText } : {}),
-    ...(selectedAnswerCodeBlocks.length > 0 ? { selectedAnswerCodeBlocks } : {}),
-    ...(selectedAnswerTopic ? { selectedAnswerTopic } : {}),
+    ...(previousAnswerMode && previousAiAnswer ? { previousAiAnswer } : {}),
+    ...(previousAnswerMode && previousAiAnswers.length > 0 ? { previousAiAnswers } : {}),
+    ...(previousAnswerMode && previousCodeBlocks.length > 0 ? { previousCodeBlocks } : {}),
+    ...(selectedFollowupMode || regenerateMode
+      ? {
+          ...(payload.selectedAnswerId ? { selectedAnswerId: payload.selectedAnswerId } : {}),
+          ...(selectedAnswerQuestion ? { selectedAnswerQuestion } : {}),
+          ...(selectedAnswerText ? { selectedAnswerText } : {}),
+          ...(selectedAnswerCodeBlocks.length > 0 ? { selectedAnswerCodeBlocks } : {}),
+          ...(selectedAnswerTopic ? { selectedAnswerTopic } : {}),
+        }
+      : {}),
     ...(payload.selectedIntentId ? { selectedIntentId: payload.selectedIntentId } : {}),
     ...(payload.selectedAnswerIntentId ? { selectedAnswerIntentId: payload.selectedAnswerIntentId } : {}),
     ...(payload.answerClickMode ? { answerClickMode: payload.answerClickMode } : {}),

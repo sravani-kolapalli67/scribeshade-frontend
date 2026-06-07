@@ -1224,10 +1224,18 @@ export const useAIChat = () => {
       const resolvedQuestion = resolveQueryFromAIAnswerPayload(payload);
       if (!resolvedQuestion.trim()) return;
       const resolvedQuestionKey = normalizeQuestionKey(resolvedQuestion);
+      const expectsCodeCard =
+        payload.answerMode === "minimal_code" ||
+        payload.answerMode === "code_required" ||
+        payload.answerMode === "explain_existing_code" ||
+        /\b(write|implement|create|build|show|provide|debug|optimi[sz]e)\b.{0,80}\b(code|component|hook|function|query|sql|pyspark)\b/i.test(
+          resolvedQuestion,
+        );
       const allowDuplicateQuestionText =
         payload.answerClickMode === "answer_followup" ||
         !!payload.selectedAnswerId ||
-        !!payload.selectedAnswerQuestion;
+        !!payload.selectedAnswerQuestion ||
+        expectsCodeCard;
       const existingQuestionCard = aiChatRef.current.find((message) => {
         if (message.sender !== "AI") return false;
         const renderedText = message.text?.trim() || "";
@@ -1299,74 +1307,47 @@ export const useAIChat = () => {
         let renderedIds: string[] = [];
         let sentinelOnly = false;
         let questionMeta: QuestionMeta | undefined;
-
-        for (let attempt = 0; attempt < 2; attempt += 1) {
-          const attemptRequestId = attempt === 0 ? requestId : createRequestId();
-          const attemptPayload =
-            attempt === 0
-              ? payload
-              : sanitizeAIAnswerPayload({
-                  ...payload,
-                  requestId: attemptRequestId,
-                  transcript: payload.transcript || resolvedQuestion,
-                  currentQuestion: resolvedQuestion,
-                  activeQuestionDetection: {
-                    activeQuestion: resolvedQuestion,
-                    cleanedQuestion: resolvedQuestion,
-                    isFollowUp: payload.activeQuestionDetection?.isFollowUp || false,
-                    topicChanged: false,
-                    confidenceScore: 1,
-                    ignoredNoise: false,
-                  },
-                });
-          const requestBody = {
-            ...attemptPayload,
-            requestId: attemptRequestId,
-            sessionId,
-            aiModel,
-          };
-          if (import.meta.env.DEV) {
-            console.log("[AI Answer Debug][FE] POST /ai-answer body:", requestBody);
-          }
-          console.log(`[useAIChat] handleAiAnswer: Dispatching POST to ${targetUrl}`, {
-            attempt: attempt + 1,
-            requestId: attemptRequestId,
-          });
-          const response = await fetch(targetUrl, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "x-request-id": attemptRequestId,
-              "x-session-id": sessionId,
-            },
-            body: JSON.stringify(requestBody),
-            signal: controller.signal,
-          });
-
-          if (!response.ok) {
-            console.error(`[useAIChat] handleAiAnswer: Server returned status ${response.status}`);
-            throw new Error("AI request failed");
-          }
-
-          const reader = response.body?.getReader();
-          if (!reader) throw new Error("No reader available");
-          const consumed = await consumeSegmentedStream(
-            reader,
-            messageId,
-            setAiChat,
-            baseTime,
-            controller.signal,
-            newAiMessage.originalGenerationContext,
-          );
-          renderedIds = consumed.activeIds;
-          sentinelOnly = consumed.sentinelOnly;
-          questionMeta = consumed.questionMeta;
-          if (!sentinelOnly) break;
-          console.warn("[useAIChat] AI Answer returned sentinel; retrying with authoritative question", {
-            sessionId,
-            question: resolvedQuestion,
-          });
+        const requestBody = {
+          ...payload,
+          requestId,
+          sessionId,
+          aiModel,
+        };
+        if (import.meta.env.DEV) {
+          console.log("[AI Answer Debug][FE] POST /ai-answer body:", requestBody);
         }
+        console.log(`[useAIChat] handleAiAnswer: Dispatching POST to ${targetUrl}`, {
+          requestId,
+        });
+        const response = await fetch(targetUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-request-id": requestId,
+            "x-session-id": sessionId,
+          },
+          body: JSON.stringify(requestBody),
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          console.error(`[useAIChat] handleAiAnswer: Server returned status ${response.status}`);
+          throw new Error("AI request failed");
+        }
+
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error("No reader available");
+        const consumed = await consumeSegmentedStream(
+          reader,
+          messageId,
+          setAiChat,
+          baseTime,
+          controller.signal,
+          newAiMessage.originalGenerationContext,
+        );
+        renderedIds = consumed.activeIds;
+        sentinelOnly = consumed.sentinelOnly;
+        questionMeta = consumed.questionMeta;
 
         if (controller.signal.aborted) {
           console.log(`[useAIChat] handleAiAnswer: Signal aborted during stream consumption for request: ${reqId}`);
@@ -1383,7 +1364,7 @@ export const useAIChat = () => {
               entry.q !== sentinelDedupeKey &&
               normalizeQuestionKey(entry.q) !== normalizedSentinelKey,
           );
-          throw new Error("AI Answer returned no answer after retry");
+          throw new Error("AI Answer returned no answer");
         }
 
         applyQuestionGuardrail(
