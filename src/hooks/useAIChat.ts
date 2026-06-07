@@ -278,9 +278,6 @@ const EXTRACT_QUESTION_FROM_ANSWER_RE =
   /^\s*(?:\*+\s*)?(?:summarized\s+question|question)\s*:?\s*(?:\*+)?\s*([\s\S]*?)\s*(?:\*+\s*)?(?:answer)\s*:?\s*(?:\*+)?\s*[\s\S]*$/i;
 const EXTRACT_INLINE_QUESTION_RE =
   /^\s*(?:\*+\s*)?(?:summarized\s+question|question)\s*:?\s*(?:\*+)?\s*(.+)$/im;
-const FOLLOWUP_QUESTION_RE =
-  /^(?:and|also|then|what about|how about|follow[- ]?up|can you expand|can you explain more|elaborate|why|when|where|which|who)\b/i;
-
 function extractQuestionFromAiText(text: string): string {
   const cleaned = text.trim();
   if (!cleaned) return "";
@@ -303,26 +300,6 @@ function extractQuestionCandidate(text: string): string {
       .split("\n")
       .map((line) => line.trim())
       .find((line) => line.endsWith("?")) ?? ""
-  );
-}
-
-function normalizeQuestionKey(question: string): string {
-  return question
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function isLikelyFollowUpQuestion(question: string): boolean {
-  const cleaned = question.trim();
-  if (!cleaned) return false;
-  if (FOLLOWUP_QUESTION_RE.test(cleaned)) return true;
-
-  const words = normalizeQuestionKey(cleaned).split(" ").filter(Boolean);
-  return (
-    words.length <= 7 &&
-    /\b(it|that|this|they|those|these|same|above|previous)\b/i.test(cleaned)
   );
 }
 
@@ -660,11 +637,6 @@ export const useAIChat = () => {
     aiChatRef.current = aiChat;
   }, [aiChat]);
 
-  // Recent-question dedup: prevents the same exact question from being
-  // re-issued within 4 s (e.g. transcript echo, double-click, debounced
-  // multi-question splitter firing twice).
-  const recentQuestionsRef = useRef<{ q: string; t: number }[]>([]);
-
   // Pipeline generation guard: prevents duplicate stream cards for the same semantic segment.
   const generationGuardRef = useRef(createGenerationGuard());
   // Tracks the last successfully generated transcript for continuation detection.
@@ -820,61 +792,26 @@ export const useAIChat = () => {
     operationRegistryRef.current.clear();
   }, []);
 
-  const applyQuestionGuardrail = useCallback(
+  const finalizeRenderedQuestions = useCallback(
     (
       newMessageIds: string[],
-      options: { fallbackQuestion?: string; allowDuplicateQuestionText?: boolean } = {},
+      options: { fallbackQuestion?: string } = {},
     ) => {
       if (!newMessageIds.length) return;
 
       setAiChat((prev) => {
         const existingNewIds = new Set(newMessageIds);
-        const existingVisibleKeys = new Set<string>();
-
-        for (const msg of prev) {
-          if (existingNewIds.has(msg.id) || msg.sender !== "AI") continue;
-
-          const visibleCandidate =
-            msg.question?.trim() || extractQuestionCandidate(msg.text);
-          const visibleKey = normalizeQuestionKey(visibleCandidate || "");
-
-          if (visibleKey) {
-            existingVisibleKeys.add(visibleKey);
-          }
-        }
-
-        const batchKeys = new Set<string>();
-        const next: Message[] = [];
-
-        for (const msg of prev) {
-          if (!existingNewIds.has(msg.id)) {
-            next.push(msg);
-            continue;
-          }
-
+        return prev.map((msg) => {
+          if (!existingNewIds.has(msg.id)) return msg;
           const candidate =
             extractQuestionCandidate(msg.text) ||
             msg.question?.trim() ||
             options.fallbackQuestion?.trim() ||
             "";
-          const key = normalizeQuestionKey(candidate);
-
-          if (!key) {
-            next.push(msg);
-            continue;
-          }
-
-          const duplicate = existingVisibleKeys.has(key) || batchKeys.has(key);
-          if (duplicate && !options.allowDuplicateQuestionText && !isLikelyFollowUpQuestion(candidate)) {
-            console.log("[useAIChat] Dropped duplicate AI question card:", { question: candidate, allowDuplicateQuestionText: !!options.allowDuplicateQuestionText });
-            continue;
-          }
-
-          batchKeys.add(key);
-          next.push({ ...msg, question: msg.question || candidate });
-        }
-
-        return next;
+          return candidate && !msg.question
+            ? { ...msg, question: candidate }
+            : msg;
+        });
       });
     },
     [],
@@ -1106,10 +1043,6 @@ export const useAIChat = () => {
           .map((entry) => entry.content)
           .join("\n");
       const generationInput = normalizedQuestion.trim() || fallbackTranscriptInput.trim();
-      const allowsRepeatedQuestionCard =
-        basePayload.answerClickMode === "answer_followup" ||
-        !!basePayload.selectedAnswerId ||
-        !!basePayload.selectedAnswerQuestion;
       if (import.meta.env.DEV) {
         console.log("[AI Answer Debug][FE] Raw input request:", request);
         console.log("[AI Answer Debug][FE] Base sanitized payload:", basePayload);
@@ -1119,18 +1052,6 @@ export const useAIChat = () => {
       if (!generationInput.trim()) {
         console.log("[useAIChat] handleAiAnswer: Transcript input is empty. Aborting.");
         return;
-      }
-
-      // Same-question dedup window (4 s).
-      const now = Date.now();
-      const dedupeKey = generationInput.trim().toLowerCase();
-      const recent = recentQuestionsRef.current.filter((r) => now - r.t < 4000);
-      if (!allowsRepeatedQuestionCard && recent.some((r) => r.q === dedupeKey)) {
-        console.log("[useAIChat] handleAiAnswer: Suppressed duplicate question (within 4s dedup window):", generationInput.slice(0, 60));
-        return;
-      }
-      if (!allowsRepeatedQuestionCard) {
-        recentQuestionsRef.current = [...recent, { q: dedupeKey, t: now }].slice(-10);
       }
 
       const requestId = createRequestId();
@@ -1223,39 +1144,6 @@ export const useAIChat = () => {
     ) => {
       const resolvedQuestion = resolveQueryFromAIAnswerPayload(payload);
       if (!resolvedQuestion.trim()) return;
-      const resolvedQuestionKey = normalizeQuestionKey(resolvedQuestion);
-      const expectsCodeCard =
-        payload.answerMode === "minimal_code" ||
-        payload.answerMode === "code_required" ||
-        payload.answerMode === "explain_existing_code" ||
-        /\b(write|implement|create|build|show|provide|debug|optimi[sz]e)\b.{0,80}\b(code|component|hook|function|query|sql|pyspark)\b/i.test(
-          resolvedQuestion,
-        );
-      const allowDuplicateQuestionText =
-        payload.answerClickMode === "answer_followup" ||
-        !!payload.selectedAnswerId ||
-        !!payload.selectedAnswerQuestion ||
-        expectsCodeCard;
-      const existingQuestionCard = aiChatRef.current.find((message) => {
-        if (message.sender !== "AI") return false;
-        const renderedText = message.text?.trim() || "";
-        if (
-          renderedText === NO_QUESTION_MESSAGE ||
-          /^sorry,\s+i couldn't/i.test(renderedText) ||
-          /^i couldn't generate/i.test(renderedText)
-        ) {
-          return false;
-        }
-        const candidate =
-          message.question?.trim() ||
-          extractQuestionCandidate(message.text || "");
-        if (!candidate) return false;
-        return normalizeQuestionKey(candidate) === resolvedQuestionKey;
-      });
-      if (existingQuestionCard && !allowDuplicateQuestionText && !isLikelyFollowUpQuestion(resolvedQuestion)) {
-        console.log("[useAIChat] handleAiAnswer: Suppressed duplicate AI card for question:", { question: resolvedQuestion, allowDuplicateQuestionText });
-        return;
-      }
 
       const { controller, reqId } = startNewRequest();
       const requestId = payload.requestId || createRequestId();
@@ -1357,19 +1245,12 @@ export const useAIChat = () => {
         console.log("[useAIChat] handleAiAnswer: Stream consumption completed. sentinelOnly:", sentinelOnly);
 
         if (sentinelOnly) {
-          const sentinelDedupeKey = resolvedQuestion.trim().toLowerCase();
-          const normalizedSentinelKey = normalizeQuestionKey(resolvedQuestion);
-          recentQuestionsRef.current = recentQuestionsRef.current.filter(
-            (entry) =>
-              entry.q !== sentinelDedupeKey &&
-              normalizeQuestionKey(entry.q) !== normalizedSentinelKey,
-          );
           throw new Error("AI Answer returned no answer");
         }
 
-        applyQuestionGuardrail(
+        finalizeRenderedQuestions(
           renderedIds.length > 0 ? renderedIds : [messageId],
-          { fallbackQuestion: resolvedQuestion, allowDuplicateQuestionText },
+          { fallbackQuestion: resolvedQuestion },
         );
 
         const answerText =
@@ -1422,7 +1303,7 @@ export const useAIChat = () => {
         operationRegistryRef.current.release(sessionId, "ai-answer", requestId);
       }
     },
-    [applyQuestionGuardrail, commitContinuityFromAnswer, createRequestId, safeSetAiChat, startNewRequest],
+    [commitContinuityFromAnswer, createRequestId, finalizeRenderedQuestions, safeSetAiChat, startNewRequest],
   );
   // Keep the ref in sync so handleAiAnswer always calls the latest callback.
   handleAiAnswerSingleRef.current = handleAiAnswerSingle;
