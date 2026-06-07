@@ -878,49 +878,39 @@ export const useAIChat = () => {
         }
 
         const targetUrl = `${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionId}/analyze-screen`;
-        let renderedIds: string[] = [];
-        let analyzeSentinel = false;
-        for (let attempt = 0; attempt < 2; attempt += 1) {
-          const formData = new FormData();
-          formData.append("screenshot", screenshotBlob, "screenshot.jpg");
-          if (aiModel) {
-            formData.append("aiModel", aiModel);
-          }
-          formData.append("contextPayload", JSON.stringify(screenRequestContext));
+        const formData = new FormData();
+        formData.append("screenshot", screenshotBlob, "screenshot.jpg");
+        if (aiModel) {
+          formData.append("aiModel", aiModel);
+        }
+        formData.append("contextPayload", JSON.stringify(screenRequestContext));
 
-          console.log(`[useAIChat] handleAnalyzeScreen: Dispatching POST to ${targetUrl}`, {
-            attempt: attempt + 1,
-          });
-          const response = await fetch(targetUrl, {
-            method: "POST",
-            body: formData,
-            signal: controller.signal,
-          });
+        console.log(`[useAIChat] handleAnalyzeScreen: Dispatching POST to ${targetUrl}`);
+        const response = await fetch(targetUrl, {
+          method: "POST",
+          body: formData,
+          signal: controller.signal,
+        });
 
-          if (!response.ok) {
-            console.error(`[useAIChat] handleAnalyzeScreen: Server returned status ${response.status}`);
-            throw new Error(`Analysis failed: ${response.status}`);
-          }
-
-          const reader = response.body?.getReader();
-          if (!reader) throw new Error("No reader available");
-          const consumed = await consumeSegmentedStream(
-            reader,
-            messageId,
-            setAiChat,
-            baseTime,
-            controller.signal,
-          );
-          renderedIds = consumed.activeIds;
-          analyzeSentinel = consumed.sentinelOnly;
-          if (!analyzeSentinel) break;
-          console.warn("[useAIChat] Analyze Screen returned sentinel; retrying with authoritative context", {
-            sessionId,
-          });
+        if (!response.ok) {
+          console.error(`[useAIChat] handleAnalyzeScreen: Server returned status ${response.status}`);
+          throw new Error(`Analysis failed: ${response.status}`);
         }
 
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error("No reader available");
+        const consumed = await consumeSegmentedStream(
+          reader,
+          messageId,
+          setAiChat,
+          baseTime,
+          controller.signal,
+        );
+        const renderedIds = consumed.activeIds;
+        const analyzeSentinel = consumed.sentinelOnly;
+
         if (analyzeSentinel) {
-          throw new Error("Analyze Screen returned no answer after retry");
+          throw new Error("Analyze Screen returned no answer");
         }
 
         if (controller.signal.aborted) {

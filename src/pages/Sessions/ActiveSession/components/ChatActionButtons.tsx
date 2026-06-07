@@ -31,7 +31,7 @@ export const ChatActionButtons = ({
 
       <AnalyzeScreenButton
         onClick={onAnalyzeScreen}
-        disabled={!canAnalyze || isAnswering}
+        disabled={!canAnalyze || isAnswering || isAnalyzing}
         isLoading={isAnalyzing}
         isFullscreen={isFullscreen}
       />

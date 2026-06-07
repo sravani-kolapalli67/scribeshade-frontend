@@ -13,6 +13,7 @@ import { clampToScreen } from "@/lib/clampToScreen";
 import { useOverlayShortcuts } from "@/hooks/useOverlayShortcuts";
 import { useSafeZoom } from "@/hooks/useSafeZoom";
 import { useCursorPassthrough } from "@/features/launcher/hooks/useCursorPassthrough";
+import { tauriOverlay } from "@/services/tauriOverlay";
 import {
   getOpacity,
   saveOpacity,
@@ -836,36 +837,12 @@ const AnswerArea = memo(function AnswerArea({ responses }: AnswerAreaProps) {
 
 // â”€â”€â”€ Main FloatingApp
 
-// Compresses the raw PNG data-URL from capture_screen (typically 5-15 MB) to a
-// JPEG Blob of <= 1280 px wide at 65% quality (~200-400 KB) using the Canvas API.
-// Drastically reduces upload payload and backend recompression overhead.
-function compressScreenshotToBlob(dataUrl: string): Promise<Blob> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      const MAX_WIDTH = 1280;
-      const scale = Math.min(1, MAX_WIDTH / img.width);
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.round(img.width * scale);
-      canvas.height = Math.round(img.height * scale);
-      const ctx = canvas.getContext("2d");
-      if (!ctx) {
-        reject(new Error("Canvas 2d context unavailable"));
-        return;
-      }
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      canvas.toBlob(
-        (blob) =>
-          blob
-            ? resolve(blob)
-            : reject(new Error("Canvas toBlob returned null")),
-        "image/jpeg",
-        0.65,
-      );
-    };
-    img.onerror = () => reject(new Error("Failed to load screenshot image"));
-    img.src = dataUrl;
-  });
+async function screenshotDataUrlToBlob(dataUrl: string): Promise<Blob> {
+  const response = await fetch(dataUrl);
+  if (!response.ok) {
+    throw new Error(`Failed to decode screenshot: ${response.status}`);
+  }
+  return response.blob();
 }
 
 const FloatingApp: React.FC = () => {
@@ -944,8 +921,25 @@ const FloatingApp: React.FC = () => {
   // Identical pattern to the launcher window. Polls cursor position at ~30fps
   // and calls setIgnoreCursorEvents based on [data-interactive] hit-testing.
   // The mini overlay never uses custom mouse drag, so isDraggingRef is always false.
+  // NOTE: We do NOT use forcePassthrough during analysis — instead, we selectively
+  // disable only the analysis-related controls (buttons, input). This keeps the
+  // floating app fully interactive (header, expand/collapse, etc.) during analysis.
   const isDraggingRef = useRef(false);
-  useCursorPassthrough({ isDraggingRef });
+  useCursorPassthrough({ isDraggingRef, forcePassthrough: false });
+
+  // Local analyze lock flips synchronously before native screenshot capture,
+  // closing the click-race before React hook state has time to update.
+  const [isAnalyzeCaptureLocked, setIsAnalyzeCaptureLocked] = useState(false);
+  const isAnalyzeCaptureLockedRef = useRef(false);
+
+  // Derived flag: true when any analysis / AI answer operation is in progress.
+  // Used to selectively disable ONLY the analysis-related controls (input, send,
+  // action buttons, regenerate) while leaving all other controls interactive.
+  const isAnalysisBusy =
+    isAnalyzeCaptureLocked ||
+    session.isAnalyzing ||
+    session.isCapturing ||
+    session.isAnswering;
 
   // ── CSS-based widget drag (fullscreen window stays fixed; widget moves inside it)
   const [widgetPos, setWidgetPos] = useState<{
@@ -1019,13 +1013,6 @@ const FloatingApp: React.FC = () => {
   const handleAnalyzeScreenCaptureRef = useRef<() => void>(() => {});
   handleAiAnswerClickRef.current = session.handleAiAnswerClick;
 
-  // Local "is the screen-capture phase running" flag.  The hook's `isCapturing`
-  // only flips AFTER the screenshot has already been captured + compressed —
-  // those steps can take 1-3 seconds, during which the user sees no feedback
-  // on the Analyze Screen button.  We flip this immediately on click so the
-  // button shows the spinner the moment it is pressed.
-  const [isCapturePhase, setIsCapturePhase] = useState(false);
-
   // Expandable question card state — lets the user read long detected questions
   // without the fixed card growing and squeezing the answer panel.
   const [isQuestionExpanded, setIsQuestionExpanded] = useState(false);
@@ -1035,25 +1022,51 @@ const FloatingApp: React.FC = () => {
     setIsQuestionExpanded(false);
   }, [session.currentResponseIndex]);
 
-  // Capture + compress screenshot, then delegate to hook
+  // Capture the screenshot, then delegate to the streaming hook.
+  // NOTE: We do NOT use setIsCapturePhase to disable cursor passthrough anymore.
+  // The floating app remains fully interactive during analysis — only the
+  // analysis-related controls (buttons, input) are disabled via React props.
   const handleAnalyzeScreenCapture = useCallback(async () => {
-    if (session.isAnalyzing || session.isAnswering || isCapturePhase) return;
-    setIsCapturePhase(true);
+    if (
+      isAnalyzeCaptureLockedRef.current ||
+      session.isCapturing ||
+      session.isAnalyzing ||
+      session.isAnswering
+    ) {
+      console.log("[Analyze Screen][Dedup] click ignored while analysis active");
+      return;
+    }
+
+    isAnalyzeCaptureLockedRef.current = true;
+    setIsAnalyzeCaptureLocked(true);
+    const captureStartedAt = performance.now();
     // Open the responses panel immediately so the "Capturing screen…" loader
     // is visible from the very first click.
     session.expandResponses();
     try {
       const screenshotData = await invoke<string>("capture_screen");
-      const blob = await compressScreenshotToBlob(screenshotData);
+      const blob = await screenshotDataUrlToBlob(screenshotData);
+      const captureMs = Math.round(performance.now() - captureStartedAt);
+      console.log("[Analyze Screen][Timing][FE]", {
+        captureAndDecodeMs: captureMs,
+        screenshotBytes: blob.size,
+      });
       await session.handleAnalyzeScreenClick(blob);
+      const totalMs = Math.round(performance.now() - captureStartedAt);
+      console.log("[Analyze Screen][Timing][FE] Total response time:", {
+        totalMs,
+        captureMs,
+        networkAndStreamMs: totalMs - captureMs,
+      });
     } catch (err) {
       console.error("Failed to capture screen:", err);
       const { toast } = await import("sonner");
       toast.error("Failed to capture screen");
     } finally {
-      setIsCapturePhase(false);
+      isAnalyzeCaptureLockedRef.current = false;
+      setIsAnalyzeCaptureLocked(false);
     }
-  }, [session, isCapturePhase]);
+  }, [session]);
   handleAnalyzeScreenCaptureRef.current = handleAnalyzeScreenCapture;
 
   useEffect(() => {
@@ -1075,6 +1088,17 @@ const FloatingApp: React.FC = () => {
         handleAiAnswerClickRef.current();
       } else if (e.key.toLowerCase() === "k") {
         e.preventDefault();
+        if (
+          isAnalyzeCaptureLockedRef.current ||
+          session.isCapturing ||
+          session.isAnalyzing ||
+          session.isAnswering
+        ) {
+          console.log(
+            "[Analyze Screen][Dedup] keyboard shortcut ignored while analysis active",
+          );
+          return;
+        }
         if (session.isTranscriptExpanded) session.toggleTranscriptExpanded();
         void handleAnalyzeScreenCaptureRef.current();
       }
@@ -1561,9 +1585,9 @@ const FloatingApp: React.FC = () => {
                     }}
                     isAnswering={session.isAnswering}
                     isAnalyzing={
+                      isAnalyzeCaptureLocked ||
                       session.isAnalyzing ||
-                      session.isCapturing ||
-                      isCapturePhase
+                      session.isCapturing
                     }
                     canAnswer={
                       !!session.sessionInfo && session.messages.length > 0
@@ -1573,10 +1597,14 @@ const FloatingApp: React.FC = () => {
                   />
                   <div className="relative flex-1">
                     <input
-                      className="w-full h-10 rounded-xl pl-4 pr-12 text-sm font-medium bg-white/5 border border-white/10 text-white placeholder:text-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500/50 transition-all"
+                      className={cn(
+                        "w-full h-10 rounded-xl pl-4 pr-12 text-sm font-medium bg-white/5 border border-white/10 text-white placeholder:text-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500/50 transition-all",
+                        isAnalysisBusy && "opacity-50 cursor-not-allowed",
+                      )}
                       placeholder="Ask AI anything..."
                       value={session.inputValue}
                       onChange={(e) => session.setInputValue(e.target.value)}
+                      disabled={isAnalysisBusy}
                       onKeyDown={(e) => {
                         if (e.key === "Enter" && !e.shiftKey) {
                           e.preventDefault();
@@ -1591,7 +1619,7 @@ const FloatingApp: React.FC = () => {
                             void session.handleSend();
                           }}
                           disabled={
-                            !session.inputValue.trim() || !session.sessionInfo
+                            !session.inputValue.trim() || !session.sessionInfo || isAnalysisBusy
                           }
                           className="absolute right-1 top-1 h-8 w-10 rounded-lg bg-blue-500 hover:bg-blue-600 disabled:bg-white/10 flex items-center justify-center text-white transition-all active:scale-95 shadow-lg shadow-blue-500/20"
                         >
@@ -1652,10 +1680,7 @@ const FloatingApp: React.FC = () => {
                 </div>
               ) : (
                 /* ── AI Answer Panel ───────────────────────────────────────────── */
-                (session.isAnswering ||
-                  session.isAnalyzing ||
-                  isCapturePhase ||
-                  session.aiResponses.length > 0) && (
+                (isAnalysisBusy || session.aiResponses.length > 0) && (
                   <div className="flex flex-col border-t border-white/10">
                     {(() => {
                       // Clamp the Redux index to the current React array length so we
@@ -1700,13 +1725,11 @@ const FloatingApp: React.FC = () => {
                                   {safeIndex + 1}/{session.aiResponses.length}
                                 </span>
                               )}
-                              {(session.isAnswering ||
-                                session.isAnalyzing ||
-                                isCapturePhase) &&
+                              {isAnalysisBusy &&
                                 session.aiResponses.length === 0 && (
                                   <span className="flex items-center gap-1.5 ml-1 text-[11px] text-blue-400/80">
                                     <Loader2 size={11} className="animate-spin" />
-                                    {isCapturePhase
+                                    {isAnalyzeCaptureLocked || session.isCapturing
                                       ? "Capturing screen..."
                                       : "Generating..."}
                                   </span>
@@ -1722,10 +1745,7 @@ const FloatingApp: React.FC = () => {
                                       )
                                     }
                                     disabled={
-                                      !currentResponse?.id ||
-                                      session.isAnswering ||
-                                      session.isAnalyzing ||
-                                      isCapturePhase
+                                      !currentResponse?.id || isAnalysisBusy
                                     }
                                     className="w-7 h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-25 disabled:cursor-not-allowed text-white transition-all active:scale-95"
                                   >
@@ -1820,9 +1840,7 @@ const FloatingApp: React.FC = () => {
 
                     {/* Loading skeleton — shown while waiting for first chunk */}
                     {session.isResponsesExpanded &&
-                      (session.isAnswering ||
-                        session.isAnalyzing ||
-                        isCapturePhase) &&
+                      isAnalysisBusy &&
                       session.aiResponses.length === 0 && (
                         <div className="px-4 pb-4">
                           <div className="relative overflow-hidden rounded-xl border border-white/10 bg-white/[0.03] p-4">
@@ -1832,7 +1850,7 @@ const FloatingApp: React.FC = () => {
                             <div className="relative z-10 flex items-center gap-2 text-blue-400/80 mb-3">
                               <Loader2 size={16} className="animate-spin" />
                               <span className="text-[13px] font-medium">
-                                {isCapturePhase
+                                {isAnalyzeCaptureLocked || session.isCapturing
                                   ? "Capturing screen..."
                                   : session.isAnalyzing
                                     ? "Analyzing screen..."

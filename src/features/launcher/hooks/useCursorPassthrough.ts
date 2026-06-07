@@ -4,6 +4,7 @@ import { tauriOverlay } from "@/services/tauriOverlay";
 interface UseCursorPassthroughOptions {
   isDraggingRef: React.MutableRefObject<boolean>;
   forceInteractive?: boolean;
+  forcePassthrough?: boolean;
 }
 
 /**
@@ -17,6 +18,7 @@ interface UseCursorPassthroughOptions {
 export function useCursorPassthrough({
   isDraggingRef,
   forceInteractive = false,
+  forcePassthrough = false,
 }: UseCursorPassthroughOptions): void {
   useEffect(() => {
     let raf = 0;
@@ -31,6 +33,7 @@ export function useCursorPassthrough({
     const pollIntervalMs = isWindows ? 42 : 16;
 
     async function setPassthrough(p: boolean) {
+      if (cancelled) return;
       if (p === lastPassthrough) return;
       lastPassthrough = p;
       try {
@@ -59,6 +62,12 @@ export function useCursorPassthrough({
 
     async function tick() {
       if (cancelled) return;
+
+      if (forcePassthrough) {
+        await setPassthrough(true);
+        raf = requestAnimationFrame(() => void tick());
+        return;
+      }
 
       // While dragging, keep interaction enabled — never pass through.
       if (isDraggingRef.current || forceInteractive) {
@@ -121,7 +130,7 @@ export function useCursorPassthrough({
       cancelled = true;
       cancelAnimationFrame(raf);
       document.removeEventListener("contextmenu", handleContextMenu, true);
-      tauriOverlay.setIgnoreCursorEvents(false).catch(console.error);
+      tauriOverlay.setIgnoreCursorEvents(true).catch(console.error);
     };
-  }, [forceInteractive, isDraggingRef]);
+  }, [forceInteractive, forcePassthrough, isDraggingRef]);
 }

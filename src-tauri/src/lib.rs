@@ -9,6 +9,7 @@ use base64::{Engine as _, engine::general_purpose};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock, atomic::{AtomicU64, AtomicBool, AtomicU8, Ordering}};
+use std::time::Instant;
 use url::Url as NavUrl;
 
 // Deepgram realtime transport (macOS + Windows only).
@@ -521,43 +522,36 @@ fn toggle_floating(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn capture_screen(app: AppHandle, window: Window) -> Result<String, String> {
-    // ── Serialise concurrent captures ────────────────────────────────────────
-    // Acquire the capture lock asynchronously to prevent two rapid
-    // Analyze Screen clicks from racing on the protection state.
+    let total_started_at = Instant::now();
+    let lock_started_at = Instant::now();
     let _lock = CAPTURE_LOCK.lock().await;
+    let lock_wait_ms = lock_started_at.elapsed().as_millis();
 
+    let position_started_at = Instant::now();
     let position = window.outer_position().map_err(|e| e.to_string())?;
-    let screen = Screen::from_point(position.x, position.y)
-        .map_err(|e| e.to_string())?;
+    let screen = Screen::from_point(position.x, position.y).map_err(|e| e.to_string())?;
+    let position_ms = position_started_at.elapsed().as_millis();
 
-    // ── Temporary content-protection flip ────────────────────────────────────
-    // When Private Mode is OFF (CONTENT_PROTECTED = false) the mini window is
-    // visible in screenshots, which causes the AI to "see" its own UI and
-    // generate answers for it.  We temporarily enable content protection on
-    // all windows for the duration of the capture, then restore the original
-    // state.  The window remains fully visible to the user throughout — only
-    // the screenshot API is affected.
     let was_protected = CONTENT_PROTECTED.load(Ordering::SeqCst);
 
+    let protection_started_at = Instant::now();
     if !was_protected {
-        // Enable protection on every window before capturing.
         for label in ["launcher", "mini", "main"] {
             if let Some(win) = app.get_webview_window(label) {
                 let _ = win.set_content_protected(true);
             }
         }
-        // Give the compositor one frame to apply the protection before the
-        // screenshot API reads the framebuffer.  50 ms is sufficient on both
-        // macOS (CGWindowListCreateImage) and Windows (BitBlt).
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
+    let protection_enable_ms = protection_started_at.elapsed().as_millis();
 
-    // ── Capture ───────────────────────────────────────────────────────────────
-    let capture_result = screen.capture();
+    let capture_started_at = Instant::now();
+    let capture_result = tokio::task::spawn_blocking(move || screen.capture())
+        .await
+        .map_err(|e| format!("capture task failed: {e}"))?;
+    let capture_ms = capture_started_at.elapsed().as_millis();
 
-    // ── Restore original protection state ────────────────────────────────────
-    // Always restore, even if capture failed, so the UI is never left in an
-    // unexpected protected state.
+    let restore_started_at = Instant::now();
     if !was_protected {
         for label in ["launcher", "mini", "main"] {
             if let Some(win) = app.get_webview_window(label) {
@@ -565,16 +559,41 @@ async fn capture_screen(app: AppHandle, window: Window) -> Result<String, String
             }
         }
     }
+    let restore_ms = restore_started_at.elapsed().as_millis();
 
-    // ── Encode result ─────────────────────────────────────────────────────────
     let image = capture_result.map_err(|e| e.to_string())?;
-    let mut buffer = std::io::Cursor::new(Vec::new());
-    image
-        .write_to(&mut buffer, screenshots::image::ImageFormat::Png)
-        .map_err(|e| e.to_string())?;
-    let b64 = general_purpose::STANDARD.encode(buffer.into_inner());
+    let original_width = image.width();
+    let original_height = image.height();
 
-    Ok(format!("data:image/png;base64,{}", b64))
+    let encode_started_at = Instant::now();
+    let (b64, resized_width, resized_height, jpeg_bytes) = tokio::task::spawn_blocking(
+        move || -> Result<(String, u32, u32, usize), String> {
+            let resized = screenshots::image::DynamicImage::ImageRgba8(image).resize(
+                1600,
+                1600,
+                screenshots::image::imageops::FilterType::Triangle,
+            );
+            let resized_width = resized.width();
+            let resized_height = resized.height();
+            let mut bytes = Vec::new();
+            let mut encoder =
+                screenshots::image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 85);
+            encoder.encode_image(&resized).map_err(|e| e.to_string())?;
+            let jpeg_bytes = bytes.len();
+            let b64 = general_purpose::STANDARD.encode(bytes);
+            Ok((b64, resized_width, resized_height, jpeg_bytes))
+        },
+    )
+    .await
+    .map_err(|e| format!("encode task failed: {e}"))??;
+    let encode_ms = encode_started_at.elapsed().as_millis();
+    let total_ms = total_started_at.elapsed().as_millis();
+
+    println!(
+        "[Analyze Screen][Timing][NativeCapture] lockWaitMs={lock_wait_ms} positionMs={position_ms} protectionEnableMs={protection_enable_ms} captureMs={capture_ms} restoreMs={restore_ms} encodeMs={encode_ms} totalMs={total_ms} original={original_width}x{original_height} resized={resized_width}x{resized_height} jpegBytes={jpeg_bytes} wasProtected={was_protected}"
+    );
+
+    Ok(format!("data:image/jpeg;base64,{}", b64))
 }
 
 

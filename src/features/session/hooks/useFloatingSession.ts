@@ -68,6 +68,7 @@ import type { AIAnswerRequestPayload } from "@/types/ai-answer";
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "";
 const DEEPGRAM_API_KEY = import.meta.env.VITE_DEEPGRAM_API_KEY || "";
+const ANALYZE_SCREEN_FAST_MODEL = "openai/gpt-4o-mini";
 
 function deepgramKeyFingerprint(key: string): string {
   const trimmed = (key || "").trim();
@@ -2379,7 +2380,8 @@ export function useFloatingSession() {
         sessionId: info.sessionId,
         screenshotSize: screenshotBlob?.size,
         contextQuestion,
-        model: selectedModelRef.current,
+        model: ANALYZE_SCREEN_FAST_MODEL,
+        selectedModel: selectedModelRef.current,
         windowSizeUsed: adaptiveContext.windowSizeUsed,
         expandedReason: adaptiveContext.expandedReason,
       });
@@ -2390,7 +2392,7 @@ export function useFloatingSession() {
         await handleAnalyzeScreen(
           info.sessionId,
           screenshotBlob || null,
-          selectedModelRef.current,
+          ANALYZE_SCREEN_FAST_MODEL,
           {
             transcript:
               adaptiveContext.recentTranscriptWindow.length > 0
@@ -2430,6 +2432,11 @@ export function useFloatingSession() {
 
   const handleSend = useCallback(async () => {
     if (!inputValue.trim() || !sessionInfoRef.current) return;
+    // Block manual sends while AI is busy (analysis or answer generation)
+    if (isAnalyzing || isAnswering || isAiAnswerUiLocked) {
+      console.log("[useFloatingSession] handleSend: Suppressed (AI operation in progress).");
+      return;
+    }
     const query = inputValue.trim();
     setInputValue("");
     const adaptiveContext = buildAdaptiveAiContext({
@@ -2476,7 +2483,7 @@ export function useFloatingSession() {
       sourcePlatform: "tauri",
       answerMode: "auto",
     });
-  }, [inputValue, handleCustomQuery, aiChat, tabInterimTranscript]);
+  }, [inputValue, handleCustomQuery, aiChat, tabInterimTranscript, isAnalyzing, isAnswering, isAiAnswerUiLocked]);
 
   const handleRegenerateResponse = useCallback(
     async (messageId: string) => {
