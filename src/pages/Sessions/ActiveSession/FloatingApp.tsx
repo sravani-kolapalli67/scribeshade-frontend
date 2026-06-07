@@ -581,22 +581,50 @@ function normalizeProjectAnswerMarkdown(
 }
 
 // Answer Area
-const AnswerArea: React.FC<{
+const ANSWER_SCROLL_BOTTOM_THRESHOLD_PX = 48;
+
+interface AnswerAreaProps {
   responses: AIDisplayResponse[];
   isStreaming: boolean;
-}> = ({ responses, isStreaming }) => {
+}
+
+const AnswerArea = memo(function AnswerArea({ responses }: AnswerAreaProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const shouldFollowStreamRef = useRef(true);
+  const activeResponse = responses[0];
+  const activeResponseId = activeResponse?.messageId ?? "";
+  const activeResponseText = activeResponse?.text ?? "";
 
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [responses]);
+    shouldFollowStreamRef.current = true;
+  }, [activeResponseId]);
+
+  useEffect(() => {
+    const scrollElement = scrollRef.current;
+    if (!scrollElement || !shouldFollowStreamRef.current) return;
+
+    const frameId = window.requestAnimationFrame(() => {
+      scrollElement.scrollTop = scrollElement.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frameId);
+  }, [activeResponseId, activeResponseText]);
+
+  const handleScroll = useCallback(() => {
+    const scrollElement = scrollRef.current;
+    if (!scrollElement) return;
+    const distanceFromBottom =
+      scrollElement.scrollHeight -
+      scrollElement.scrollTop -
+      scrollElement.clientHeight;
+    shouldFollowStreamRef.current =
+      distanceFromBottom <= ANSWER_SCROLL_BOTTOM_THRESHOLD_PX;
+  }, []);
 
   return (
     <div
       ref={scrollRef}
-      className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-4 scroll-smooth no-scrollbar"
+      onScroll={handleScroll}
+      className="max-h-[420px] overflow-y-auto overflow-x-hidden overscroll-contain p-4 space-y-4 no-scrollbar [contain:layout_paint]"
     >
       {responses.map((resp) => {
         // Render raw markdown as-is from the stream/result. Do not mutate content.
@@ -794,7 +822,17 @@ const AnswerArea: React.FC<{
       })}
     </div>
   );
-};
+}, (previous, next) => {
+  const previousResponse = previous.responses[0];
+  const nextResponse = next.responses[0];
+  return (
+    previous.isStreaming === next.isStreaming &&
+    previousResponse?.messageId === nextResponse?.messageId &&
+    previousResponse?.text === nextResponse?.text &&
+    previousResponse?.question === nextResponse?.question &&
+    previousResponse?.isStreaming === nextResponse?.isStreaming
+  );
+});
 
 // â”€â”€â”€ Main FloatingApp
 
@@ -1754,7 +1792,7 @@ const FloatingApp: React.FC = () => {
                           {/* Answer content — primary scrollable area */}
                           {session.isResponsesExpanded &&
                             session.aiResponses.length > 0 && (
-                              <div className="border-t border-white/10 max-h-[420px] overflow-y-auto overflow-x-hidden no-scrollbar">
+                              <div className="border-t border-white/10 min-h-0">
                                 <AnswerAreaErrorBoundary>
                                   <AnswerArea
                                     responses={[
