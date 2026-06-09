@@ -1,184 +1,143 @@
-import { useMemo, useState, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
-import { UserQuestion } from "../data";
-import { FileQuestion, Calendar } from "lucide-react";
-import { ColumnDef } from "@tanstack/react-table";
+import { useCallback, useMemo } from "react";
+import { useAuth } from "@clerk/clerk-react";
+import type { ColumnDef } from "@tanstack/react-table";
+import { CalendarDays, FileQuestion, LockKeyhole, Share2 } from "lucide-react";
 import { DataTable } from "@/components/data-table/data-table";
-import { QuestionFilters } from "../components/QuestionFilters";
+import { Badge } from "@/components/ui/badge";
+import { fetchMyQuestions, toDataTablePagination } from "../api";
+import type { DataTableFetchParams, MyQuestion } from "../types";
+import {
+  DifficultyBadge,
+  formatDate,
+  formatQuestionBankValue,
+  TagList,
+} from "../components/QuestionBankUI";
 
-const UserQuestions = () => {
-  const navigate = useNavigate();
-  const userId = localStorage.getItem("userId");
-
-  // Filter states
-  const [difficulty, setDifficulty] = useState<string>("all");
-  const [industry, setIndustry] = useState<string>("all");
-  const [language, setLanguage] = useState<string>("all");
+function UserQuestions() {
+  const { getToken } = useAuth();
 
   const fetchQuestions = useCallback(
-    async (params: any) => {
-      try {
-        if (!userId) return { success: false, data: [] };
-
-        const res = await fetch(
-          `${import.meta.env.VITE_BACKEND_URL}/api/qa/user/${userId}`,
-        );
-        if (!res.ok) throw new Error("Failed to fetch questions");
-        const questions = await res.json();
-
-        const search = (params.search || "").toLowerCase();
-        const from = params.from_date ? new Date(params.from_date).getTime() : -Infinity;
-        const to = params.to_date ? new Date(params.to_date + "T23:59:59").getTime() : Infinity;
-
-        const filtered = questions.filter((q: any) => {
-          const matchesSearch =
-            (q.ques || "").toLowerCase().includes(search) ||
-            (q.category || "").toLowerCase().includes(search);
-          const matchesDifficulty =
-            difficulty === "all" || q.difficulty === difficulty;
-          const matchesIndustry = industry === "all" || q.industry === industry;
-          const matchesLanguage = language === "all" || q.language === language;
-          const matchesDate = !params.from_date && !params.to_date
-            ? true
-            : (() => { const t = new Date(q.createdAt).getTime(); return t >= from && t <= to; })();
-
-          return (
-            matchesSearch &&
-            matchesDifficulty &&
-            matchesIndustry &&
-            matchesLanguage &&
-            matchesDate
-          );
-        });
-
-        return {
-          success: true,
-          data: filtered,
-          pagination: {
-            page: 1,
-            limit: filtered.length || 1,
-            total_pages: 1,
-            total_items: filtered.length,
-          },
-        };
-      } catch (error) {
-        console.error("fetchQuestions Error:", error);
-        return { success: false, data: [] };
-      }
+    async (params: DataTableFetchParams) => {
+      const result = await fetchMyQuestions(getToken, {
+        page: params.page,
+        limit: params.limit,
+      });
+      return {
+        success: true as const,
+        data: result.data,
+        pagination: toDataTablePagination(result.pagination),
+      };
     },
-    [userId, difficulty, industry, language],
+    [getToken],
   );
 
-  const columns: ColumnDef<any>[] = useMemo(
+  const columns = useMemo<ColumnDef<MyQuestion>[]>(
     () => [
       {
-        accessorKey: "ques",
-        header: "Question Title",
+        accessorKey: "title",
+        header: "Question",
+        size: 360,
         cell: ({ row }) => (
-          <div
-            onClick={() =>
-              navigate(`/questions/user/question/${row.original.id}`)
-            }
-            className="flex items-center gap-4 cursor-pointer group"
-          >
-            <div className="w-8 h-8 rounded bg-gray-100 border border-gray-200 flex items-center justify-center text-gray-500 group-hover:bg-brand-muted group-hover:text-brand transition-colors shadow-sm">
-              <FileQuestion className="w-4 h-4" />
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="flex size-8 shrink-0 items-center justify-center rounded border bg-muted/50">
+              <FileQuestion className="size-4 text-muted-foreground" />
             </div>
-            <span className="font-medium text-gray-900 group-hover:text-brand transition-colors truncate max-w-md">
-              {row.getValue("ques")}
+            <span className="line-clamp-2 font-medium">
+              {row.original.title}
             </span>
           </div>
         ),
       },
       {
-        accessorKey: "industry",
-        header: "Industry",
+        id: "companyRole",
+        header: "Company / Role",
         cell: ({ row }) => (
-          <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-brand-muted text-brand-active border border-brand-subtle">
-            {row.getValue("industry")}
-          </span>
+          <div>
+            <p className="font-medium">{row.original.company || "General"}</p>
+            <p className="text-xs text-muted-foreground">
+              {row.original.role || "Multiple roles"}
+            </p>
+          </div>
         ),
       },
       {
-        accessorKey: "language",
-        header: "Language",
+        id: "technologies",
+        header: "Technologies",
         cell: ({ row }) => (
-          <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-brand-muted text-brand-active border border-brand-subtle">
-            {row.getValue("language")}
-          </span>
+          <TagList values={row.original.technologies} limit={3} />
         ),
       },
       {
-        accessorKey: "createdAt",
-        header: "Created At",
-        cell: ({ row }) => (
-          <span className="flex items-center text-gray-500 text-sm font-medium">
-            <Calendar className="w-3.5 h-3.5 mr-1.5 text-gray-400" />
-            {new Date(row.getValue("createdAt")).toLocaleDateString("en-US", {
-              month: "short",
-              day: "numeric",
-              year: "numeric",
-            })}
-          </span>
-        ),
+        id: "topics",
+        header: "Topics",
+        cell: ({ row }) => <TagList values={row.original.topics} limit={3} />,
       },
       {
         accessorKey: "difficulty",
         header: "Difficulty",
-        cell: ({ row }) => {
-          const diff = row.getValue("difficulty") as string;
-          return (
-            <span
-              className={`inline-flex items-center justify-center px-3 py-1 text-xs font-semibold rounded-full border shadow-sm
-            ${
-              diff === "Easy"
-                ? "bg-green-50 text-green-700 border-green-200"
-                : diff === "Medium"
-                  ? "bg-yellow-50 text-yellow-700 border-yellow-200"
-                  : "bg-red-50 text-red-700 border-red-200"
-            }`}
-            >
-              {diff}
-            </span>
-          );
-        },
+        cell: ({ row }) => (
+          <DifficultyBadge difficulty={row.original.difficulty} />
+        ),
+      },
+      {
+        accessorKey: "sessionDate",
+        header: "Session date",
+        cell: ({ row }) => (
+          <span className="flex items-center gap-1.5">
+            <CalendarDays className="size-3.5 text-muted-foreground" />
+            {formatDate(row.original.sessionDate)}
+          </span>
+        ),
+      },
+      {
+        accessorKey: "contributionEnabled",
+        header: "Contribution",
+        cell: ({ row }) =>
+          row.original.contributionEnabled ? (
+            <Badge variant="secondary" className="gap-1.5">
+              <Share2 className="size-3" />
+              Enabled
+            </Badge>
+          ) : (
+            <Badge variant="outline" className="gap-1.5">
+              <LockKeyhole className="size-3" />
+              Private
+            </Badge>
+          ),
+      },
+      {
+        accessorKey: "visibility",
+        header: "Visibility",
+        cell: ({ row }) => formatQuestionBankValue(row.original.visibility),
       },
     ],
-    [navigate],
+    [],
   );
 
   return (
-    <div className="flex flex-col h-full ">
-      <div className="p-6 overflow-x-auto flex-1">
-        <DataTable<any, unknown>
-          config={{
-            enableSearch: true,
-            searchPlaceholder: "Search your questions...",
-            size: "default",
-          }}
-          getColumns={() => columns}
-          fetchDataFn={fetchQuestions}
-          idField="id"
-          fetchByIdsFn={async () => []}
-          renderToolbarContent={() => (
-            <QuestionFilters
-              difficulty={difficulty}
-              setDifficulty={setDifficulty}
-              industry={industry}
-              setIndustry={setIndustry}
-              language={language}
-              setLanguage={setLanguage}
-              onClear={() => {
-                setDifficulty("all");
-                setIndustry("all");
-                setLanguage("all");
-              }}
-            />
-          )}
-        />
+    <div className="space-y-5">
+      <div>
+        <h1 className="text-2xl font-semibold">My Questions</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Sanitized questions extracted from your saved interview sessions.
+          Raw transcripts are not shown here.
+        </p>
       </div>
+
+      <DataTable<MyQuestion, unknown>
+        config={{
+          enableSearch: false,
+          enableUrlState: false,
+          columnResizingTableId: "question-bank-my-questions",
+          defaultSortBy: "sessionDate",
+        }}
+        getColumns={() => columns}
+        fetchDataFn={fetchQuestions}
+        idField="rowKey"
+        fetchByIdsFn={async () => []}
+      />
     </div>
   );
-};
+}
 
 export default UserQuestions;

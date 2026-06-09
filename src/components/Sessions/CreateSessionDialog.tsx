@@ -51,6 +51,7 @@ const INITIAL_SESSION_DATA = {
   aiModel: "anthropic/claude-haiku-4-5",
   autoGenerateAI: true,
   saveTranscript: true,
+  questionBankContributionOptIn: false,
 };
 
 
@@ -76,6 +77,16 @@ export default function CreateSessionDialog({
 
   const updateData = (field: string, value: any) => {
     setSessionData((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const updateSaveTranscript = (saveTranscript: boolean) => {
+    setSessionData((previous) => ({
+      ...previous,
+      saveTranscript,
+      questionBankContributionOptIn: saveTranscript
+        ? previous.questionBankContributionOptIn
+        : false,
+    }));
   };
 
   const handleNext = () => {
@@ -128,6 +139,10 @@ export default function CreateSessionDialog({
     formData.append("aiModel", sessionData.aiModel);
     formData.append("autoGenerateAI", sessionData.autoGenerateAI.toString());
     formData.append("saveTranscript", sessionData.saveTranscript.toString());
+    formData.append(
+      "questionBankContributionOptIn",
+      sessionData.questionBankContributionOptIn.toString(),
+    );
 
     try {
       const response = await fetch(
@@ -158,6 +173,8 @@ export default function CreateSessionDialog({
               simpleLanguage: sessionData.simpleLanguage,
               aiModel: sessionData.aiModel,
               saveTranscript: sessionData.saveTranscript,
+              questionBankContributionOptIn:
+                sessionData.questionBankContributionOptIn,
             },
           },
         });
@@ -308,7 +325,13 @@ export default function CreateSessionDialog({
             {step === 7 && (
               <Step7_SaveTranscript
                 saveTranscript={sessionData.saveTranscript}
-                onChange={(v) => updateData("saveTranscript", v)}
+                questionBankContributionOptIn={
+                  sessionData.questionBankContributionOptIn
+                }
+                onSaveTranscriptChange={updateSaveTranscript}
+                onContributionChange={(value) =>
+                  updateData("questionBankContributionOptIn", value)
+                }
               />
             )}
 

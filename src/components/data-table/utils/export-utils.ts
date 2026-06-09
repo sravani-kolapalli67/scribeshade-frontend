@@ -2,9 +2,9 @@ import { toast } from "sonner";
 import ExcelJS from "exceljs";
 
 
-// Generic type for exportable data - should have string keys and values that can be converted to string
-// Allow arrays for hierarchical data (subRows)
-export type ExportableData = Record<string, string | number | boolean | null | undefined | any[]>;
+// Table rows may contain nested display metadata. Export paths stringify values
+// or use a caller-provided transform before writing CSV/Excel output.
+export type ExportableData = Record<string, unknown>;
 
 /**
  * Flatten hierarchical data for export

@@ -51,6 +51,18 @@ export const ENDPOINTS = {
   sessionAiAnswer:      (id: string) => `${api()}/api/session/${id}/ai-answer`,
   sessionSaveMessage:   (id: string) => `${api()}/api/session/${id}/save-message`,
   sessionAnalytics:     (id: string) => `${api()}/api/session/${id}/analytics`,
+  sessionAnswer: (sessionId: string, messageId: string) =>
+    `${api()}/api/session/${encodeURIComponent(sessionId)}/answers/${encodeURIComponent(messageId)}`,
+  sessionAnswerPreview: (sessionId: string, messageId: string) =>
+    `${api()}/api/session/${encodeURIComponent(sessionId)}/answers/${encodeURIComponent(messageId)}/ai-preview`,
+  sessionAnswerRevisions: (sessionId: string, messageId: string) =>
+    `${api()}/api/session/${encodeURIComponent(sessionId)}/answers/${encodeURIComponent(messageId)}/revisions`,
+  sessionAnswerRestore: (
+    sessionId: string,
+    messageId: string,
+    revisionId: string,
+  ) =>
+    `${api()}/api/session/${encodeURIComponent(sessionId)}/answers/${encodeURIComponent(messageId)}/revisions/${encodeURIComponent(revisionId)}/restore`,
 
   // ── Resume – upload flow ─────────────────────────────────────────────────
   resumeUpload:              () => `${api()}/api/resume/upload`,
@@ -85,6 +97,26 @@ export const ENDPOINTS = {
   documentUpload:           () => `${api()}/api/document/upload`,
   documentList: (userId: string) => `${api()}/api/document/list?userId=${userId}`,
   documentDelete: (id: string)   => `${api()}/api/document/${id}`,
+
+  // ── Question Bank ───────────────────────────────────────────────────────
+  questionBankExploreCompanies: (query = "") =>
+    `${api()}/api/question-bank/explore/companies${query}`,
+  questionBankExploreRoles: (query = "") =>
+    `${api()}/api/question-bank/explore/roles${query}`,
+  questionBankExploreTechnologies: (query = "") =>
+    `${api()}/api/question-bank/explore/technologies${query}`,
+  questionBankCompany: (companySlug: string) =>
+    `${api()}/api/question-bank/companies/${encodeURIComponent(companySlug)}`,
+  questionBankQuestions: (query = "") =>
+    `${api()}/api/question-bank/questions${query}`,
+  questionBankQuestion: (questionId: string) =>
+    `${api()}/api/question-bank/questions/${encodeURIComponent(questionId)}`,
+  questionBankMyQuestions: (query = "") =>
+    `${api()}/api/question-bank/my/questions${query}`,
+  questionBankSaveQuestion: (questionId: string) =>
+    `${api()}/api/question-bank/questions/${encodeURIComponent(questionId)}/save`,
+  questionBankUnsaveQuestion: (questionId: string) =>
+    `${api()}/api/question-bank/questions/${encodeURIComponent(questionId)}/save`,
 
   // ── AI / Projects ─────────────────────────────────────────────────────────
   aiProjectGeneration: () => `${api()}/api/ai/project-generation`,

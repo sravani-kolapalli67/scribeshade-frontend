@@ -1,13 +1,20 @@
 import { Switch } from "@/components/ui/switch";
-import { Save } from "lucide-react";
+import { Save, ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface Step6Props {
   saveTranscript: boolean;
-  onChange: (v: boolean) => void;
+  questionBankContributionOptIn: boolean;
+  onSaveTranscriptChange: (value: boolean) => void;
+  onContributionChange: (value: boolean) => void;
 }
 
-export function Step6_SaveTranscript({ saveTranscript, onChange }: Step6Props) {
+export function Step6_SaveTranscript({
+  saveTranscript,
+  questionBankContributionOptIn,
+  onSaveTranscriptChange,
+  onContributionChange,
+}: Step6Props) {
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-2">
@@ -59,10 +66,37 @@ export function Step6_SaveTranscript({ saveTranscript, onChange }: Step6Props) {
 
           <Switch
             checked={saveTranscript}
-            onCheckedChange={onChange}
+            onCheckedChange={onSaveTranscriptChange}
             className="scale-125"
           />
         </div>
+      </div>
+
+      <div
+        className={cn(
+          "flex items-start justify-between gap-4 rounded-lg border p-5",
+          saveTranscript ? "bg-background" : "bg-muted/30 opacity-60",
+        )}
+      >
+        <div className="flex gap-3">
+          <div className="flex size-10 shrink-0 items-center justify-center rounded-lg border bg-background">
+            <ShieldCheck className="size-5 text-primary" />
+          </div>
+          <div className="space-y-1">
+            <h3 className="font-semibold">Contribute to Question Bank</h3>
+            <p className="max-w-md text-sm leading-relaxed text-muted-foreground">
+              Allow sanitized interview questions from this saved session to
+              improve anonymous aggregate insights. Personal answers and raw
+              transcript text are never published.
+            </p>
+          </div>
+        </div>
+        <Switch
+          checked={saveTranscript && questionBankContributionOptIn}
+          disabled={!saveTranscript}
+          onCheckedChange={onContributionChange}
+          aria-label="Contribute sanitized questions to Question Bank"
+        />
       </div>
     </div>
   );

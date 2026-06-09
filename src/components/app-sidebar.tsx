@@ -87,11 +87,11 @@ const data = {
       isActive: false,
       items: [
         {
-          title: "All Questions",
+          title: "Explore",
           url: "/questions/all",
         },
         {
-          title: "User Questions",
+          title: "My Questions",
           url: "/questions/user",
         },
       ],

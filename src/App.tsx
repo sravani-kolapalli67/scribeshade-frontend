@@ -36,9 +36,6 @@ const AllQuestions = lazy(
 const UserQuestions = lazy(
   () => import("./pages/QuestionBank/User Questions/page"),
 );
-const UserQuestionDetails = lazy(
-  () => import("./pages/QuestionBank/UserQuestionDetails/page"),
-);
 const CompanyQuestions = lazy(
   () => import("./pages/QuestionBank/CompanyQuestions/page"),
 );
@@ -278,18 +275,26 @@ function App() {
                 <Route path="/analytics" element={<Analytics />} />
                 <Route path="/document" element={<DocumentPage />} />
                 <Route path="/billing" element={<BillingPage />} />
+                <Route
+                  path="/questions"
+                  element={<Navigate to="/questions/all" replace />}
+                />
                 <Route path="/questions/all" element={<AllQuestions />} />
                 <Route path="/questions/user" element={<UserQuestions />} />
                 <Route
                   path="/questions/user/question/:questionId"
-                  element={<UserQuestionDetails />}
+                  element={<Navigate to="/questions/user" replace />}
                 />
                 <Route
-                  path="/questions/company/:companyId"
+                  path="/questions/company/:companySlug"
                   element={<CompanyQuestions />}
                 />
                 <Route
-                  path="/questions/company/:companyId/question/:questionId"
+                  path="/questions/company/:companySlug/question/:questionId"
+                  element={<QuestionDetails />}
+                />
+                <Route
+                  path="/questions/question/:questionId"
                   element={<QuestionDetails />}
                 />
                 <Route
