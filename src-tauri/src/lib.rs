@@ -255,20 +255,22 @@ fn emit_system_health_event(app: &AppHandle, generation: u64, state: &str) {
 }
 
 #[tauri::command]
-fn auth_get_persisted_session(app: AppHandle) -> Result<Option<String>, String> {
+async fn auth_get_persisted_session(app: AppHandle) -> Result<Option<String>, String> {
     let path = auth_session_path(&app)?;
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let raw = std::fs::read_to_string(&path).map_err(|e| format!("read auth session failed: {e}"))?;
+    // Use tokio::fs so this never blocks a Tokio worker thread — critical on
+    // Windows/Linux where slow HDD/eMMC reads can stall the entire IPC queue.
+    let raw = match tokio::fs::read_to_string(&path).await {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("read auth session failed: {e}")),
+    };
     let parsed: PersistedAuthSession =
         serde_json::from_str(&raw).map_err(|e| format!("parse auth session failed: {e}"))?;
     Ok(parsed.session_id)
 }
 
 #[tauri::command]
-fn auth_set_persisted_session(app: AppHandle, session_id: String) -> Result<(), String> {
+async fn auth_set_persisted_session(app: AppHandle, session_id: String) -> Result<(), String> {
     let path = auth_session_path(&app)?;
     let payload = PersistedAuthSession {
         session_id: Some(session_id),
@@ -276,17 +278,18 @@ fn auth_set_persisted_session(app: AppHandle, session_id: String) -> Result<(), 
     };
     let data =
         serde_json::to_string(&payload).map_err(|e| format!("serialize auth session failed: {e}"))?;
-    std::fs::write(path, data).map_err(|e| format!("write auth session failed: {e}"))?;
+    tokio::fs::write(path, data).await.map_err(|e| format!("write auth session failed: {e}"))?;
     Ok(())
 }
 
 #[tauri::command]
-fn auth_clear_persisted_session(app: AppHandle) -> Result<(), String> {
+async fn auth_clear_persisted_session(app: AppHandle) -> Result<(), String> {
     let path = auth_session_path(&app)?;
-    if path.exists() {
-        std::fs::remove_file(path).map_err(|e| format!("remove auth session failed: {e}"))?;
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("remove auth session failed: {e}")),
     }
-    Ok(())
 }
 
 #[tauri::command]
@@ -1411,7 +1414,6 @@ fn list_audio_devices() -> Vec<String> {
 #[cfg(target_os = "windows")]
 #[tauri::command]
 async fn start_display_audio_stream() -> Result<u16, String> {
-    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use axum::{Router, extract::ws::{WebSocketUpgrade, WebSocket, Message}};
     use axum::extract::State;
     use tokio::sync::broadcast;
@@ -1430,33 +1432,59 @@ async fn start_display_audio_stream() -> Result<u16, String> {
         }
     }
 
-    let host = cpal::default_host();
-    // WASAPI loopback: use default OUTPUT device as an input source.
-    // cpal's WASAPI backend automatically enables loopback mode when
-    // build_input_stream is called on a device obtained from output_devices().
-    let device = host.default_output_device()
-        .ok_or("No default output device found for loopback capture")?;
-
-    // Output config gives us the native sample rate / channel count that the
-    // system is actually running at — important for Deepgram accuracy.
-    let config = device.default_output_config().map_err(|e| e.to_string())?;
-    let sample_rate = config.sample_rate().0;
-    let channels = config.channels() as u32;
-
     let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(128);
     let tx_arc = Arc::new(tx);
     let tx_capture = tx_arc.clone();
 
+    // Startup handshake: the spawned thread signals Ok(sample_rate) once the
+    // WASAPI stream is playing, or Err(...) if device init failed.
+    // Without this, a hanging Realtek driver would block the Tauri IPC thread
+    // indefinitely — matching the macOS SCKit init_rx pattern.
+    let (init_tx, init_rx) = tokio::sync::oneshot::channel::<Result<u32, String>>();
+
     // Bump generation so any previous zombie thread exits on its next 50 ms tick.
     let my_gen = DISPLAY_AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-    // Capture the channel count now so the downmix callbacks below can use it
-    // without borrowing `config` after it is moved into the stream builder.
-    let ch_count = channels as usize;
     DISPLAY_AUDIO_RUNNING.store(true, Ordering::SeqCst);
+
     std::thread::spawn(move || {
+        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+        // WASAPI loopback: use default OUTPUT device as an input source.
+        // cpal's WASAPI backend enables loopback mode when build_input_stream
+        // is called on a device from output_devices(). Device and config
+        // enumeration happen here on the dedicated thread — not on the Tokio
+        // async task — to avoid blocking the threadpool on slow HDD/driver init.
+        let host = cpal::default_host();
+        let device = match host.default_output_device() {
+            Some(d) => d,
+            None => {
+                DISPLAY_AUDIO_RUNNING.store(false, Ordering::SeqCst);
+                let _ = init_tx.send(Err(
+                    "No default output device found for WASAPI loopback capture.".into(),
+                ));
+                return;
+            }
+        };
+
+        let config = match device.default_output_config() {
+            Ok(c) => c,
+            Err(e) => {
+                DISPLAY_AUDIO_RUNNING.store(false, Ordering::SeqCst);
+                let _ = init_tx.send(Err(format!(
+                    "WASAPI loopback: failed to get output device config: {e}"
+                )));
+                return;
+            }
+        };
+
+        // Read these before config is consumed by .into() in the stream builder.
+        let sample_rate = config.sample_rate().0;
+        let ch_count = config.channels() as usize;
+
         let tx = tx_capture;
         let err_fn = |e| eprintln!("[wasapi loopback] stream error: {e}");
-        let stream = match config.sample_format() {
+
+        let stream_result = match config.sample_format() {
             cpal::SampleFormat::F32 => device.build_input_stream(
                 &config.into(),
                 move |data: &[f32], _| {
@@ -1469,7 +1497,8 @@ async fn start_display_audio_stream() -> Result<u16, String> {
                         v.to_le_bytes()
                     }).collect();
                     let _ = tx.send(Arc::new(pcm));
-                }, err_fn, None,
+                },
+                err_fn, None,
             ),
             cpal::SampleFormat::I16 => device.build_input_stream(
                 &config.into(),
@@ -1482,19 +1511,72 @@ async fn start_display_audio_stream() -> Result<u16, String> {
                         mono.to_le_bytes()
                     }).collect();
                     let _ = tx.send(Arc::new(pcm));
-                }, err_fn, None,
+                },
+                err_fn, None,
             ),
-            _ => return,
+            fmt => {
+                DISPLAY_AUDIO_RUNNING.store(false, Ordering::SeqCst);
+                let _ = init_tx.send(Err(format!(
+                    "WASAPI loopback: unsupported sample format {fmt:?}"
+                )));
+                return;
+            }
         };
-        if let Ok(s) = stream {
-            let _ = s.play();
-            while DISPLAY_AUDIO_RUNNING.load(Ordering::Relaxed)
-                && DISPLAY_AUDIO_GENERATION.load(Ordering::Relaxed) == my_gen
-            {
-                std::thread::sleep(std::time::Duration::from_millis(50));
+
+        match stream_result {
+            Ok(stream) => {
+                if let Err(e) = stream.play() {
+                    DISPLAY_AUDIO_RUNNING.store(false, Ordering::SeqCst);
+                    let _ = init_tx.send(Err(format!(
+                        "WASAPI loopback stream failed to start: {e}"
+                    )));
+                    return;
+                }
+                // Signal successful startup — the async caller is waiting on init_rx.
+                let _ = init_tx.send(Ok(sample_rate));
+                while DISPLAY_AUDIO_RUNNING.load(Ordering::Relaxed)
+                    && DISPLAY_AUDIO_GENERATION.load(Ordering::Relaxed) == my_gen
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                // stream dropped here, ending capture
+            }
+            Err(e) => {
+                DISPLAY_AUDIO_RUNNING.store(false, Ordering::SeqCst);
+                let _ = init_tx.send(Err(format!(
+                    "WASAPI loopback: failed to build input stream: {e}"
+                )));
             }
         }
     });
+
+    // Wait up to 10 s for WASAPI to confirm it started — matching the macOS
+    // SCKit timeout. On budget i3/i5 laptops with Realtek drivers, device init
+    // can hang indefinitely without this guard.
+    let sample_rate = match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        init_rx,
+    )
+    .await
+    {
+        Ok(Ok(Ok(sr))) => sr,
+        Ok(Ok(Err(e))) => {
+            DISPLAY_AUDIO_RUNNING.store(false, Ordering::SeqCst);
+            DISPLAY_AUDIO_PORT.store(0, Ordering::SeqCst);
+            DISPLAY_AUDIO_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+            return Err(e);
+        }
+        _ => {
+            DISPLAY_AUDIO_RUNNING.store(false, Ordering::SeqCst);
+            DISPLAY_AUDIO_PORT.store(0, Ordering::SeqCst);
+            DISPLAY_AUDIO_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+            return Err(
+                "WASAPI loopback capture timed out after 10 s — ensure a default \
+                 audio output device is present and its driver is functioning."
+                    .to_string(),
+            );
+        }
+    };
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.map_err(|e| e.to_string())?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
