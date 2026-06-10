@@ -150,6 +150,14 @@ fn reinforce_window_level(win: &tauri::WebviewWindow) {
                 const OVERLAY_BEHAVIOR: u64 = 1 | 16 | 64 | 256;
                 let _: () = objc2::msg_send![ptr, setLevel: NS_POPUP_MENU_WINDOW_LEVEL];
                 let _: () = objc2::msg_send![ptr, setCollectionBehavior: OVERLAY_BEHAVIOR];
+                // orderFrontRegardless is required after every Space transition.
+                // setLevel/setCollectionBehavior re-register the window with the
+                // Quartz compositor but do not move it to the front of its z-level
+                // within the newly-active fullscreen Space. Without this call the
+                // overlay has the correct level but sits behind the fullscreen app
+                // in the compositor's ordered window list for that Space.
+                // orderFrontRegardless does not steal key-window focus.
+                let _: () = objc2::msg_send![ptr, orderFrontRegardless];
             }
         }
     });
@@ -3634,7 +3642,11 @@ pub fn run() {
             // FIX: A lightweight background task re-applies the popup menu
             // window level plus collection behavior (canJoinAllSpaces |
             // stationary | ignoresCycle | fullScreenAuxiliary) to every visible
-            // overlay window every 2 seconds. CPU impact is negligible.
+            // overlay window every 500 ms. CPU impact is negligible.
+            // 500 ms chosen over 2 s so the overlay reappears within half a
+            // second after a Space transition (native fullscreen entry/exit,
+            // Mission Control, hot corners). The previous 2 s interval left a
+            // visible gap where the overlay was behind the fullscreen app.
             //
             // This handles: fullscreen Space entry/exit, Mission Control, Exposé,
             // hot corners, and any other event that silently resets window
@@ -3645,7 +3657,7 @@ pub fn run() {
                 let reinforce_stop_loop = reinforce_stop.clone();
                 tauri::async_runtime::spawn(async move {
                     loop {
-                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                         if reinforce_stop_loop.load(Ordering::Relaxed) { break; }
                         for label in ["launcher", "mini"] {
                             if let Some(win) = reinforce_handle.get_webview_window(label) {
