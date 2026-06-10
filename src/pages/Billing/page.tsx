@@ -1,4 +1,4 @@
-"use client";
+ ;
 
 import { useDeferredValue, useMemo, useState } from "react";
 import { useCreditsBalance } from "@/hooks/useCreditsBalance";

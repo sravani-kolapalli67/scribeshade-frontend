@@ -1,4 +1,4 @@
-"use client";
+ ;
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { ColumnSizingState } from "@tanstack/react-table";

@@ -1,4 +1,4 @@
-"use client";
+ ;
 
 import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -138,26 +138,18 @@ export default function Sessions() {
 
   // ── We need to tell DataTable to re-call fetchDataForTable when Redux data changes.
   // The DataTable watches `fetchDataFn` identity in its useEffect deps. Since our
-  // fetchDataForTable is stable, we use a version counter that we embed in a wrapper.
-  const dataVersionRef = useRef(0);
-  const prevSessionsLenRef = useRef(sessions.length);
-  const prevSessionsRef = useRef(sessions);
+  // fetchDataForTable is stable, we use a version counter to create new function identity.
+  const [dataVersion, setDataVersion] = useState(0);
 
-  // Increment version when sessions array reference changes (add/delete/fetch).
-  if (prevSessionsRef.current !== sessions) {
-    dataVersionRef.current += 1;
-    prevSessionsRef.current = sessions;
-  }
+  useEffect(() => {
+    setDataVersion((v) => v + 1);
+  }, [sessions]);
 
   // Stable wrapper that changes identity only when data version changes.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   const stableFetchFn = useMemo(() => {
-    // Capture the version to create a new function identity when data changes.
-    const _version = dataVersionRef.current;
     const fn = async (params: any) => fetchDataForTable(params);
     return fn;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dataVersionRef.current, fetchDataForTable]);
+  }, [dataVersion, fetchDataForTable]);
 
   // ── Delete handlers ───────────────────────────────────────────────────────
 

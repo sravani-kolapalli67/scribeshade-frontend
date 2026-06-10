@@ -35,19 +35,19 @@ function useBackendHealth(): HealthStatus {
 
 function useInspectCredits(token: string | null): { balance: CreditsBalance; isLoading: boolean } {
   const [balance, setBalance] = useState<CreditsBalance>(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [loadedForToken, setLoadedForToken] = useState<string | null>(null);
+  const isLoading = !!token && loadedForToken !== token;
 
   useEffect(() => {
     if (!token) return;
     let cancelled = false;
-    setIsLoading(true);
     fetch(`${BACKEND_URL}/api/credits/balance`, {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then((r) => (r.ok ? r.json() : Promise.reject()))
       .then((json) => { if (!cancelled) setBalance(json.data ?? json); })
       .catch(() => { if (!cancelled) setBalance(null); })
-      .finally(() => { if (!cancelled) setIsLoading(false); });
+      .finally(() => { if (!cancelled) setLoadedForToken(token); });
     return () => { cancelled = true; };
   }, [token]);
 

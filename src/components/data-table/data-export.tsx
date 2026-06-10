@@ -1,5 +1,5 @@
 // ** import types
-import type { JSX } from "react";
+import type { ReactNode } from "react";
 import type { Table } from "@tanstack/react-table";
 import type { ExportableData, DataTransformFunction } from "./utils/export-utils";
 import type { TableConfig } from "./utils/table-config";
@@ -76,7 +76,7 @@ export function DataTableExport<TData extends ExportableData>({
   enableCsv = true,
   enableExcel = true,
   subRowExportConfig,
-}: DataTableExportProps<TData>): JSX.Element {
+}: DataTableExportProps<TData>): ReactNode {
   const [isLoading, setIsLoading] = useState(false);
 
   // Export parent rows only

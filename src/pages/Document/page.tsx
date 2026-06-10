@@ -1,4 +1,4 @@
-"use client";
+ ;
 
 import { useState, useMemo, useEffect } from "react";
 import { ColumnDef } from "@tanstack/react-table";

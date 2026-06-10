@@ -40,18 +40,20 @@ export function useCreditsUsage(limit = 20): UseUsageResult {
   const { getToken } = useAuth();
   const [entries, setEntries] = useState<UsageEntry[]>([]);
   const [pagination, setPagination] = useState<UsagePagination | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [operation, setOperation] = useState<string | undefined>(undefined);
   const [tick, setTick] = useState(0);
+  const [loadedFor, setLoadedFor] = useState<string | null>(null);
+  const [fetchError, setFetchError] = useState<{ key: string; message: string } | null>(null);
+
+  const paramKey = `${page}-${limit}-${String(operation)}-${tick}`;
+  const isLoading = loadedFor !== paramKey;
+  const error = fetchError?.key === paramKey ? fetchError.message : null;
 
   const refresh = useCallback(() => setTick((t) => t + 1), []);
 
   useEffect(() => {
     let cancelled = false;
-    setIsLoading(true);
-    setError(null);
 
     (async () => {
       try {
@@ -69,10 +71,12 @@ export function useCreditsUsage(limit = 20): UseUsageResult {
 
         setEntries(json.data ?? []);
         setPagination(json.pagination ?? null);
+        setLoadedFor(paramKey);
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Failed");
-      } finally {
-        if (!cancelled) setIsLoading(false);
+        if (!cancelled) {
+          setFetchError({ key: paramKey, message: err instanceof Error ? err.message : "Failed" });
+          setLoadedFor(paramKey);
+        }
       }
     })();
 

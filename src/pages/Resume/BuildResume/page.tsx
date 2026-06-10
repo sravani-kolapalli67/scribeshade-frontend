@@ -1,4 +1,4 @@
-"use client";
+ ;
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useLocation, Link } from "react-router-dom";
@@ -868,7 +868,7 @@ function AIToolInfoDialog({ tool, onClose, costs, costsLoading, navigate }: AITo
 export default function BuildResume() {
   const { getToken, isLoaded, isSignedIn } = useAuth();
   const navigate     = useNavigate();
-  const location     = useLocation();
+  const { key: locationKey } = useLocation();
 
   const rawCacheRef = useRef<any[] | null>(null);
 
@@ -975,7 +975,7 @@ export default function BuildResume() {
     if (!userId) return;
     rawCacheRef.current = null;
     loadResumes(userId);
-  }, [userId, location.key, loadResumes]);
+  }, [userId, locationKey, loadResumes]);
 
   // Reset to page 1 when search/sort changes
   useEffect(() => { setPage(1); }, [search, sortBy, sortOrder]);

@@ -1,4 +1,4 @@
-"use client";
+ ;
 
 import { FileText, Type, Check } from "lucide-react";
 import { cn } from "@/lib/utils";

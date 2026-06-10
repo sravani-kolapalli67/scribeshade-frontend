@@ -1,4 +1,4 @@
-"use client";
+ ;
 
 import { useEffect, useRef, useState } from "react";
 import { useLocation, Link, useNavigate } from "react-router-dom";

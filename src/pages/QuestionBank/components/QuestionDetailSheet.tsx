@@ -21,23 +21,26 @@ export function QuestionDetailSheet({
   onOpenChange,
 }: QuestionDetailSheetProps) {
   const { getToken } = useAuth();
+  const [loadedForId, setLoadedForId] = useState<string | null>(null);
   const [detail, setDetail] = useState<QuestionDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+
+  // Derive display values — stale data is invisible when questionId changes
+  const loading = !!questionId && loadedForId !== questionId;
+  const displayDetail = loadedForId === questionId ? detail : null;
+  const displayError = loadedForId === questionId ? error : null;
 
   useEffect(() => {
-    if (!questionId) {
-      setDetail(null);
-      setError(null);
-      return;
-    }
+    if (!questionId) return;
 
     let active = true;
-    setLoading(true);
-    setError(null);
     fetchQuestionDetail(getToken, questionId)
       .then((result) => {
-        if (active) setDetail(result);
+        if (active) {
+          setDetail(result);
+          setError(null);
+          setLoadedForId(questionId);
+        }
       })
       .catch((reason: unknown) => {
         if (active) {
@@ -46,10 +49,8 @@ export function QuestionDetailSheet({
               ? reason.message
               : "Unable to load question details",
           );
+          setLoadedForId(questionId);
         }
-      })
-      .finally(() => {
-        if (active) setLoading(false);
       });
 
     return () => {
@@ -77,10 +78,10 @@ export function QuestionDetailSheet({
               <div className="h-40 rounded bg-muted" />
             </div>
           ) : null}
-          {error ? (
-            <p className="text-sm text-destructive">{error}</p>
+          {displayError ? (
+            <p className="text-sm text-destructive">{displayError}</p>
           ) : null}
-          {detail ? <QuestionDetailContent detail={detail} /> : null}
+          {displayDetail ? <QuestionDetailContent detail={displayDetail} /> : null}
         </div>
       </SheetContent>
     </Sheet>

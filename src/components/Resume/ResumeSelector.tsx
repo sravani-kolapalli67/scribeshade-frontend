@@ -1,4 +1,4 @@
-"use client";
+ ;
 
 import * as React from "react";
 import { FileText, PencilLine, X } from "lucide-react";
@@ -48,15 +48,9 @@ export function ResumeSelector({ onSelect, onDeselect, value, filter, includeBui
   const { getToken } = useAuth();
   const [resumes, setResumes] = React.useState<Resume[]>([]);
   const [selectedResumeId, setSelectedResumeId] = React.useState<string>(value || "");
-
-  // Update internal state if value prop changes
-  React.useEffect(() => {
-    if (value !== undefined) {
-      setSelectedResumeId(value);
-    }
-  }, [value]);
-  const [loading, setLoading] = React.useState(true);
   const id = localStorage.getItem("userId");
+  const [loadedForId, setLoadedForId] = React.useState<string | null>(null);
+  const loading = loadedForId !== id;
 
   // Use a ref for onSelect to avoid infinite re-fetch when parent passes inline arrow functions
   const onSelectRef = React.useRef(onSelect);
@@ -66,8 +60,6 @@ export function ResumeSelector({ onSelect, onDeselect, value, filter, includeBui
 
   React.useEffect(() => {
     if (!id) return;
-
-    setLoading(true);
 
     const fetchUploaded = fetch(`${import.meta.env.VITE_BACKEND_URL}/api/resume/list?userId=${id}`, {
       headers: { "Content-Type": "application/json" },
@@ -104,7 +96,7 @@ export function ResumeSelector({ onSelect, onDeselect, value, filter, includeBui
         setResumes(combined);
       })
       .catch((err) => console.error("Error fetching resumes:", err))
-      .finally(() => setLoading(false));
+      .finally(() => setLoadedForId(id));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, includeBuilderResumes]);
 

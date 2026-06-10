@@ -1,4 +1,4 @@
-"use client";
+ ;
 
 import type { Table, Column } from "@tanstack/react-table";
 import { Check, GripVertical, Settings2, RotateCcw } from "lucide-react";

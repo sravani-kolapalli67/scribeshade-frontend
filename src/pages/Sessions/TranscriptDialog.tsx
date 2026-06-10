@@ -315,7 +315,8 @@ export function TranscriptDialog({
   const [messages, setMessages] = useState<Message[]>([]);
   const [userId, setUserId] = useState("");
   const [notes, setNotes] = useState<SessionNotes | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [loadedForSessionId, setLoadedForSessionId] = useState<string | null>(null);
+  const isLoading = isOpen && !!sessionId && loadedForSessionId !== sessionId;
   const [isGenerating, setIsGenerating] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [isEphemeral, setIsEphemeral] = useState(false);
@@ -326,7 +327,6 @@ export function TranscriptDialog({
   useEffect(() => {
     if (!isOpen || !sessionId) return;
     let active = true;
-    setIsLoading(true);
     Promise.all([
       fetch(`${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionId}`),
       fetch(
@@ -365,7 +365,7 @@ export function TranscriptDialog({
         console.error("Error fetching session details:", error),
       )
       .finally(() => {
-        if (active) setIsLoading(false);
+        if (active) setLoadedForSessionId(sessionId);
       });
     return () => {
       active = false;

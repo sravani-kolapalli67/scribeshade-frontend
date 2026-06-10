@@ -1,4 +1,4 @@
-"use client";
+ ;
 
 import { useState, useEffect, useMemo } from "react";
 import { toast } from "sonner";
@@ -68,6 +68,7 @@ export function SessionAnalyticsDialog({
   onClose,
   session,
 }: SessionAnalyticsDialogProps) {
+  const [loadedForSessionId, setLoadedForSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [feedback, setFeedback] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -89,6 +90,9 @@ export function SessionAnalyticsDialog({
   }, [session]);
 
   useEffect(() => {
+    let cancelled = false;
+    let timeoutId = 0;
+
     if (isOpen && session?.id) {
       const load = async () => {
         setIsLoading(true);
@@ -104,7 +108,7 @@ export function SessionAnalyticsDialog({
           if (sessionRes.ok) {
             const data = await sessionRes.json();
             const sessionData = data.data ?? data;
-            setMessages(Array.isArray(sessionData.messages) ? sessionData.messages : []);
+            if (!cancelled) setMessages(Array.isArray(sessionData.messages) ? sessionData.messages : []);
             if (sessionData.feedback) resolvedFeedback = sessionData.feedback;
           }
 
@@ -113,20 +117,23 @@ export function SessionAnalyticsDialog({
             if (existing && existing.id) resolvedFeedback = existing;
           }
 
-          setFeedback(resolvedFeedback);
+          if (!cancelled) {
+            setFeedback(resolvedFeedback);
+            setLoadedForSessionId(session.id);
+          }
 
           // Auto-generate if session is complete but analytics aren't ready yet
           if (!resolvedFeedback && session.endedAt) {
-            setIsGenerating(true);
+            if (!cancelled) setIsGenerating(true);
             try {
               const controller = new AbortController();
-              const timeoutId = setTimeout(() => controller.abort(), 90_000);
+              timeoutId = window.setTimeout(() => controller.abort(), 90_000);
               const analyticsRes = await fetch(
                 `${import.meta.env.VITE_BACKEND_URL}/api/session/${session.id}/analytics`,
                 { signal: controller.signal },
               );
               clearTimeout(timeoutId);
-              if (analyticsRes.ok) {
+              if (!cancelled && analyticsRes.ok) {
                 const data = await analyticsRes.json();
                 setFeedback(data);
               }
@@ -135,21 +142,22 @@ export function SessionAnalyticsDialog({
                 console.error("Auto-generate analytics failed:", err);
               }
             } finally {
-              setIsGenerating(false);
+              if (!cancelled) setIsGenerating(false);
             }
           }
         } catch (error) {
           console.error("Error fetching session data:", error);
         } finally {
-          setIsLoading(false);
+          if (!cancelled) setIsLoading(false);
         }
       };
       load();
     }
-    if (!isOpen) {
-      setMessages([]);
-      setFeedback(null);
-    }
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+    };
   }, [isOpen, session?.id]);
 
   const handleGenerateAnalytics = async () => {
@@ -187,7 +195,7 @@ export function SessionAnalyticsDialog({
   };
 
   const analytics = useMemo(() => {
-    if (!messages.length) return null;
+    if (loadedForSessionId !== session?.id || !messages.length) return null;
 
     const aiMessages = messages.filter(
       (m) => m.role === "AI" || m.role === "AI_ASSISTANT",
@@ -248,10 +256,10 @@ export function SessionAnalyticsDialog({
       aiUsage: session?.aiUsage || 0,
       chartData,
     };
-  }, [messages, session]);
+  }, [messages, session, loadedForSessionId]);
 
   const interviewSignals = useMemo(() => {
-    if (!feedback) return null;
+    if (loadedForSessionId !== session?.id || !feedback) return null;
 
     const toNumber = (value: unknown): number => {
       if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -370,7 +378,7 @@ export function SessionAnalyticsDialog({
       gapFactors,
       orderedImprovements,
     };
-  }, [feedback]);
+  }, [feedback, loadedForSessionId, session?.id]);
 
   if (!session) return null;
 

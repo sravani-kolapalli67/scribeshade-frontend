@@ -28,7 +28,7 @@ export function useFreeSessionTimer({
   maxAllowedMinutes,
 }: UseFreeSessionTimerOptions): UseFreeSessionTimerReturn {
   const [isFreeSession, setIsFreeSession] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(() => !!sessionId);
   const [seconds, setSeconds] = useState<number | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const onTimeUpRef = useRef(onTimeUp);
@@ -41,10 +41,7 @@ export function useFreeSessionTimer({
 
   // Fetch session details
   useEffect(() => {
-    if (!sessionId) {
-      setIsLoading(false);
-      return;
-    }
+    if (!sessionId) return;
 
     let cancelled = false;
 

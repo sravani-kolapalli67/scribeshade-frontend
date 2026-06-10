@@ -1,4 +1,4 @@
-"use client";
+ ;
 
 import * as React from "react";
 import { FileText } from "lucide-react";
@@ -28,13 +28,6 @@ interface DocumentSelectorProps {
 export function DocumentSelector({ onSelect, value, filter }: DocumentSelectorProps) {
   const [documents, setDocuments] = React.useState<Document[]>([]);
   const [selectedDocumentId, setSelectedDocumentId] = React.useState<string>(value || "");
-
-  // Update internal state if value prop changes
-  React.useEffect(() => {
-    if (value !== undefined) {
-      setSelectedDocumentId(value);
-    }
-  }, [value]);
   const [loading, setLoading] = React.useState(true);
   const id = localStorage.getItem("userId");
 

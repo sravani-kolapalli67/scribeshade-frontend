@@ -333,7 +333,7 @@ export default function ActiveSession() {
   // Keep ref in sync with state so endSessionNow always reads the latest value
   sessionStartedAtRef.current = sessionStartedAt;
 
-  const endSessionNow = useCallback(async () => {
+  const endSessionNow = useCallback(async ({ skipWindowManagement = false }: { skipWindowManagement?: boolean } = {}) => {
     if (!id) return;
     // Guard against double-invocation (both heartbeat and SSE can fire simultaneously)
     if (isEndingRef.current) return;
@@ -437,23 +437,28 @@ export default function ActiveSession() {
         console.error("Stream cleanup error:", err);
       }
 
-      // Clean up overlay and main windows
-      try {
-        const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
-        const mini = await WebviewWindow.getByLabel("mini");
-        if (mini) {
-          await mini.close();
+      // Clean up overlay and main windows — only when ended from the main window.
+      // When ended from the floating window, the endSessionThunk already handles
+      // window transitions (shows launcher, hides mini); showing main here would
+      // bring it on top of the launcher and break the overlay UX.
+      if (!skipWindowManagement) {
+        try {
+          const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+          const mini = await WebviewWindow.getByLabel("mini");
+          if (mini) {
+            await mini.hide(); // hide not close — mini WebView is reused across sessions
+          }
+          const mainWindow = await WebviewWindow.getByLabel("main");
+          if (mainWindow) {
+            await mainWindow.show();
+            await mainWindow.unminimize();
+            await mainWindow.setFocus();
+          }
+        } catch (err) {
+          console.error("Window mgmt error:", err);
         }
-        const mainWindow = await WebviewWindow.getByLabel("main");
-        if (mainWindow) {
-          await mainWindow.show();
-          await mainWindow.unminimize();
-          await mainWindow.setFocus();
-        }
-      } catch (err) {
-        console.error("Window mgmt error:", err);
+        navigate("/sessions");
       }
-      navigate("/sessions");
     }
   }, [id, messages, maxAllowedMinutes, navigate, saveTranscriptEnabled, graceZoneMinutes, creditsPerMinute]);
 
@@ -2051,7 +2056,9 @@ export default function ActiveSession() {
         }),
         listen("overlay-end-session-direct", async () => {
           if (active) {
-            endSessionNowRef.current();
+            // Session was ended from the floating window — thunk already handled
+            // window transitions. Only clean up audio/state here, don't touch windows.
+            endSessionNowRef.current({ skipWindowManagement: true });
           }
         }),
       ]);
