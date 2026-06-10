@@ -38,10 +38,9 @@ const TERMINAL_ALL_REASONS = new Set([
   "floating_unmount",
 ]);
 
-function log(event: string, payload: Record<string, unknown>) {
-  if (!DEV) return;
-  console.log(`[audio-lifecycle] ${event}`, payload);
-}
+const log: (event: string, payload: Record<string, unknown>) => void = DEV
+  ? (event, payload) => { console.log(`[audio-lifecycle] ${event}`, payload); }
+  : () => {};
 
 function isSessionActive(): boolean {
   if (typeof window === "undefined") return false;

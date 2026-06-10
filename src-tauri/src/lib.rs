@@ -93,7 +93,30 @@ fn apply_overlay_policy_to_window(
     window: &WebviewWindow,
     mode: OverlayMode,
 ) -> Result<(), String> {
-    #[cfg(not(target_os = "macos"))]
+    // On Windows these Tauri APIs internally route through Win32 SetWindowPos
+    // (HWND_TOPMOST), IVirtualDesktopManager COM, ITaskbarList::DeleteTab,
+    // SetWindowLongPtrW, and DwmSetWindowAttribute — all cross-thread SendMessage
+    // stalls when called from a Tokio worker. Post fire-and-forget to the UI thread
+    // so the caller is not blocked. Ordering with subsequent show() is fine: these
+    // are cosmetic style properties (taskbar, decorations) that can be applied after
+    // the window is visible without user-visible glitch.
+    // Linux GTK/X11 window API calls are thread-safe; keep direct calls there.
+    #[cfg(target_os = "windows")]
+    {
+        let w = window.clone();
+        let compact = matches!(mode, OverlayMode::CompactOverlay);
+        window
+            .run_on_main_thread(move || {
+                let _ = w.set_always_on_top(true);
+                let _ = w.set_visible_on_all_workspaces(true);
+                let _ = w.set_skip_taskbar(true);
+                let _ = w.set_decorations(false);
+                let _ = w.set_shadow(compact);
+            })
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         window.set_always_on_top(true).map_err(|e| e.to_string())?;
         window
@@ -146,7 +169,22 @@ fn set_overlay_passthrough(window: &tauri::WebviewWindow) {
         });
     }
 
-    #[cfg(not(target_os = "macos"))]
+    // On Windows, set_ignore_cursor_events internally calls SetWindowLongPtrW +
+    // SetWindowPos(SWP_FRAMECHANGED). Called from a Tokio worker thread (the common
+    // case here) this blocks until Win32 processes the cross-thread SendMessage.
+    // This function is called from 14+ call sites including hot event-loop handlers;
+    // each off-thread call stalls that worker and triggers a DWM frame invalidation
+    // that causes the visible surface flicker/blanking reported on Windows.
+    // Post fire-and-forget to the UI thread, identical to the macOS pattern above.
+    #[cfg(target_os = "windows")]
+    {
+        let w = window.clone();
+        let _ = window.run_on_main_thread(move || {
+            let _ = w.set_ignore_cursor_events(true);
+        });
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = window.set_ignore_cursor_events(true);
     }
@@ -241,6 +279,21 @@ fn current_macos_identity(app: &AppHandle) -> MacOsAppIdentity {
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn emit_system_health_event(app: &AppHandle, generation: u64, state: &str) {
+    // "capturing" events fire from the PCM callback (every 50th frame) and can
+    // flood the IPC queue on Windows/Linux under audio stress. Rate-limit them
+    // to at most once per 2 s. State-change events (starting, error, stopped,
+    // starved) always pass through so the frontend gets prompt failure notice.
+    if state == "capturing" {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let last = SYSTEM_HEALTH_LAST_EMIT_MS.load(Ordering::Relaxed);
+        if now_ms.saturating_sub(last) < 2000 {
+            return;
+        }
+        SYSTEM_HEALTH_LAST_EMIT_MS.store(now_ms, Ordering::Relaxed);
+    }
     let payload = SystemHealthPayload {
         channel: "system".to_string(),
         capture_running: SYSTEM_STT_RUNNING.load(Ordering::SeqCst),
@@ -371,6 +424,9 @@ static SYSTEM_PCM_FRAMES_SENT: AtomicU64 = AtomicU64::new(0);
 static SYSTEM_LAST_PCM_AT: AtomicU64 = AtomicU64::new(0);
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 static SYSTEM_EMPTY_FINAL_STREAK: AtomicU64 = AtomicU64::new(0);
+// Rate-limit "capturing" health events from the PCM callback to once per 2 s.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+static SYSTEM_HEALTH_LAST_EMIT_MS: AtomicU64 = AtomicU64::new(0);
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 static MIC_STT_RUNNING: AtomicBool = AtomicBool::new(false);
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -544,7 +600,7 @@ async fn capture_screen(app: AppHandle, window: Window) -> Result<String, String
                 let _ = win.set_content_protected(true);
             }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(16)).await;
     }
     let protection_enable_ms = protection_started_at.elapsed().as_millis();
 
@@ -592,6 +648,7 @@ async fn capture_screen(app: AppHandle, window: Window) -> Result<String, String
     let encode_ms = encode_started_at.elapsed().as_millis();
     let total_ms = total_started_at.elapsed().as_millis();
 
+    #[cfg(debug_assertions)]
     println!(
         "[Analyze Screen][Timing][NativeCapture] lockWaitMs={lock_wait_ms} positionMs={position_ms} protectionEnableMs={protection_enable_ms} captureMs={capture_ms} restoreMs={restore_ms} encodeMs={encode_ms} totalMs={total_ms} original={original_width}x{original_height} resized={resized_width}x{resized_height} jpegBytes={jpeg_bytes} wasProtected={was_protected}"
     );
@@ -642,15 +699,39 @@ async fn show_mini_top_center(app: AppHandle) -> Result<(), String> {
     let screen = monitor.size();
     let mon_pos = monitor.position();
 
-    window
-        .set_size(PhysicalSize::new(screen.width, screen.height))
-        .map_err(|e| e.to_string())?;
-
-    window
-        .set_position(PhysicalPosition { x: mon_pos.x, y: mon_pos.y })
-        .map_err(|e| e.to_string())?;
-    window.set_minimizable(false).map_err(|e| e.to_string())?;
-    window.set_maximizable(false).map_err(|e| e.to_string())?;
+    // On Windows, set_size/set_position/set_minimizable/set_maximizable route through
+    // Win32 SendMessage which requires the call to originate on the UI thread. Route
+    // through run_on_main_thread to avoid a cross-thread SendMessage round-trip.
+    // Other platforms make direct Cocoa/GTK calls that are safe from any thread.
+    #[cfg(target_os = "windows")]
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let w = window.clone();
+        let size = PhysicalSize::new(screen.width, screen.height);
+        let pos = PhysicalPosition { x: mon_pos.x, y: mon_pos.y };
+        app.run_on_main_thread(move || {
+            let result = (|| -> Result<(), String> {
+                w.set_size(size).map_err(|e| e.to_string())?;
+                w.set_position(pos).map_err(|e| e.to_string())?;
+                w.set_minimizable(false).map_err(|e| e.to_string())?;
+                w.set_maximizable(false).map_err(|e| e.to_string())?;
+                Ok(())
+            })();
+            let _ = tx.send(result);
+        }).map_err(|e| e.to_string())?;
+        rx.await.map_err(|_| "window thread dropped".to_string())??;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        window
+            .set_size(PhysicalSize::new(screen.width, screen.height))
+            .map_err(|e| e.to_string())?;
+        window
+            .set_position(PhysicalPosition { x: mon_pos.x, y: mon_pos.y })
+            .map_err(|e| e.to_string())?;
+        window.set_minimizable(false).map_err(|e| e.to_string())?;
+        window.set_maximizable(false).map_err(|e| e.to_string())?;
+    }
     apply_overlay_policy_to_window(&window, OverlayMode::FullscreenOverlay)?;
 
     #[cfg(target_os = "macos")]
@@ -660,18 +741,30 @@ async fn show_mini_top_center(app: AppHandle) -> Result<(), String> {
     }
 
     // ── Windows ───────────────────────────────────────────────────────────
+    // ShowWindow is safe cross-thread. The HWND-level operations below have strict
+    // thread-affinity requirements and must run on the window-owner (UI) thread:
+    //   winvd::pin_window  — VirtualDesktop COM, STA required
+    //   remove_window_border — DwmSetWindowAttribute + SetWindowLongPtrW, DWM stall
+    //   SetWindowSubclass  — MSDN: must be installed from the thread that owns the
+    //                         window; off-thread install silently breaks WM_NCCALCSIZE
+    //                         interception, leaving a visible NC border.
     #[cfg(target_os = "windows")]
     {
         window.show().map_err(|e| e.to_string())?;
         if let Ok(hwnd) = window.hwnd() {
-            let win_hwnd = windows::Win32::Foundation::HWND(hwnd.0);
-            let _ = winvd::pin_window(win_hwnd);
-            remove_window_border(win_hwnd);
-            unsafe {
-                let _ = windows::Win32::UI::Shell::SetWindowSubclass(
-                    win_hwnd, Some(mini_subclass_proc), 1, 0,
-                );
-            }
+            let raw = hwnd.0;
+            window
+                .run_on_main_thread(move || {
+                    let h = windows::Win32::Foundation::HWND(raw);
+                    let _ = winvd::pin_window(h);
+                    remove_window_border(h);
+                    unsafe {
+                        let _ = windows::Win32::UI::Shell::SetWindowSubclass(
+                            h, Some(mini_subclass_proc), 1, 0,
+                        );
+                    }
+                })
+                .map_err(|e| e.to_string())?;
         }
     }
 
@@ -1397,12 +1490,28 @@ fn stop_audio_stream() {
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
-fn list_audio_devices() -> Vec<String> {
-    use cpal::traits::{DeviceTrait, HostTrait};
-    let host = cpal::default_host();
-    host.input_devices()
-        .map(|devs| devs.filter_map(|d| d.name().ok()).collect())
-        .unwrap_or_default()
+async fn list_audio_devices() -> Vec<String> {
+    // WASAPI IMMDeviceEnumerator::EnumAudioEndpoints is a synchronous COM call.
+    // On budget i3/i5 laptops with Realtek/Conexant drivers it can block for
+    // 200–800 ms while the driver reads registry config. Running it on a Tokio
+    // worker holds the slot for the full duration — concurrent invoke calls queue
+    // and clicks appear frozen. spawn_blocking moves it to a dedicated OS thread;
+    // the 5-second timeout returns a safe fallback instead of hanging forever.
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::task::spawn_blocking(|| {
+            use cpal::traits::{DeviceTrait, HostTrait};
+            let host = cpal::default_host();
+            host.input_devices()
+                .map(|devs| devs.filter_map(|d| d.name().ok()).collect::<Vec<_>>())
+                .unwrap_or_default()
+        }),
+    )
+    .await
+    {
+        Ok(Ok(devices)) => devices,
+        _ => vec!["Default".to_string()],
+    }
 }
 
 // ── Windows: WASAPI loopback — captures system/speaker audio ──────────────────
@@ -1779,6 +1888,7 @@ async fn start_system_audio_transcription(
     SYSTEM_LAST_PCM_AT.store(0, Ordering::SeqCst);
     SYSTEM_EMPTY_FINAL_STREAK.store(0, Ordering::SeqCst);
     emit_system_health_event(&app, my_gen, "starting");
+    #[cfg(debug_assertions)]
     eprintln!("[stt:system] systemCaptureStarted");
 
     // but PCM goes straight into the broadcast channel — no axum WS server.
@@ -1856,6 +1966,7 @@ async fn start_system_audio_transcription(
                     let prev = SYSTEM_PCM_FRAMES_SENT.fetch_add(1, Ordering::SeqCst);
                     SYSTEM_LAST_PCM_AT.store(now_epoch_millis_u64(), Ordering::SeqCst);
                     if prev == 0 {
+                        #[cfg(debug_assertions)]
                         eprintln!("[stt:system] systemFirstPcmFrame");
                         emit_system_health_event(&app_for_callback, my_gen, "capturing");
                     } else if prev % 50 == 0 {
@@ -1882,6 +1993,7 @@ async fn start_system_audio_transcription(
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         let _ = stream.stop_capture();
+        #[cfg(debug_assertions)]
         eprintln!("[stt:system] systemCaptureThreadExited");
         emit_system_health_event(&app_capture, my_gen, "stopped");
     });
@@ -2176,6 +2288,7 @@ async fn start_system_audio_transcription(
     SYSTEM_LAST_PCM_AT.store(0, Ordering::SeqCst);
     SYSTEM_EMPTY_FINAL_STREAK.store(0, Ordering::SeqCst);
     emit_system_health_event(&app, my_gen, "starting");
+    #[cfg(debug_assertions)]
     eprintln!("[stt:system] systemCaptureStarted");
 
     let app_capture = app.clone();
@@ -2200,6 +2313,7 @@ async fn start_system_audio_transcription(
                         let prev = SYSTEM_PCM_FRAMES_SENT.fetch_add(1, Ordering::SeqCst);
                         SYSTEM_LAST_PCM_AT.store(now_epoch_millis_u64(), Ordering::SeqCst);
                         if prev == 0 {
+                            #[cfg(debug_assertions)]
                             eprintln!("[stt:system] systemFirstPcmFrame");
                             emit_system_health_event(&app_for_callback, my_gen, "capturing");
                         } else if prev % 50 == 0 {
@@ -2224,6 +2338,7 @@ async fn start_system_audio_transcription(
                         let prev = SYSTEM_PCM_FRAMES_SENT.fetch_add(1, Ordering::SeqCst);
                         SYSTEM_LAST_PCM_AT.store(now_epoch_millis_u64(), Ordering::SeqCst);
                         if prev == 0 {
+                            #[cfg(debug_assertions)]
                             eprintln!("[stt:system] systemFirstPcmFrame");
                             emit_system_health_event(&app_for_callback, my_gen, "capturing");
                         } else if prev % 50 == 0 {
@@ -2254,6 +2369,7 @@ async fn start_system_audio_transcription(
                 {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
+                #[cfg(debug_assertions)]
                 eprintln!("[stt:system] systemCaptureThreadExited");
                 emit_system_health_event(&app_capture, my_gen, "stopped");
             }
@@ -2783,6 +2899,7 @@ fn open_microphone_settings(app: tauri::AppHandle) -> Result<(), String> {
 
 #[command]
 fn set_session_active(app: AppHandle, active: bool) {
+    #[cfg(debug_assertions)]
     println!("[Session][Native] set_session_active start active={active}");
     SESSION_ACTIVE.store(active, Ordering::SeqCst);
     if active {
@@ -2793,16 +2910,19 @@ fn set_session_active(app: AppHandle, active: bool) {
     if !active {
         stop_all_audio_transcription();
     }
+    #[cfg(debug_assertions)]
     println!("[Session][Native] set_session_active complete active={active}");
 }
 
 #[tauri::command]
 fn stop_all_audio_transcription() {
+    #[cfg(debug_assertions)]
     println!("[Session][Native] stop_all_audio_transcription start");
     stop_mic_transcription();
     stop_system_audio_transcription();
     stop_display_audio_stream();
     stop_audio_stream();
+    #[cfg(debug_assertions)]
     println!("[Session][Native] stop_all_audio_transcription complete");
 }
 
@@ -2832,6 +2952,7 @@ async fn toggle_content_protection(app: AppHandle, protected: bool) -> Result<()
 
 #[command]
 fn handle_launcher_click(app: AppHandle) -> Result<(), String> {
+    #[cfg(debug_assertions)]
     println!(
         "[Session][Native] handle_launcher_click start session_active={}",
         SESSION_ACTIVE.load(Ordering::SeqCst)
@@ -2868,6 +2989,7 @@ fn handle_launcher_click(app: AppHandle) -> Result<(), String> {
             }
         }
     }
+    #[cfg(debug_assertions)]
     println!("[Session][Native] handle_launcher_click complete");
     Ok(())
 }
@@ -3041,18 +3163,30 @@ fn show_launcher_widget(app: AppHandle) -> Result<(), String> {
     }
 
     // ── Windows ───────────────────────────────────────────────────────────
+    // ShowWindow is safe cross-thread. The HWND-level operations below have strict
+    // thread-affinity requirements and must run on the window-owner (UI) thread:
+    //   winvd::pin_window  — VirtualDesktop COM, STA required
+    //   remove_window_border — DwmSetWindowAttribute + SetWindowLongPtrW, DWM stall
+    //   SetWindowSubclass  — MSDN: must be installed from the thread that owns the
+    //                         window; off-thread install silently breaks WM_NCCALCSIZE
+    //                         interception, leaving a visible NC border.
     #[cfg(target_os = "windows")]
     {
         window.show().map_err(|e| e.to_string())?;
         if let Ok(hwnd) = window.hwnd() {
-            let win_hwnd = windows::Win32::Foundation::HWND(hwnd.0);
-            let _ = winvd::pin_window(win_hwnd);
-            remove_window_border(win_hwnd);
-            unsafe {
-                let _ = windows::Win32::UI::Shell::SetWindowSubclass(
-                    win_hwnd, Some(mini_subclass_proc), 1, 0,
-                );
-            }
+            let raw = hwnd.0;
+            window
+                .run_on_main_thread(move || {
+                    let h = windows::Win32::Foundation::HWND(raw);
+                    let _ = winvd::pin_window(h);
+                    remove_window_border(h);
+                    unsafe {
+                        let _ = windows::Win32::UI::Shell::SetWindowSubclass(
+                            h, Some(mini_subclass_proc), 1, 0,
+                        );
+                    }
+                })
+                .map_err(|e| e.to_string())?;
         }
     }
 
@@ -3080,8 +3214,11 @@ fn show_launcher_widget(app: AppHandle) -> Result<(), String> {
 /// point the WKWebView receives zero mouse events, so the only way to know
 /// where the cursor is (and whether to re-enable interaction) is to poll
 /// the OS cursor each frame.
+// async so Tauri schedules this on the async executor rather than occupying a
+// dedicated blocking-thread slot. GetCursorPos is ~0.1 ms but the dispatch
+// overhead at 8 FPS (120 ms cadence on Windows) adds up across sessions.
 #[tauri::command]
-fn get_cursor_position(app: AppHandle) -> Result<(f64, f64), String> {
+async fn get_cursor_position(app: AppHandle) -> Result<(f64, f64), String> {
     let pos = app.cursor_position().map_err(|e| e.to_string())?;
     Ok((pos.x, pos.y))
 }
@@ -3106,7 +3243,28 @@ fn set_cursor_passthrough(window: Window, passthrough: bool) -> Result<(), Strin
             .map_err(|e| e.to_string())?;
     }
 
-    #[cfg(not(target_os = "macos"))]
+    // On Windows, set_ignore_cursor_events routes through Win32 SetWindowLongPtrW +
+    // SetWindowPos(SWP_FRAMECHANGED). Called from a Tokio worker this triggers the
+    // cross-thread SendMessage path — the worker BLOCKS until the Win32 message pump
+    // drains the call. useCursorPassthrough fires this 8×/second (120ms cadence);
+    // under any render spike (AI answer, transcript update) these 8 queued SendMessages
+    // stall the IPC thread → all concurrent invoke calls appear frozen to the user.
+    //
+    // Fix: post fire-and-forget to the UI thread, matching the macOS pattern exactly.
+    // The caller does not need to wait for the Win32 commit; state is tracked client-
+    // side via lastPassthrough ref so redundant calls are already deduplicated.
+    #[cfg(target_os = "windows")]
+    {
+        let w = window.clone();
+        window
+            .run_on_main_thread(move || {
+                let _ = w.set_ignore_cursor_events(passthrough);
+            })
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Linux: GTK/X11 set_ignore_cursor_events is safe from any thread; keep direct.
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         window
             .set_ignore_cursor_events(passthrough)
@@ -3328,9 +3486,11 @@ pub fn run() {
                         tauri::WindowEvent::Resized(_) => {
                             if let Some(mini) = mini_handle.get_webview_window("mini") {
                                 let minimized = mini.is_minimized().unwrap_or(false);
+                                #[cfg(debug_assertions)]
                                 println!("[Tauri][WindowLifecycle] mini resized; minimized={}", minimized);
                                 if minimized {
                                     let _ = mini.hide();
+                                    #[cfg(debug_assertions)]
                                     println!("[Tauri][WindowLifecycle] mini hidden after minimize event");
                                     if !SESSION_ACTIVE.load(Ordering::SeqCst) {
                                         if let Some(widget) = mini_handle.get_webview_window("launcher") {
@@ -3349,11 +3509,13 @@ pub fn run() {
                                                 let _ = widget.set_focus();
                                                 set_overlay_passthrough(&widget);
                                             }
+                                            #[cfg(debug_assertions)]
                                             println!("[Tauri][WindowLifecycle] launcher restored after mini minimize");
                                         }
                                     }
                                 }
                             } else {
+                                #[cfg(debug_assertions)]
                                 println!("[Tauri][WindowLifecycle] mini handle missing on resize event");
                             }
                         }
@@ -3382,6 +3544,10 @@ pub fn run() {
                 });
             }
 
+            // Cancellation flag for the macOS reinforce loop — set on launcher Destroyed.
+            #[cfg(target_os = "macos")]
+            let reinforce_stop = Arc::new(AtomicBool::new(false));
+
             // ── macOS: re-apply overlay policy on lifecycle events ───────────
             //
             // macOS resets window levels after any focus / show lifecycle
@@ -3401,6 +3567,7 @@ pub fn run() {
                 if let Some(win) = app.get_webview_window("launcher") {
                     let exit_handle = app.handle().clone();
                     let launcher_handle = app.handle().clone();
+                    let reinforce_stop_mac = reinforce_stop.clone();
                     win.on_window_event(move |event| {
                         match event {
                             tauri::WindowEvent::Focused(true)
@@ -3428,6 +3595,7 @@ pub fn run() {
                             // The next app launch starts a fresh process with the widget
                             // visible immediately.
                             tauri::WindowEvent::Destroyed => {
+                                reinforce_stop_mac.store(true, Ordering::Relaxed);
                                 exit_handle.exit(0);
                             }
                             _ => {}
@@ -3474,9 +3642,11 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             {
                 let reinforce_handle = app.handle().clone();
+                let reinforce_stop_loop = reinforce_stop.clone();
                 tauri::async_runtime::spawn(async move {
                     loop {
                         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        if reinforce_stop_loop.load(Ordering::Relaxed) { break; }
                         for label in ["launcher", "mini"] {
                             if let Some(win) = reinforce_handle.get_webview_window(label) {
                                 if win.is_visible().unwrap_or(false) {

@@ -618,6 +618,37 @@ export function useFloatingSession() {
   // picking up any additional transcript that arrived after an early accidental click.
   const prevAnswerTimestampRef = useRef<number | null>(null);
 
+  // Normalized-messages cache — recomputed only when length or last timestamp changes.
+  // Both detectActiveQuestion and resolveQuestionFromContext normalize every message
+  // internally; pre-computing once per click (4 calls → 1 pass) is the primary H2 fix.
+  const normalizedMsgsCacheRef = useRef<{
+    length: number;
+    lastTimestamp: number;
+    forDetection: { sender: "User" | "Interviewer"; text: string; timestamp: number }[];
+    forResolution: { text: string; sender: string; timestamp: number }[];
+  } | null>(null);
+
+  const getOrBuildNormalizedMsgs = useCallback(() => {
+    const msgs = messagesRef.current;
+    const lastTs = msgs[msgs.length - 1]?.timestamp ?? 0;
+    const c = normalizedMsgsCacheRef.current;
+    if (c && c.length === msgs.length && c.lastTimestamp === lastTs) return c;
+    const forDetection = msgs
+      .filter((m) => (m.sender === "Interviewer" || m.sender === "User") && !!m.text?.trim())
+      .map((m) => ({
+        sender: m.sender as "User" | "Interviewer",
+        text: normalizeSttTranscript(m.text.trim()),
+        timestamp: m.timestamp,
+      }));
+    const forResolution = msgs.map((m) => ({
+      ...m,
+      text: normalizeSttTranscript(m.text || ""),
+    }));
+    const entry = { length: msgs.length, lastTimestamp: lastTs, forDetection, forResolution };
+    normalizedMsgsCacheRef.current = entry;
+    return entry;
+  }, []);
+
   sessionInfoRef.current = sessionInfo;
   messagesRef.current = messages;
   selectedModelRef.current = selectedModel;
@@ -646,6 +677,10 @@ export function useFloatingSession() {
   const [permissionRequiresRestart, setPermissionRequiresRestart] = useState(false);
   const [tabInterimTranscript, setTabInterimTranscript] = useState("");
   const [captureArmed, setCaptureArmed] = useState(false);
+  // Ref that always reflects the current captureArmed value — allows interval
+  // callbacks to read fresh state without relying on a stale closure.
+  const captureArmedRef = useRef(captureArmed);
+  captureArmedRef.current = captureArmed;
   const [isSystemStale, setIsSystemStale] = useState(false);
   const systemStartIssuedForSessionRef = useRef<string | null>(null);
   const systemStartInFlightRef = useRef(false);
@@ -858,9 +893,10 @@ export function useFloatingSession() {
       if (!normalized) return true;
 
       // 1) Check recent in-memory insertions first (covers bursts before Redux settles).
-      recentInsertionsRef.current = recentInsertionsRef.current.filter(
-        (entry) => timestamp - entry.timestamp <= NEAR_DUPLICATE_GAP_MS,
-      );
+      const arr = recentInsertionsRef.current;
+      let stale = 0;
+      while (stale < arr.length && timestamp - arr[stale].timestamp > NEAR_DUPLICATE_GAP_MS) stale++;
+      if (stale > 0) arr.splice(0, stale);
       const dupFromRecentInsertions = recentInsertionsRef.current.some((entry) => {
         const gap = Math.abs(timestamp - entry.timestamp);
         if (!areNearDuplicateTexts(entry.normalized, normalized)) return false;
@@ -888,16 +924,14 @@ export function useFloatingSession() {
   const replaceNearDuplicateIfRicher = useCallback(
     (sender: "User" | "Interviewer", text: string, timestamp: number): { handled: boolean; patchedId?: string } => {
       const normalized = normalizeLoose(text);
-      const candidates = [...messagesRef.current]
+      const candidates = messagesRef.current
         .filter((m) => m.sender === sender && typeof m.timestamp === "number")
         .slice(-20);
-      const match = [...candidates]
-        .reverse()
-        .find(
-          (m) =>
-            Math.abs(timestamp - m.timestamp) <= NEAR_DUPLICATE_GAP_MS &&
-            areNearDuplicateTexts(normalized, normalizeLoose(m.text)),
-        );
+      const match = candidates.findLast(
+        (m) =>
+          Math.abs(timestamp - m.timestamp) <= NEAR_DUPLICATE_GAP_MS &&
+          areNearDuplicateTexts(normalized, normalizeLoose(m.text)),
+      );
       if (!match) return { handled: false };
       if (text.trim().length <= match.text.trim().length) return { handled: true };
       dispatch(
@@ -908,10 +942,8 @@ export function useFloatingSession() {
           patchedByUser: false,
         }),
       );
-      recentInsertionsRef.current = [
-        ...recentInsertionsRef.current,
-        { sender: sender as "User" | "Interviewer", normalized, timestamp },
-      ].slice(-40);
+      recentInsertionsRef.current.push({ sender: sender as "User" | "Interviewer", normalized, timestamp });
+      if (recentInsertionsRef.current.length > 40) recentInsertionsRef.current.splice(0, recentInsertionsRef.current.length - 40);
       return { handled: true, patchedId: match.id };
     },
     [dispatch],
@@ -979,7 +1011,7 @@ export function useFloatingSession() {
       if (!rawText.trim()) return { status: "empty", reason: "empty_input" };
 
       let cleanText = deduplicatePhrases(normalizeSttTranscript(rawText));
-      const lastSameSenderMsg = [...messagesRef.current].reverse().find((m) => m.sender === sender);
+      const lastSameSenderMsg = messagesRef.current.findLast((m) => m.sender === sender);
       if (lastSameSenderMsg) {
         cleanText = removeOverlap(lastSameSenderMsg.text, cleanText);
       }
@@ -1009,14 +1041,8 @@ export function useFloatingSession() {
           timestamp: now,
         }),
       );
-      recentInsertionsRef.current = [
-        ...recentInsertionsRef.current,
-        {
-          sender,
-          normalized: normalizeLoose(cleanText),
-          timestamp: now,
-        },
-      ].slice(-40);
+      recentInsertionsRef.current.push({ sender, normalized: normalizeLoose(cleanText), timestamp: now });
+      if (recentInsertionsRef.current.length > 40) recentInsertionsRef.current.splice(0, recentInsertionsRef.current.length - 40);
 
       if (sid) {
         fetch(`${BACKEND_URL}/api/session/${sid}/save-message`, {
@@ -1653,7 +1679,7 @@ export function useFloatingSession() {
     systemHealthIntervalRef.current = setInterval(() => {
       const now = Date.now();
       const health = systemHealthRef.current;
-      const sessionActive = !!sessionInfoRef.current?.sessionId && captureArmed;
+      const sessionActive = !!sessionInfoRef.current?.sessionId && captureArmedRef.current;
       if (!sessionActive || tabStatus === "error") return;
       if (isDeepgramAuthFailureMessage(tabError)) return;
 
@@ -1987,17 +2013,12 @@ export function useFloatingSession() {
     try {
 
     const contextBuildStartedAt = Date.now();
-    // 1) Build immediate snapshot (zero wait).
-    const preDebounceMessages = [...messagesRef.current];
+    // 1) Build immediate snapshot (zero wait). Normalizing once here covers all
+    //    detectActiveQuestion and resolveQuestionFromContext calls below.
+    const { forDetection: normalizedForDetection, forResolution: normalizedForResolution } = getOrBuildNormalizedMsgs();
     const preDebounceDetection = detectActiveQuestion({
       liveInterimText: tabInterimTranscript.trim(),
-      allMessages: preDebounceMessages
-        .filter((m) => (m.sender === "Interviewer" || m.sender === "User") && !!m.text?.trim())
-        .map((m) => ({
-          sender: m.sender as "User" | "Interviewer",
-          text: m.text.trim(),
-          timestamp: m.timestamp,
-        })),
+      allMessages: normalizedForDetection,
       cutoffTimestamp:
         lastAnswerTimestampRef.current !== null
           ? Math.min(lastAnswerTimestampRef.current, Date.now() - 5000)
@@ -2021,13 +2042,7 @@ export function useFloatingSession() {
         : Date.now() - FIRST_ANSWER_WINDOW_MS;
     const detection = detectActiveQuestion({
       liveInterimText: liveInterviewerTextSnapshot,
-      allMessages: msgsSnapshot
-        .filter((m) => (m.sender === "Interviewer" || m.sender === "User") && !!m.text?.trim())
-        .map((m) => ({
-          sender: m.sender as "User" | "Interviewer",
-          text: m.text.trim(),
-          timestamp: m.timestamp,
-        })),
+      allMessages: normalizedForDetection,
       cutoffTimestamp: cutoff,
       selectedAnswerQuestion: "",
     });
@@ -2059,7 +2074,7 @@ export function useFloatingSession() {
       ].find((candidate) => candidate && !isFillerPhrase(candidate));
       const fallbackResolved = resolveQuestionFromContext(
         liveInterviewerTextSnapshot,
-        msgsSnapshot,
+        normalizedForResolution,
         lastMessage,
         lastAnswerTimestampRef.current,
       );
@@ -2349,7 +2364,7 @@ export function useFloatingSession() {
       // Use same question resolution logic as AI Answer for context
       const msgs = messagesRef.current;
       const liveInterviewerText = tabInterimTranscript.trim();
-      const resolved = resolveQuestionFromContext(liveInterviewerText, msgs, lastMessage, lastAnswerTimestampRef.current);
+      const resolved = resolveQuestionFromContext(liveInterviewerText, getOrBuildNormalizedMsgs().forResolution, lastMessage, lastAnswerTimestampRef.current);
       const contextQuestion = resolved?.question || "(no context)";
       const adaptiveContext = buildAdaptiveAiContext({
         transcriptMessages: msgs

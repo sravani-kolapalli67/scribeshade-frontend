@@ -48,10 +48,15 @@ export function useCursorPassthrough({
     const ua = navigator.userAgent.toLowerCase();
     const isWindows = ua.includes("windows");
     // Base interval: 120 ms on Windows (~8 fps), 16 ms on macOS (~60 fps).
-    const POLL_BASE_MS = isWindows ? 120 : 16;
+    const POLL_BASE_MS = isWindows ? 120 : 32;
     // Slow-idle interval: used after 6+ cycles with no state change.
-    const POLL_IDLE_MS = isWindows ? 240 : 50;
+    const POLL_IDLE_MS = isWindows ? 240 : 64;
     const IDLE_THRESHOLD = 6;
+    // On Windows the launcher window never moves during normal use; scale factor
+    // never changes mid-session. 500 ms was too aggressive — every cache miss fires
+    // getOuterPosition + getScaleFactor + getCursorPosition in the same tick (3–4
+    // IPC round-trips at once). 2000 ms cuts bursts from 2×/sec to 0.5×/sec.
+    const CACHE_TTL_MS = isWindows ? 2000 : 500;
 
     async function setPassthrough(p: boolean) {
       if (cancelled) return;
@@ -65,13 +70,22 @@ export function useCursorPassthrough({
       }
     }
 
-    function isPointInInteractiveRegion(localX: number, localY: number) {
+    // Collect all interactive rects in one querySelectorAll + getBoundingClientRect
+    // pass. Callers test multiple coordinate sets (physical + logical) against the
+    // same snapshot, halving the forced-layout count per tick on Windows.
+    function collectInteractiveRects(): DOMRect[] {
       const nodes = document.querySelectorAll<HTMLElement>("[data-interactive]");
+      const rects: DOMRect[] = [];
       for (let i = 0; i < nodes.length; i++) {
-        const r = nodes[i].getBoundingClientRect();
-        if (localX >= r.left && localX <= r.right && localY >= r.top && localY <= r.bottom) {
-          return true;
-        }
+        rects.push(nodes[i].getBoundingClientRect());
+      }
+      return rects;
+    }
+
+    function isPointInRects(rects: DOMRect[], x: number, y: number) {
+      for (let i = 0; i < rects.length; i++) {
+        const r = rects[i];
+        if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return true;
       }
       return false;
     }
@@ -94,7 +108,7 @@ export function useCursorPassthrough({
 
         // Refresh window position + scale cache every 500 ms.
         const now = performance.now();
-        if (now - lastCacheUpdate > 500) {
+        if (now - lastCacheUpdate > CACHE_TTL_MS) {
           lastCacheUpdate = now;
           const [pos, scale] = await Promise.all([
             tauriOverlay.getOuterPosition(),
@@ -115,9 +129,10 @@ export function useCursorPassthrough({
         const localLogicalX = gx - cachedWinPos.x;
         const localLogicalY = gy - cachedWinPos.y;
 
+        const rects = collectInteractiveRects();
         const over =
-          isPointInInteractiveRegion(localPhysicalX, localPhysicalY) ||
-          isPointInInteractiveRegion(localLogicalX, localLogicalY);
+          isPointInRects(rects, localPhysicalX, localPhysicalY) ||
+          isPointInRects(rects, localLogicalX, localLogicalY);
 
         const before = lastPassthrough;
         await setPassthrough(!over);

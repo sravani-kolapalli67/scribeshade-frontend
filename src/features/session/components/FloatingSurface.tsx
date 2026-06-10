@@ -25,6 +25,16 @@
  */
 import React from "react";
 
+// Detected once at module load — zero cost per render.
+// Disable backdrop-filter on devices with ≤4 logical cores (typical low-end i3/i5)
+// or when the user has requested reduced motion.
+const isLowPerfDevice: boolean = (() => {
+  if (typeof window === "undefined") return false;
+  const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+  const lowCores = (navigator.hardwareConcurrency ?? 8) <= 4;
+  return reducedMotion || lowCores;
+})();
+
 export interface FloatingSurfaceProps {
   /** 0.0–1.0 — affects glass alpha AND backdrop blur intensity */
   opacity: number;
