@@ -78,8 +78,10 @@ export default function ResumeUpload({ userId }: { userId: string }) {
 
   // ── Tauri Upload ───────────────────────────
   const handleTauriUpload = async () => {
-    const { open } = await import("@tauri-apps/plugin-dialog");
-    const { readFile } = await import("@tauri-apps/plugin-fs");
+    const [{ open }, { readFile }] = await Promise.all([
+      import("@tauri-apps/plugin-dialog"),
+      import("@tauri-apps/plugin-fs"),
+    ]);
 
     const selected = await open({
       multiple: false,

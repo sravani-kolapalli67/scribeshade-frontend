@@ -195,7 +195,7 @@ export default function ListOfResumes({
   }, [userId]);
 
   // ✅ ATS — Open ATS report for resume using resumeId
-  const handleATS = async (resume: Resume) => {
+  const handleATS = useCallback(async (resume: Resume) => {
     try {
       if (resume.atsAnalysis) {
         navigate("/resume/ats-result", {
@@ -251,7 +251,7 @@ export default function ListOfResumes({
     } finally {
       setAtsLoadingIds((prev) => ({ ...prev, [resume.id]: false }));
     }
-  };
+  }, [navigate, userId]);
 
   // ✅ RENAME
   const handleOpenRename = (resume: Resume) => {

@@ -37,6 +37,7 @@ export function DesktopAuthHydrator({ children, source, loadingFallback }: Deskt
     if (!isLoaded || hydrationState !== 'idle') return;
 
     setHydrationState('restoring');
+    let cancelled = false;
 
     (async () => {
       try {
@@ -53,24 +54,27 @@ export function DesktopAuthHydrator({ children, source, loadingFallback }: Deskt
 
           // Wait for Clerk's React state to reflect the sign-in status (max 3 seconds)
           let checks = 0;
-          while (checks < 30) {
+          while (checks < 30 && !cancelled) {
             if (isSignedInRef.current) {
               console.info("[auth/hydrator] Clerk state reflected signed-in status", { source });
               break;
             }
-            await new Promise((r) => setTimeout(r, 100));
+            await new Promise<void>((r) => setTimeout(r, 100));
             checks++;
           }
         }
       } catch (error) {
         console.warn("[auth/hydrator] session restore failed", { source, error });
-        // The session was invalid or expired, so clear it
         await clearPersistedDesktopSession().catch(() => {});
       } finally {
-        setHydrationState('completed');
-        setHydrated(true);
+        if (!cancelled) {
+          setHydrationState('completed');
+          setHydrated(true);
+        }
       }
     })();
+
+    return () => { cancelled = true; };
   }, [isLoaded, setActive, source]);
 
   React.useEffect(() => {

@@ -1985,75 +1985,76 @@ export default function ActiveSession() {
 
     const setup = async () => {
       if (!isTauri()) return;
-      const u1 = await listen("overlay-ai-answer", () => {
-        if (active) onAiAnswerRef.current();
-      });
-      const u2 = await listen("overlay-analyze-screen", (event) => {
-        if (active) onAnalyzeScreenRef.current(event.payload);
-      });
-      const u3 = await listen("overlay-exit", async () => {
-        if (active) {
-          const { WebviewWindow } =
-            await import("@tauri-apps/api/webviewWindow");
-          const mainWindow = await WebviewWindow.getByLabel("main");
-          if (mainWindow) {
-            await mainWindow.show();
-            await mainWindow.unminimize();
-            await mainWindow.setFocus();
+      const [u1, u2, u3, u4, uModel, u5, u6, u7, u8, u9] = await Promise.all([
+        listen("overlay-ai-answer", () => {
+          if (active) onAiAnswerRef.current();
+        }),
+        listen("overlay-analyze-screen", (event) => {
+          if (active) onAnalyzeScreenRef.current(event.payload);
+        }),
+        listen("overlay-exit", async () => {
+          if (active) {
+            const { WebviewWindow } =
+              await import("@tauri-apps/api/webviewWindow");
+            const mainWindow = await WebviewWindow.getByLabel("main");
+            if (mainWindow) {
+              await mainWindow.show();
+              await mainWindow.unminimize();
+              await mainWindow.setFocus();
+            }
+            setIsEndSessionDialogOpen(true);
           }
-          setIsEndSessionDialogOpen(true);
-        }
-      });
-      const u4 = await listen("overlay-ai-query", (event) => {
-        const { query } = event.payload as { query: string };
-        if (active && id)
-          handleCustomQueryRef.current(id, query, selectedModelRef.current);
-      });
-      const uModel = await listen("overlay-model-change", (event) => {
-        const { model } = event.payload as { model: string };
-        if (active) setSelectedModel(model);
-      });
-      const u5 = await listen("overlay-toggle-mic", () => {
-        if (active) onToggleMicRef.current();
-      });
-      const u6 = await listen("overlay-clear-transcript", () => {
-        if (active) onClearRef.current();
-      });
-      const u7 = await listen("overlay-restore", async () => {
-        if (active) {
-          console.log("Received overlay-restore event");
-          const { WebviewWindow } =
-            await import("@tauri-apps/api/webviewWindow");
-          const mainWindow = await WebviewWindow.getByLabel("main");
-          if (mainWindow) {
-            await mainWindow.show();
-            await mainWindow.unminimize();
-            await mainWindow.setFocus();
-          } else {
-            // Fallback
-            const window = getCurrentWindow();
-            await window.show();
-            await window.unminimize();
-            await window.setFocus();
+        }),
+        listen("overlay-ai-query", (event) => {
+          const { query } = event.payload as { query: string };
+          if (active && id)
+            handleCustomQueryRef.current(id, query, selectedModelRef.current);
+        }),
+        listen("overlay-model-change", (event) => {
+          const { model } = event.payload as { model: string };
+          if (active) setSelectedModel(model);
+        }),
+        listen("overlay-toggle-mic", () => {
+          if (active) onToggleMicRef.current();
+        }),
+        listen("overlay-clear-transcript", () => {
+          if (active) onClearRef.current();
+        }),
+        listen("overlay-restore", async () => {
+          if (active) {
+            console.log("Received overlay-restore event");
+            const { WebviewWindow } =
+              await import("@tauri-apps/api/webviewWindow");
+            const mainWindow = await WebviewWindow.getByLabel("main");
+            if (mainWindow) {
+              await mainWindow.show();
+              await mainWindow.unminimize();
+              await mainWindow.setFocus();
+            } else {
+              const window = getCurrentWindow();
+              await window.show();
+              await window.unminimize();
+              await window.setFocus();
+            }
           }
-        }
-      });
-      const u8 = await listen("overlay-hide-main", async () => {
-        if (active) {
-          if (import.meta.env.DEV) {
-            console.log("[audio-lifecycle] overlayTransitionAudioPreserved", {
-              reason: "overlay_hide_main",
-              sessionActive: true,
-            });
+        }),
+        listen("overlay-hide-main", async () => {
+          if (active) {
+            if (import.meta.env.DEV) {
+              console.log("[audio-lifecycle] overlayTransitionAudioPreserved", {
+                reason: "overlay_hide_main",
+                sessionActive: true,
+              });
+            }
+            await getCurrentWindow().hide();
           }
-          await getCurrentWindow().hide();
-        }
-      });
-      const u9 = await listen("overlay-end-session-direct", async () => {
-        if (active) {
-          endSessionNowRef.current();
-        }
-      });
+        }),
+        listen("overlay-end-session-direct", async () => {
+          if (active) {
+            endSessionNowRef.current();
+          }
+        }),
+      ]);
 
       if (!active) {
         u1();

@@ -15,11 +15,13 @@ export function TauriReturnBanner() {
   useEffect(() => {
     if (!fromTauri || !isSignedIn || dismissed) return;
     const port = sessionStorage.getItem("tauri_auth_port");
-    if (!port) return; // no port = banner was shown from a different path, skip auto
+    if (!port) return;
+    let timerId = 0;
     setLoading(true);
     returnToTauri(() => getToken()).finally(() => {
-      setTimeout(() => setLoading(false), 3000);
+      timerId = window.setTimeout(() => setLoading(false), 3000);
     });
+    return () => clearTimeout(timerId);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isSignedIn, fromTauri]);
 

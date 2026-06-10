@@ -111,6 +111,49 @@ const CodeBlock = ({
   );
 };
 
+const MarkdownListItem = ({ children, ordered }: { children: React.ReactNode; ordered?: boolean }) => {
+  const [copied, setCopied] = useState(false);
+  const textContent = Array.isArray(children)
+    ? children.map((c) => (typeof c === "string" ? c : (c as any)?.props?.children || "")).join("")
+    : String(children);
+
+  const handleCopy = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    navigator.clipboard.writeText(textContent);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  if (ordered) {
+    return (
+      <li className="group/li relative -ml-8 pl-8 mb-4 last:mb-0">
+        <div className="absolute left-0 top-0.5 opacity-0 group-hover/li:opacity-100 transition-opacity">
+          <button
+            onClick={handleCopy}
+            className="p-1 hover:bg-slate-100 rounded border border-slate-200 bg-white shadow-sm transition-all active:scale-95"
+          >
+            {copied ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3 text-slate-400" />}
+          </button>
+        </div>
+        <div className="font-bold text-slate-900 leading-snug text-[15.5px]">{children}</div>
+      </li>
+    );
+  }
+
+  return (
+    <li className="flex items-start gap-3 group/bul mb-2 last:mb-0">
+      <div className="mt-[9px] h-1.5 w-1.5 shrink-0 rounded-full bg-slate-300" />
+      <div className="flex-1 text-[14px] leading-relaxed text-slate-700">{children}</div>
+      <button
+        onClick={handleCopy}
+        className="opacity-0 group-hover/bul:opacity-100 transition-opacity p-0.5 hover:bg-slate-100 rounded text-slate-400"
+      >
+        {copied ? <Check size={12} className="text-emerald-500" /> : <Copy size={12} />}
+      </button>
+    </li>
+  );
+};
+
 export const ChatMessage = ({
   message,
   isStreaming,
@@ -246,54 +289,9 @@ export const ChatMessage = ({
     ul: ({ children }: any) => (
       <ul className="mb-4 mt-2 space-y-2 list-none">{children}</ul>
     ),
-    li: ({ children, ordered }: any) => {
-      const [copied, setCopied] = useState(false);
-      const textContent = Array.isArray(children)
-        ? children.map(c => typeof c === 'string' ? c : (c as any)?.props?.children || '').join('')
-        : String(children);
-
-      const handleCopy = (e: React.MouseEvent) => {
-        e.stopPropagation();
-        navigator.clipboard.writeText(textContent);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-      };
-
-      if (ordered) {
-        return (
-          <li className="group/li relative -ml-8 pl-8 mb-4 last:mb-0">
-            <div className="absolute left-0 top-0.5 opacity-0 group-hover/li:opacity-100 transition-opacity">
-              <button
-                onClick={handleCopy}
-                className="p-1 hover:bg-slate-100 rounded border border-slate-200 bg-white shadow-sm transition-all active:scale-95"
-              >
-                {copied ? (
-                  <Check className="h-3 w-3 text-emerald-500" />
-                ) : (
-                  <Copy className="h-3 w-3 text-slate-400" />
-                )}
-              </button>
-            </div>
-            <div className="font-bold text-slate-900 leading-snug text-[15.5px]">
-              {children}
-            </div>
-          </li>
-        );
-      }
-
-      return (
-        <li className="flex items-start gap-3 group/bul mb-2 last:mb-0">
-          <div className="mt-[9px] h-1.5 w-1.5 shrink-0 rounded-full bg-slate-300" />
-          <div className="flex-1 text-[14px] leading-relaxed text-slate-700">{children}</div>
-          <button
-            onClick={handleCopy}
-            className="opacity-0 group-hover/bul:opacity-100 transition-opacity p-0.5 hover:bg-slate-100 rounded text-slate-400"
-          >
-            {copied ? <Check size={12} className="text-emerald-500" /> : <Copy size={12} />}
-          </button>
-        </li>
-      );
-    },
+    li: ({ children, ordered }: any) => (
+      <MarkdownListItem ordered={ordered}>{children}</MarkdownListItem>
+    ),
     strong: ({ children }: any) => (
       <strong className={cn(
         "font-bold",

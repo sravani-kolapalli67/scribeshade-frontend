@@ -1277,8 +1277,10 @@ export function useFloatingSession() {
   const preflightSystemPermission = useCallback(async (isRetry = false): Promise<boolean> => {
     if (isRetry) logMacPermission("permissionRetryClicked", { permissionType: "screen-recording" });
     logMacPermission("macPermissionCheckStarted", { permissionType: "screen-recording" });
-    const identity = await getMacIdentity();
-    const check = await invoke<MacPermissionPayload>("check_screen_recording_permission");
+    const [identity, check] = await Promise.all([
+      getMacIdentity(),
+      invoke<MacPermissionPayload>("check_screen_recording_permission"),
+    ]);
     logMacPermission("screenRecordingPermissionStatus", check);
     if (check.status === "granted") {
       logMacPermission("permissionRecheckPassed", { permissionType: "screen-recording" });
@@ -1313,8 +1315,10 @@ export function useFloatingSession() {
   const preflightMicPermission = useCallback(async (isRetry = false): Promise<boolean> => {
     if (isRetry) logMacPermission("permissionRetryClicked", { permissionType: "microphone" });
     logMacPermission("macPermissionCheckStarted", { permissionType: "microphone" });
-    const identity = await getMacIdentity();
-    const check = await invoke<MacPermissionPayload>("check_microphone_permission");
+    const [identity, check] = await Promise.all([
+      getMacIdentity(),
+      invoke<MacPermissionPayload>("check_microphone_permission"),
+    ]);
     logMacPermission("micPermissionStatus", check);
     if (check.status === "granted") {
       logMacPermission("permissionRecheckPassed", { permissionType: "microphone" });

@@ -1,7 +1,7 @@
 {
   "name": "scribeshade-frontend",
   "private": true,
-  "version": "2.1.43",
+  "version": "2.1.44",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -15,7 +15,8 @@
     "mac:verify": "bash scripts/verify-macos-app.sh /Applications/ScribeShade.app",
     "mac:import-self-signed-cert": "bash scripts/import-self-signed-cert.sh",
     "mac:verify-app": "bash scripts/verify-macos-app.sh",
-    "mac:notarize-dmg": "bash scripts/notarize-and-staple-dmg.sh"
+    "mac:notarize-dmg": "bash scripts/notarize-and-staple-dmg.sh",
+    "doctor": "npx react-doctor@latest"
   },
   "dependencies": {
     "@clerk/clerk-react": "^5.61.3",
@@ -77,6 +78,7 @@
     "@types/react-syntax-highlighter": "^15.5.13",
     "@vitejs/plugin-react": "^4.6.0",
     "jspdf": "^4.2.1",
+    "react-doctor": "^0.5.1",
     "tailwindcss": "^4.2.1",
     "typescript": "~5.8.3",
     "vite": "^7.0.4"

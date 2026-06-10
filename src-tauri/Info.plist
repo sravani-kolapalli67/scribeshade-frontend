@@ -22,6 +22,14 @@
     </dict>
   </array>
 
+  <!-- Hide this app from the Dock, Cmd+Tab switcher, and menu bar.
+       ScribeShade is a screen overlay — it should behave like a system utility,
+       not a regular foreground app. setActivationPolicy("regular") in
+       open_main_dashboard can temporarily override this when the full dashboard
+       window is open; show_launcher_widget restores "accessory" on close. -->
+  <key>LSUIElement</key>
+  <true/>
+
   <!-- Required for getDisplayMedia audio — WKWebView checks this key before
        offering the "Include audio" / "Share tab audio" toggle in the macOS
        screen-share picker. Without it the toggle is hidden and the stream

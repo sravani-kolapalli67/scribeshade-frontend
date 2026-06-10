@@ -3046,8 +3046,22 @@ async fn open_main_dashboard(
     // hidden background session-processor (e.g. event bus for the mini overlay).
     visible: Option<bool>,
 ) -> Result<(), String> {
+    // Switch to Regular so the main dashboard gets a menu bar and Dock icon —
+    // required for the window to receive keyboard events normally. Immediately
+    // re-assert the overlay window levels so they don't slip behind during the
+    // brief policy transition (the 500 ms reinforce loop would recover them,
+    // but this closes the visible gap).
     #[cfg(target_os = "macos")]
-    let _ = set_macos_activation_policy("regular".to_string());
+    {
+        let _ = set_macos_activation_policy("regular".to_string());
+        for label in ["launcher", "mini"] {
+            if let Some(win) = app.get_webview_window(label) {
+                if win.is_visible().unwrap_or(false) {
+                    reinforce_window_level(&win);
+                }
+            }
+        }
+    }
     // ── 1. Create the main window lazily — only when the user explicitly needs it ──
     let is_new_window = app.get_webview_window("main").is_none();
 
@@ -3104,6 +3118,31 @@ async fn open_main_dashboard(
     // Ensure decorations are always off, even if the window was reused from a
     // previous call that predates this setting being added to the builder.
     main_win.set_decorations(false).map_err(|e| e.to_string())?;
+
+    // When the main dashboard is hidden or closed, restore accessory policy so
+    // the app disappears from the Dock and Cmd+Tab again (overlay-only mode).
+    // Also re-assert overlay window levels so the launcher/mini stay on top.
+    #[cfg(target_os = "macos")]
+    {
+        let close_handle = app.clone();
+        main_win.on_window_event(move |event| {
+            let should_restore = matches!(
+                event,
+                tauri::WindowEvent::CloseRequested { .. }
+                    | tauri::WindowEvent::Destroyed
+            );
+            if should_restore {
+                let _ = set_macos_activation_policy("accessory".to_string());
+                for label in ["launcher", "mini"] {
+                    if let Some(win) = close_handle.get_webview_window(label) {
+                        if win.is_visible().unwrap_or(false) {
+                            reinforce_window_level(&win);
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     let _ = is_new_window;
 
@@ -3384,9 +3423,13 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .manage(DeepgramKey(deepgram_key))
         .setup(|app| {
-            // Default to Regular policy at boot; switch dynamically based on mode.
+            // LSUIElement = YES in Info.plist makes the app start as an accessory
+            // (no Dock icon, no menu bar, no Cmd+Tab) from the very first frame.
+            // No runtime policy switch is needed at boot; open_main_dashboard
+            // switches to "regular" when the full dashboard window is shown and
+            // restores "accessory" when it is hidden or closed.
             #[cfg(target_os = "macos")]
-            let _ = set_macos_activation_policy("regular".to_string());
+            let _ = set_macos_activation_policy("accessory".to_string());
 
             // ── Apply OS chrome removal to the mini overlay ────────────────
             #[cfg(target_os = "windows")]

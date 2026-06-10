@@ -435,6 +435,46 @@ function WidgetContent() {
     };
   }, [dispatch, refreshBalance, setCollapsed]);
 
+  // ── Click-away dismissal (macOS only) ─────────────────────────────────────
+  // Matches native transient-panel behavior (ChatGPT macOS overlay, Spotlight, etc.).
+  // When the launcher loses app-level focus the user clicked outside → hide.
+  //
+  // How it works: passthrough=true sends the click to the app below (Finder,
+  // Chrome, etc.). That app becomes active. WKWebView fires `window.blur`.
+  // We schedule a hide after 150 ms; `window.focus` cancels it if focus
+  // returns quickly (native dialog open/close, internal focus shift).
+  //
+  // Guards:
+  //   isSessionActive — session is live, launcher must stay visible
+  //   collapsed       — the small persistent icon is NOT a transient panel
+  useEffect(() => {
+    const ua = navigator.userAgent.toLowerCase();
+    if (!ua.includes("mac")) return;
+
+    let dismissTimer = 0;
+
+    const scheduleHide = () => {
+      if (isSessionActive || collapsed) return;
+      dismissTimer = window.setTimeout(() => {
+        win.hide().catch(console.error);
+      }, 150);
+    };
+
+    const cancelHide = () => {
+      clearTimeout(dismissTimer);
+      dismissTimer = 0;
+    };
+
+    window.addEventListener("blur", scheduleHide);
+    window.addEventListener("focus", cancelHide);
+
+    return () => {
+      window.removeEventListener("blur", scheduleHide);
+      window.removeEventListener("focus", cancelHide);
+      clearTimeout(dismissTimer);
+    };
+  }, [isSessionActive, collapsed, win]);
+
   // ── Windows WebView2 Fallback Recovery for Collapsed Icon ─────────────────
   // When switching from a large card to a tiny icon, the WebView2 compositor
   // can lose the dirty rect if the transparent window temporarily empties
