@@ -12,20 +12,32 @@ interface UseCursorPassthroughOptions {
  * based on whether the cursor overlaps a [data-interactive] element.
  *
  * CRITICAL: WKWebView/WebView2 receives ZERO mouse events while pass-through
- * is ON, so we cannot use mousemove. We use a Rust command + RAF polling.
+ * is ON, so we cannot use mousemove. We poll a Rust command on a setTimeout
+ * chain.
  *
- * Windows performance notes:
- * - A concurrent-tick guard (isTickRunning) prevents IPC backlog: if the
- *   previous tick's await is still pending when the next interval fires, the
- *   new tick is skipped rather than stacking another in-flight IPC call.
- * - The base poll interval is 120 ms on Windows (~8 fps) vs 16 ms on macOS
- *   (~60 fps). 8 fps is imperceptible for hit-testing; it reduces IPC load
- *   by ~3× compared to the previous 42 ms setting.
- * - Adaptive throttling doubles the interval to 240 ms after 6 consecutive
- *   cycles with no passthrough-state change, and resets on any change.
- * - Both physical and logical coordinate conversions are tested on all
- *   platforms so non-100% DPI scaling on Windows (125 %, 150 %) doesn't
- *   cause hit-tests to silently miss interactive regions.
+ * Key design constraints:
+ *
+ * 1. Loop immortality — the continuation MUST be in the outermost finally block
+ *    so the loop survives every exit path: early return (forcePassthrough /
+ *    isDragging), exceptions, and concurrent-skip guards. Any `return` inside
+ *    a try block skips code after that block, so a single missed scheduling
+ *    call kills the loop permanently. Previously the continuation was outside
+ *    the try/finally, so early returns murdered it.
+ *
+ * 2. setTimeout, not RAF — WKWebView pauses requestAnimationFrame callbacks
+ *    while ScribeShade is not the active macOS application. setTimeout keeps
+ *    firing while deactivated, so the cursor poll continues and passthrough
+ *    recovers (window becomes interactive) BEFORE the user's first click back.
+ *
+ * 3. macOS watchdog — every REASSERT_INTERVAL_MS the desired native state is
+ *    re-applied even if our cached JS value is unchanged, bounding any
+ *    JS/native desync to that interval. Disabled on Windows (would reintroduce
+ *    DWM surface flicker from excessive setIgnoreCursorEvents churn, WN1/WN6).
+ *
+ * 4. Blur cache invalidation — on app deactivation we drop the window-bounds /
+ *    scale cache and clear lastPassthrough so the very next poll re-asserts
+ *    native state from scratch, eliminating any desync without waiting for the
+ *    watchdog.
  */
 export function useCursorPassthrough({
   isDraggingRef,
@@ -33,46 +45,48 @@ export function useCursorPassthrough({
   forcePassthrough = false,
 }: UseCursorPassthroughOptions): void {
   useEffect(() => {
-    let raf = 0;
+    let timer = 0;
     let startTimeout = 0;
     let cancelled = false;
     // Prevent concurrent ticks: if an IPC await is still pending when the
-    // next scheduled tick fires, skip it instead of queuing another call.
+    // next scheduled tick fires, skip the body but still schedule the next.
     let isTickRunning = false;
     let lastPassthrough: boolean | null = null;
     let cachedScale = 1;
     let cachedWinPos = { x: 0, y: 0 };
     let lastCacheUpdate = 0;
     let idleCycles = 0;
+    let lastReassert = 0;
 
     const ua = navigator.userAgent.toLowerCase();
     const isWindows = ua.includes("windows");
-    // Base interval: 120 ms on Windows (~8 fps), 16 ms on macOS (~60 fps).
     const POLL_BASE_MS = isWindows ? 120 : 32;
-    // Slow-idle interval: used after 6+ cycles with no state change.
     const POLL_IDLE_MS = isWindows ? 240 : 64;
     const IDLE_THRESHOLD = 6;
-    // On Windows the launcher window never moves during normal use; scale factor
-    // never changes mid-session. 500 ms was too aggressive — every cache miss fires
-    // getOuterPosition + getScaleFactor + getCursorPosition in the same tick (3–4
-    // IPC round-trips at once). 2000 ms cuts bursts from 2×/sec to 0.5×/sec.
     const CACHE_TTL_MS = isWindows ? 2000 : 500;
+    // Re-assert native passthrough state every 200 ms on macOS to bound any
+    // JS/native desync after Space transitions, deactivation, etc.
+    // Kept tighter than the previous 400 ms for faster first-click recovery.
+    const REASSERT_INTERVAL_MS = 200;
 
-    async function setPassthrough(p: boolean) {
+    async function setPassthrough(p: boolean, force = false) {
       if (cancelled) return;
-      if (p === lastPassthrough) return;
+      const changed = p !== lastPassthrough;
+      if (!changed && !force) return;
       lastPassthrough = p;
-      idleCycles = 0;
+      if (changed) idleCycles = 0;
       try {
         await tauriOverlay.setIgnoreCursorEvents(p);
+        if (changed) {
+          console.debug(
+            `[passthrough] state -> ${p ? "PASSTHROUGH" : "INTERACTIVE"}`,
+          );
+        }
       } catch (e) {
-        console.error("[passthrough]", e);
+        console.error("[passthrough] setIgnoreCursorEvents failed", e);
       }
     }
 
-    // Collect all interactive rects in one querySelectorAll + getBoundingClientRect
-    // pass. Callers test multiple coordinate sets (physical + logical) against the
-    // same snapshot, halving the forced-layout count per tick on Windows.
     function collectInteractiveRects(): DOMRect[] {
       const nodes = document.querySelectorAll<HTMLElement>("[data-interactive]");
       const rects: DOMRect[] = [];
@@ -90,23 +104,18 @@ export function useCursorPassthrough({
       return false;
     }
 
-    async function tick() {
-      // Skip if cancelled or the previous tick's IPC calls are still pending.
-      if (cancelled || isTickRunning) return;
-      isTickRunning = true;
+    async function runTickBody() {
+      // forcePassthrough / isDragging / forceInteractive are fast paths that do
+      // not need cursor-position IPC. They no longer use early `return` — instead
+      // they just resolve `desired` and fall through to the single setPassthrough
+      // call, so the outer finally always schedules the next tick.
+      let desired: boolean;
 
-      try {
-        if (forcePassthrough) {
-          await setPassthrough(true);
-          return;
-        }
-
-        if (isDraggingRef.current || forceInteractive) {
-          await setPassthrough(false);
-          return;
-        }
-
-        // Refresh window position + scale cache every 500 ms.
+      if (forcePassthrough) {
+        desired = true;
+      } else if (isDraggingRef.current || forceInteractive) {
+        desired = false;
+      } else {
         const now = performance.now();
         if (now - lastCacheUpdate > CACHE_TTL_MS) {
           lastCacheUpdate = now;
@@ -120,36 +129,63 @@ export function useCursorPassthrough({
 
         const [gx, gy] = await tauriOverlay.getCursorPosition();
 
-        // Test both physical (DPI-scaled) and logical (CSS pixel) coordinates
-        // on all platforms. This handles Windows 125 %/150 % DPI scaling and
-        // macOS Retina ambiguity — whichever coordinate space getBoundingClientRect
-        // happens to report, one of the two conversions will match.
-        const localPhysicalX = (gx - cachedWinPos.x) / cachedScale;
-        const localPhysicalY = (gy - cachedWinPos.y) / cachedScale;
-        const localLogicalX = gx - cachedWinPos.x;
-        const localLogicalY = gy - cachedWinPos.y;
+        // Test both physical and logical coordinate conversions so DPI scaling
+        // ambiguity (Retina macOS, Windows 125%/150%) never causes a miss.
+        const localPhysX = (gx - cachedWinPos.x) / cachedScale;
+        const localPhysY = (gy - cachedWinPos.y) / cachedScale;
+        const localLogX = gx - cachedWinPos.x;
+        const localLogY = gy - cachedWinPos.y;
 
         const rects = collectInteractiveRects();
         const over =
-          isPointInRects(rects, localPhysicalX, localPhysicalY) ||
-          isPointInRects(rects, localLogicalX, localLogicalY);
+          isPointInRects(rects, localPhysX, localPhysY) ||
+          isPointInRects(rects, localLogX, localLogY);
+
+        desired = !over;
+
+        // macOS watchdog: periodically force-re-assert native state to bound
+        // JS/native desync after deactivation or Space transitions.
+        const forceReassert = !isWindows && now - lastReassert > REASSERT_INTERVAL_MS;
+        if (forceReassert) lastReassert = now;
 
         const before = lastPassthrough;
-        await setPassthrough(!over);
+        await setPassthrough(desired, forceReassert);
         if (lastPassthrough === before) {
           idleCycles = Math.min(idleCycles + 1, IDLE_THRESHOLD + 1);
         }
-      } catch (e) {
-        console.debug("[passthrough] tick error", e);
-      } finally {
-        isTickRunning = false;
+        return; // already called setPassthrough above
       }
 
-      if (!cancelled) {
-        const interval = idleCycles >= IDLE_THRESHOLD ? POLL_IDLE_MS : POLL_BASE_MS;
-        raf = requestAnimationFrame(() => {
-          setTimeout(() => void tick(), interval);
-        });
+      // fast-path: forcePassthrough or isDragging/forceInteractive
+      await setPassthrough(desired);
+    }
+
+    async function tick() {
+      if (cancelled) return;
+
+      // The outermost finally ALWAYS schedules the next tick regardless of
+      // how the body exits: normal completion, early return (isTickRunning
+      // guard), or any thrown exception. This is the single most important
+      // invariant — without it the loop dies the first time the body is
+      // skipped or throws.
+      try {
+        if (isTickRunning) return;
+        isTickRunning = true;
+        try {
+          await runTickBody();
+        } catch (e) {
+          console.debug("[passthrough] tick error", e);
+        } finally {
+          isTickRunning = false;
+        }
+      } finally {
+        if (!cancelled) {
+          const interval = idleCycles >= IDLE_THRESHOLD ? POLL_IDLE_MS : POLL_BASE_MS;
+          // setTimeout keeps firing while the macOS app is deactivated.
+          // RAF pauses, which is why we switched: cursor state still updates
+          // so the window becomes interactive before the user's first click.
+          timer = window.setTimeout(() => void tick(), interval);
+        }
       }
     }
 
@@ -161,13 +197,25 @@ export function useCursorPassthrough({
         void setPassthrough(true);
       }
     };
-
     document.addEventListener("contextmenu", handleContextMenu, true);
 
-    // On Windows, delay polling start by 300 ms so the native window and
-    // WebView2 compositor are fully initialised before the first IPC call.
+    // On app deactivation: drop the window-bounds/scale cache and nullify
+    // lastPassthrough so the very next poll tick re-asserts native state
+    // unconditionally, eliminating any desync without waiting for the watchdog.
+    // blur/visibilitychange fire on focus events, not mouse events, so they
+    // work even while the window is in passthrough mode.
+    const invalidateForRecovery = () => {
+      lastCacheUpdate = 0;
+      lastPassthrough = null;
+      lastReassert = 0; // also reset watchdog so next tick is a force-reassert
+    };
+    const handleBlur = () => invalidateForRecovery();
+    const handleVisibility = () => { if (!document.hidden) invalidateForRecovery(); };
+    window.addEventListener("blur", handleBlur);
+    document.addEventListener("visibilitychange", handleVisibility);
+
     const scheduleFirstTick = () => {
-      raf = requestAnimationFrame(() => void tick());
+      timer = window.setTimeout(() => void tick(), 0);
     };
     if (isWindows) {
       startTimeout = window.setTimeout(scheduleFirstTick, 300);
@@ -178,8 +226,10 @@ export function useCursorPassthrough({
     return () => {
       cancelled = true;
       clearTimeout(startTimeout);
-      cancelAnimationFrame(raf);
+      clearTimeout(timer);
       document.removeEventListener("contextmenu", handleContextMenu, true);
+      window.removeEventListener("blur", handleBlur);
+      document.removeEventListener("visibilitychange", handleVisibility);
       tauriOverlay.setIgnoreCursorEvents(true).catch(console.error);
     };
   }, [forceInteractive, forcePassthrough, isDraggingRef]);

@@ -77,8 +77,20 @@ fn apply_macos_overlay_policy(
                     let _: () = objc2::msg_send![ptr, setHidesOnDeactivate: false];
                     let _: () = objc2::msg_send![ptr, setCanHide: false];
 
+                    // Always order front regardless of activation policy.
+                    // orderFrontRegardless brings the window to the front of its
+                    // compositor level WITHOUT making it the key window and without
+                    // requiring the app to be active. This is correct for both the
+                    // launcher (activate_app=true) and the mini overlay (activate_app=false).
+                    let _: () = objc2::msg_send![ptr, orderFrontRegardless];
+
+                    // Only steal key focus + make app active when explicitly requested
+                    // (i.e. the launcher, which the user deliberately clicked on).
+                    // The mini overlay must never call this — it is a passive transparent
+                    // surface and should never interrupt the user's active app (Google Meet
+                    // etc.). Calling activateIgnoringOtherApps on the mini window was the
+                    // root cause of the "can't focus back" bug.
                     if activate_app {
-                        let _: () = objc2::msg_send![ptr, orderFrontRegardless];
                         let _: () = objc2::msg_send![ns_app, activateIgnoringOtherApps: true];
                     }
                 }
@@ -660,6 +672,10 @@ async fn capture_screen(app: AppHandle, window: Window) -> Result<String, String
     println!(
         "[Analyze Screen][Timing][NativeCapture] lockWaitMs={lock_wait_ms} positionMs={position_ms} protectionEnableMs={protection_enable_ms} captureMs={capture_ms} restoreMs={restore_ms} encodeMs={encode_ms} totalMs={total_ms} original={original_width}x{original_height} resized={resized_width}x{resized_height} jpegBytes={jpeg_bytes} wasProtected={was_protected}"
     );
+    // In release builds the println above is compiled out, leaving these timing
+    // variables unused. Consume them here to suppress the warnings.
+    #[cfg(not(debug_assertions))]
+    let _ = (lock_wait_ms, position_ms, protection_enable_ms, capture_ms, restore_ms, encode_ms, total_ms, original_width, original_height);
 
     Ok(format!("data:image/jpeg;base64,{}", b64))
 }
@@ -744,8 +760,14 @@ async fn show_mini_top_center(app: AppHandle) -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
-        window.show().map_err(|e| e.to_string())?;
-        apply_macos_overlay_policy(&window, true)?;
+        // Do NOT call window.show() here. Tauri maps show() → makeKeyAndOrderFront,
+        // which makes the mini window the macOS key window and steals key focus from
+        // whatever app the user is actively using (Google Meet, browser, etc.).
+        // The mini overlay is a passive transparent surface — it must never become
+        // the key window or activate the app.
+        // apply_macos_overlay_policy(activate_app=false) uses orderFrontRegardless
+        // instead: window becomes visible and front-of-level without stealing focus.
+        apply_macos_overlay_policy(&window, false)?;
     }
 
     // ── Windows ───────────────────────────────────────────────────────────
@@ -760,10 +782,12 @@ async fn show_mini_top_center(app: AppHandle) -> Result<(), String> {
     {
         window.show().map_err(|e| e.to_string())?;
         if let Ok(hwnd) = window.hwnd() {
-            let raw = hwnd.0;
+            // Cast to isize before the closure. hwnd.0 is *mut c_void which is
+            // !Send; isize is Send and can safely cross the thread boundary.
+            let raw = hwnd.0 as isize;
             window
                 .run_on_main_thread(move || {
-                    let h = windows::Win32::Foundation::HWND(raw);
+                    let h = windows::Win32::Foundation::HWND(raw as *mut std::ffi::c_void);
                     let _ = winvd::pin_window(h);
                     remove_window_border(h);
                     unsafe {
@@ -2970,7 +2994,8 @@ fn handle_launcher_click(app: AppHandle) -> Result<(), String> {
         if let Some(mini) = app.get_webview_window("mini") {
             #[cfg(target_os = "macos")]
             {
-                let _ = apply_macos_overlay_policy(&mini, true);
+                // activate_app=false: mini overlay must not steal key focus.
+                let _ = apply_macos_overlay_policy(&mini, false);
                 set_overlay_passthrough(&mini);
             }
             #[cfg(not(target_os = "macos"))]
@@ -3182,10 +3207,12 @@ fn show_launcher_widget(app: AppHandle) -> Result<(), String> {
     {
         window.show().map_err(|e| e.to_string())?;
         if let Ok(hwnd) = window.hwnd() {
-            let raw = hwnd.0;
+            // Cast to isize before the closure. hwnd.0 is *mut c_void which is
+            // !Send; isize is Send and can safely cross the thread boundary.
+            let raw = hwnd.0 as isize;
             window
                 .run_on_main_thread(move || {
-                    let h = windows::Win32::Foundation::HWND(raw);
+                    let h = windows::Win32::Foundation::HWND(raw as *mut std::ffi::c_void);
                     let _ = winvd::pin_window(h);
                     remove_window_border(h);
                     unsafe {
@@ -3615,6 +3642,13 @@ pub fn run() {
                 if let Some(win) = app.get_webview_window("mini") {
                     let mini_handle = app.handle().clone();
                     win.on_window_event(move |event| {
+                        // NOTE: do NOT force passthrough on Focused(false). Forcing
+                        // setIgnoresMouseEvents(true) here desyncs the native state
+                        // from the JS poll's lastPassthrough cache: JS still believes
+                        // the window is interactive, its dedup skips re-applying, and
+                        // the first click after deactivation falls through. Passthrough
+                        // recovery is owned entirely by the cursor poll
+                        // (useCursorPassthrough), which re-asserts native state on blur.
                         if matches!(
                             event,
                             tauri::WindowEvent::Focused(true)
