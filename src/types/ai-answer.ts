@@ -60,6 +60,10 @@ export interface AIAnswerRequestPayload {
   selectedAnswerText?: string;
   selectedAnswerCodeBlocks?: string[];
   selectedAnswerTopic?: string;
+  latestAnswerId?: string;
+  latestAnswerQuestion?: string;
+  latestAnswerText?: string;
+  latestAnswerTopic?: string;
   selectedIntentId?: string;
   selectedAnswerIntentId?: string;
   answerClickMode?:
@@ -76,6 +80,8 @@ export interface AIAnswerRequestPayload {
     | "explain_existing_code"
     | "system_design";
   sourcePlatform?: "web" | "tauri";
+  activeInterviewMode?: string;
+  manualQueryType?: "full_question" | "short_followup" | "command" | "unknown";
   isRegenerate?: boolean;
   regenerateTargetAnswerId?: string;
   regenerateInstruction?: string;
@@ -85,13 +91,14 @@ export interface AIAnswerRequestPayload {
 export const AI_ANSWER_LIMITS = {
   recentTranscriptWindowMax: 60,
   previousAiAnswerMaxChars: 3000,
-  previousAiAnswersMax: 2,
+  previousAiAnswersMax: 3,
   previousAiAnswerQuestionMaxChars: 500,
   previousCodeBlocksMax: 2,
   previousCodeBlockMaxChars: 1500,
   selectedAnswerQuestionMaxChars: 500,
   selectedAnswerTextMaxChars: 3000,
   selectedAnswerTopicMaxChars: 80,
+  latestAnswerIdMaxChars: 120,
   regenerateTargetAnswerIdMaxChars: 120,
   regenerateInstructionMaxChars: 500,
 } as const;
@@ -110,19 +117,46 @@ export function extractCodeBlocks(text: string): string[] {
   return matches;
 }
 
+const SHORT_FOLLOWUP_COMMANDS = new Set([
+  "example",
+  "explain",
+  "explain it",
+  "give example",
+  "give me example",
+  "show example",
+  "more",
+  "why",
+  "how",
+  "continue",
+  "elaborate",
+]);
+
+function normalizeManualCommand(text: string): string {
+  return (text || "")
+    .toLowerCase()
+    .replace(/[?.!,;:]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function classifyManualQueryType(
+  text: string,
+): NonNullable<AIAnswerRequestPayload["manualQueryType"]> {
+  const normalized = normalizeManualCommand(text);
+  if (!normalized) return "unknown";
+  if (SHORT_FOLLOWUP_COMMANDS.has(normalized)) return "short_followup";
+  if (/^(click ai answer|clear transcript|enable automation|disable automation|next question|stop recording|start recording|open overlay|close overlay)$/i.test(normalized)) {
+    return "command";
+  }
+  if (/[?]/.test(text) || /^(what|why|how|when|where|which|who|can|could|would|should|is|are|do|does|did|explain|define|describe|tell me|write|implement|design)\b/i.test(text)) {
+    return "full_question";
+  }
+  return "unknown";
+}
+
 export function sanitizeAIAnswerPayload(
   payload: AIAnswerRequestPayload,
 ): AIAnswerRequestPayload {
-  const regenerateMode =
-    payload.isRegenerate === true ||
-    payload.answerClickMode === "regenerate_answer" ||
-    payload.answerClickMode === "reanswer_previous";
-  const selectedFollowupMode =
-    payload.answerClickMode === "answer_followup";
-  const previousAnswerMode =
-    regenerateMode ||
-    selectedFollowupMode ||
-    payload.activeQuestionDetection?.isFollowUp === true;
   const transcript = (payload.transcript || "").trim();
   const currentQuestion = payload.currentQuestion?.trim() || undefined;
   const patchedTranscript = payload.patchedTranscript?.trim() || undefined;
@@ -171,6 +205,18 @@ export function sanitizeAIAnswerPayload(
   const selectedAnswerTopic = payload.selectedAnswerTopic
     ? payload.selectedAnswerTopic.slice(0, AI_ANSWER_LIMITS.selectedAnswerTopicMaxChars)
     : undefined;
+  const latestAnswerId = payload.latestAnswerId
+    ? payload.latestAnswerId.slice(0, AI_ANSWER_LIMITS.latestAnswerIdMaxChars)
+    : undefined;
+  const latestAnswerQuestion = payload.latestAnswerQuestion
+    ? payload.latestAnswerQuestion.slice(0, AI_ANSWER_LIMITS.selectedAnswerQuestionMaxChars)
+    : undefined;
+  const latestAnswerText = payload.latestAnswerText
+    ? payload.latestAnswerText.slice(0, AI_ANSWER_LIMITS.selectedAnswerTextMaxChars)
+    : undefined;
+  const latestAnswerTopic = payload.latestAnswerTopic
+    ? payload.latestAnswerTopic.slice(0, AI_ANSWER_LIMITS.selectedAnswerTopicMaxChars)
+    : undefined;
   const regenerateTargetAnswerId = payload.regenerateTargetAnswerId
     ? payload.regenerateTargetAnswerId.slice(0, AI_ANSWER_LIMITS.regenerateTargetAnswerIdMaxChars)
     : undefined;
@@ -213,23 +259,25 @@ export function sanitizeAIAnswerPayload(
     ...(speakerSeparatedTranscript.length > 0
       ? { speakerSeparatedTranscript }
       : {}),
-    ...(previousAnswerMode && previousAiAnswer ? { previousAiAnswer } : {}),
-    ...(previousAnswerMode && previousAiAnswers.length > 0 ? { previousAiAnswers } : {}),
-    ...(previousAnswerMode && previousCodeBlocks.length > 0 ? { previousCodeBlocks } : {}),
-    ...(selectedFollowupMode || regenerateMode
-      ? {
-          ...(payload.selectedAnswerId ? { selectedAnswerId: payload.selectedAnswerId } : {}),
-          ...(selectedAnswerQuestion ? { selectedAnswerQuestion } : {}),
-          ...(selectedAnswerText ? { selectedAnswerText } : {}),
-          ...(selectedAnswerCodeBlocks.length > 0 ? { selectedAnswerCodeBlocks } : {}),
-          ...(selectedAnswerTopic ? { selectedAnswerTopic } : {}),
-        }
-      : {}),
+    ...(previousAiAnswer ? { previousAiAnswer } : {}),
+    ...(previousAiAnswers.length > 0 ? { previousAiAnswers } : {}),
+    ...(previousCodeBlocks.length > 0 ? { previousCodeBlocks } : {}),
+    ...(payload.selectedAnswerId ? { selectedAnswerId: payload.selectedAnswerId } : {}),
+    ...(selectedAnswerQuestion ? { selectedAnswerQuestion } : {}),
+    ...(selectedAnswerText ? { selectedAnswerText } : {}),
+    ...(selectedAnswerCodeBlocks.length > 0 ? { selectedAnswerCodeBlocks } : {}),
+    ...(selectedAnswerTopic ? { selectedAnswerTopic } : {}),
+    ...(latestAnswerId ? { latestAnswerId } : {}),
+    ...(latestAnswerQuestion ? { latestAnswerQuestion } : {}),
+    ...(latestAnswerText ? { latestAnswerText } : {}),
+    ...(latestAnswerTopic ? { latestAnswerTopic } : {}),
     ...(payload.selectedIntentId ? { selectedIntentId: payload.selectedIntentId } : {}),
     ...(payload.selectedAnswerIntentId ? { selectedAnswerIntentId: payload.selectedAnswerIntentId } : {}),
     ...(payload.answerClickMode ? { answerClickMode: payload.answerClickMode } : {}),
     ...(payload.answerMode ? { answerMode: payload.answerMode } : {}),
     ...(payload.sourcePlatform ? { sourcePlatform: payload.sourcePlatform } : {}),
+    ...(payload.activeInterviewMode ? { activeInterviewMode: payload.activeInterviewMode } : {}),
+    ...(payload.manualQueryType ? { manualQueryType: payload.manualQueryType } : {}),
     ...(payload.isCustomQuery ? { isCustomQuery: true } : {}),
     ...(payload.isRegenerate ? { isRegenerate: true } : {}),
     ...(regenerateTargetAnswerId ? { regenerateTargetAnswerId } : {}),

@@ -582,7 +582,6 @@ function normalizeProjectAnswerMarkdown(
 }
 
 // Answer Area
-const ANSWER_SCROLL_BOTTOM_THRESHOLD_PX = 48;
 
 interface AnswerAreaProps {
   responses: AIDisplayResponse[];
@@ -591,40 +590,23 @@ interface AnswerAreaProps {
 
 const AnswerArea = memo(function AnswerArea({ responses }: AnswerAreaProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const shouldFollowStreamRef = useRef(true);
   const activeResponse = responses[0];
   const activeResponseId = activeResponse?.messageId ?? "";
-  const activeResponseText = activeResponse?.text ?? "";
-
-  useEffect(() => {
-    shouldFollowStreamRef.current = true;
-  }, [activeResponseId]);
 
   useEffect(() => {
     const scrollElement = scrollRef.current;
-    if (!scrollElement || !shouldFollowStreamRef.current) return;
+    if (!scrollElement) return;
 
     const frameId = window.requestAnimationFrame(() => {
       scrollElement.scrollTop = scrollElement.scrollHeight;
     });
     return () => window.cancelAnimationFrame(frameId);
-  }, [activeResponseId, activeResponseText]);
-
-  const handleScroll = useCallback(() => {
-    const scrollElement = scrollRef.current;
-    if (!scrollElement) return;
-    const distanceFromBottom =
-      scrollElement.scrollHeight -
-      scrollElement.scrollTop -
-      scrollElement.clientHeight;
-    shouldFollowStreamRef.current =
-      distanceFromBottom <= ANSWER_SCROLL_BOTTOM_THRESHOLD_PX;
-  }, []);
+  // Only scroll when a new answer card starts — not on every streaming token.
+  }, [activeResponseId]);
 
   return (
     <div
       ref={scrollRef}
-      onScroll={handleScroll}
       className="max-h-[420px] overflow-y-auto overflow-x-hidden overscroll-contain p-4 space-y-4 no-scrollbar [contain:layout_paint]"
     >
       {responses.map((resp) => {

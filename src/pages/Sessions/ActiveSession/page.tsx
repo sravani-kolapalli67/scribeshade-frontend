@@ -1122,6 +1122,13 @@ export default function ActiveSession() {
   // Wire handleAiAnswer into the stable ref so handleTranscript can call it.
   handleAiAnswerRef.current = handleAiAnswer;
 
+  // Mutable refs kept fresh every render so handleStableTranscript can read
+  // the latest messages/aiChat without stale closure issues.
+  const messagesRef = useRef<Message[]>(messages);
+  messagesRef.current = messages;
+  const aiChatRef = useRef<Message[]>(aiChat);
+  aiChatRef.current = aiChat;
+
   // Stable ref for handleStableTranscript so the stabilizer callback always
   // invokes the latest version without recreating the stabilizer instance.
   const handleStableTranscriptRef = useRef<((t: string) => void) | null>(null);
@@ -1184,6 +1191,30 @@ export default function ActiveSession() {
       return;
     }
 
+    // Build adaptive context from latest transcript/AI state (same as manual
+    // path) so currentQuestion is properly extracted rather than being the raw
+    // stable blob. Uses refs so the callback does not go stale.
+    const adaptiveCtx = buildAdaptiveAiContext({
+      transcriptMessages: messagesRef.current
+        .filter(
+          (m) =>
+            (m.sender === "Interviewer" || m.sender === "User") && !!m.text?.trim(),
+        )
+        .map((m) => ({
+          sender: m.sender as "User" | "Interviewer",
+          text: m.text.trim(),
+          timestamp: m.timestamp,
+        })),
+      aiMessages: aiChatRef.current
+        .filter((m) => m.sender === "AI")
+        .map((m) => ({
+          sender: "AI" as const,
+          text: m.text,
+          question: m.question,
+        })),
+      liveInterimQuestion: stableTranscript,
+    });
+
     // Route based on classification
     if (classification.shouldGroup) {
       // Grouped scenario: ONE call with full transcript
@@ -1191,14 +1222,18 @@ export default function ActiveSession() {
         id,
         {
           transcript: stableTranscript,
-          currentQuestion: stableTranscript,
+          currentQuestion: adaptiveCtx.currentQuestion || stableTranscript,
+          recentTranscriptWindow: adaptiveCtx.recentTranscriptWindow,
+          speakerSeparatedTranscript: adaptiveCtx.speakerSeparatedTranscript,
+          previousAiAnswers: adaptiveCtx.previousAiAnswers,
           sourcePlatform: isTauri() ? "tauri" : "web",
           answerMode: "auto",
         },
         selectedModel,
       );
     } else {
-      // Independent questions: call for each segment with stagger
+      // Independent questions: call for each segment with stagger.
+      // Each segment is its own isolated question so it becomes currentQuestion.
       const segments = classification.segments;
       segments.forEach((segment, index) => {
         setTimeout(() => {
@@ -1207,6 +1242,9 @@ export default function ActiveSession() {
             {
               transcript: segment,
               currentQuestion: segment,
+              recentTranscriptWindow: adaptiveCtx.recentTranscriptWindow,
+              speakerSeparatedTranscript: adaptiveCtx.speakerSeparatedTranscript,
+              previousAiAnswers: adaptiveCtx.previousAiAnswers,
               sourcePlatform: isTauri() ? "tauri" : "web",
               answerMode: "auto",
             },

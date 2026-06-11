@@ -7,6 +7,7 @@ import {
   type QuestionMeta,
   sanitizeAIAnswerPayload,
   resolveQueryFromAIAnswerPayload,
+  classifyManualQueryType,
 } from "@/types/ai-answer";
 import { isTauri } from "@/lib/utils";
 import {
@@ -104,6 +105,31 @@ function buildOriginalGenerationContextFromPayload(
     ...(recentTranscriptWindow.length > 0 ? { recentTranscriptWindow } : {}),
     ...(speakerSeparatedTranscript.length > 0 ? { speakerSeparatedTranscript } : {}),
     ...(previousAiAnswers.length > 0 ? { previousAiAnswers } : {}),
+    ...(payload.latestAnswerId ? { latestAnswerId: payload.latestAnswerId } : {}),
+    ...(payload.latestAnswerQuestion
+      ? {
+          latestAnswerQuestion: payload.latestAnswerQuestion.slice(
+            0,
+            AI_ANSWER_LIMITS.selectedAnswerQuestionMaxChars,
+          ),
+        }
+      : {}),
+    ...(payload.latestAnswerText
+      ? {
+          latestAnswerText: payload.latestAnswerText.slice(
+            0,
+            AI_ANSWER_LIMITS.selectedAnswerTextMaxChars,
+          ),
+        }
+      : {}),
+    ...(payload.latestAnswerTopic
+      ? {
+          latestAnswerTopic: payload.latestAnswerTopic.slice(
+            0,
+            AI_ANSWER_LIMITS.selectedAnswerTopicMaxChars,
+          ),
+        }
+      : {}),
     ...(payload.selectedAnswerId ? { selectedAnswerId: payload.selectedAnswerId } : {}),
     ...(payload.selectedAnswerQuestion
       ? {
@@ -140,6 +166,8 @@ function buildOriginalGenerationContextFromPayload(
       : {}),
     ...(payload.requestId ? { requestId: payload.requestId } : {}),
     ...(payload.answerClickMode ? { answerClickMode: payload.answerClickMode } : {}),
+    ...(payload.manualQueryType ? { manualQueryType: payload.manualQueryType } : {}),
+    ...(payload.activeInterviewMode ? { activeInterviewMode: payload.activeInterviewMode } : {}),
     answerMode: payload.answerMode || "auto",
     sourcePlatform: payload.sourcePlatform || fallbackSourcePlatform,
     generatedAnswerText: "",
@@ -301,6 +329,84 @@ function extractQuestionCandidate(text: string): string {
       .map((line) => line.trim())
       .find((line) => line.endsWith("?")) ?? ""
   );
+}
+
+function isSuccessfulAiAnswerMessage(message: Message): boolean {
+  const text = message.text?.trim() || "";
+  if (message.sender !== "AI" || !text) return false;
+  if (NO_QUESTION_MARKER.test(text)) return false;
+  if (/^(sorry|i couldn't|screen analysis returned no content|no question found)/i.test(text)) {
+    return false;
+  }
+  return true;
+}
+
+function inferAnswerTopic(question: string, answer: string): string {
+  const text = `${question} ${answer}`.toLowerCase();
+  if (/\b(react|jsx|hooks?|component|useeffect|useref|usestate|usememo|usecallback)\b/.test(text)) {
+    return "react";
+  }
+  if (/\b(sql|postgres|postgresql|select|query|join|table|index)\b/.test(text)) {
+    return "sql";
+  }
+  if (/\b(pyspark|spark|databricks|dataframe|row_number|lag|lead|window function)\b/.test(text)) {
+    return "pyspark";
+  }
+  if (/\b(node|express|api|backend)\b/.test(text)) return "backend";
+  return "general";
+}
+
+function buildLatestAnswerContextPayload(
+  messages: Message[],
+): Partial<AIAnswerRequestPayload> {
+  const successfulAnswers = messages.filter(isSuccessfulAiAnswerMessage);
+  const previousAiAnswers = successfulAnswers
+    .slice(-AI_ANSWER_LIMITS.previousAiAnswersMax)
+    .map((message) => {
+      const answer =
+        message.originalGenerationContext?.generatedAnswerText?.trim() ||
+        message.text.trim();
+      const question =
+        message.question?.trim() ||
+        message.originalGenerationContext?.currentQuestion?.trim() ||
+        extractQuestionCandidate(answer);
+      const codeBlocks =
+        message.originalGenerationContext?.generatedCodeBlocks?.length
+          ? message.originalGenerationContext.generatedCodeBlocks
+          : extractCodeBlocks(answer);
+      return {
+        ...(question ? { question } : {}),
+        answer,
+        ...(codeBlocks.length > 0 ? { codeBlocks } : {}),
+      };
+    });
+  const latest = successfulAnswers[successfulAnswers.length - 1];
+  if (!latest) return {};
+
+  const latestAnswerText =
+    latest.originalGenerationContext?.generatedAnswerText?.trim() ||
+    latest.text.trim();
+  const latestAnswerQuestion =
+    latest.question?.trim() ||
+    latest.originalGenerationContext?.currentQuestion?.trim() ||
+    extractQuestionCandidate(latestAnswerText);
+  const latestCodeBlocks =
+    latest.originalGenerationContext?.generatedCodeBlocks?.length
+      ? latest.originalGenerationContext.generatedCodeBlocks
+      : extractCodeBlocks(latestAnswerText);
+  const latestAnswerTopic =
+    latest.questionMeta?.topic ||
+    inferAnswerTopic(latestAnswerQuestion, latestAnswerText);
+
+  return {
+    previousAiAnswer: latestAnswerText,
+    previousAiAnswers,
+    ...(latestCodeBlocks.length > 0 ? { previousCodeBlocks: latestCodeBlocks } : {}),
+    latestAnswerId: latest.id,
+    ...(latestAnswerQuestion ? { latestAnswerQuestion } : {}),
+    latestAnswerText,
+    latestAnswerTopic,
+  };
 }
 
 /**
@@ -1015,10 +1121,22 @@ export const useAIChat = () => {
       request: AIAnswerRequestInput,
       aiModel: string,
     ) => {
-      const basePayload = sanitizeAIAnswerPayload(
+      const rawPayload: AIAnswerRequestPayload =
         typeof request === "string"
           ? { transcript: request, currentQuestion: request }
-          : request,
+          : request;
+      const latestAnswerContext = buildLatestAnswerContextPayload(aiChatRef.current);
+      const manualQueryType =
+        rawPayload.manualQueryType ||
+        classifyManualQueryType(rawPayload.currentQuestion || rawPayload.transcript || "");
+      const basePayload = sanitizeAIAnswerPayload(
+        {
+          ...rawPayload,
+          ...latestAnswerContext,
+          transcript: rawPayload.transcript,
+          ...(rawPayload.currentQuestion ? { currentQuestion: rawPayload.currentQuestion } : {}),
+          manualQueryType,
+        },
       );
       const resolvedFromPayload = resolveQueryFromAIAnswerPayload(basePayload);
       const rawQuestion = deduplicateQuestionsInText(
@@ -1450,9 +1568,12 @@ export const useAIChat = () => {
         [];
       const transcriptForRequest = resolvedQuery;
       const runtimePlatform: "web" | "tauri" = isTauri() ? "tauri" : "web";
+      const latestAnswerContext = buildLatestAnswerContextPayload(aiChatRef.current);
+      const manualQueryType = classifyManualQueryType(resolvedQuery);
       console.log("[useAIChat] handleCustomQuery: Context built.", {
         previousAiAnswersCount: previousAiAnswers.length,
         recentTranscriptWindowCount: recentTranscriptWindow.length,
+        manualQueryType,
       });
 
       // Route through the unified generation pipeline
@@ -1501,12 +1622,22 @@ export const useAIChat = () => {
                   : {}),
                 ...(previousAiAnswers.length > 0
                   ? { previousAiAnswers }
-                  : {}),
-                previousAiAnswer: previousAiAnswer || undefined,
-                previousCodeBlocks,
+                  : latestAnswerContext.previousAiAnswers?.length
+                    ? { previousAiAnswers: latestAnswerContext.previousAiAnswers }
+                    : {}),
+                previousAiAnswer: previousAiAnswer || latestAnswerContext.previousAiAnswer,
+                previousCodeBlocks:
+                  previousCodeBlocks.length > 0
+                    ? previousCodeBlocks
+                    : latestAnswerContext.previousCodeBlocks || [],
+                latestAnswerId: latestAnswerContext.latestAnswerId,
+                latestAnswerQuestion: latestAnswerContext.latestAnswerQuestion,
+                latestAnswerText: latestAnswerContext.latestAnswerText,
+                latestAnswerTopic: latestAnswerContext.latestAnswerTopic,
                 sourcePlatform: runtimePlatform,
                 answerMode: "auto",
                 isCustomQuery: true,
+                manualQueryType,
               }),
               aiModel,
             }),
@@ -1526,12 +1657,22 @@ export const useAIChat = () => {
                   : {}),
                 ...(previousAiAnswers.length > 0
                   ? { previousAiAnswers }
-                  : {}),
-                previousAiAnswer: previousAiAnswer || undefined,
-                previousCodeBlocks,
+                  : latestAnswerContext.previousAiAnswers?.length
+                    ? { previousAiAnswers: latestAnswerContext.previousAiAnswers }
+                    : {}),
+                previousAiAnswer: previousAiAnswer || latestAnswerContext.previousAiAnswer,
+                previousCodeBlocks:
+                  previousCodeBlocks.length > 0
+                    ? previousCodeBlocks
+                    : latestAnswerContext.previousCodeBlocks || [],
+                latestAnswerId: latestAnswerContext.latestAnswerId,
+                latestAnswerQuestion: latestAnswerContext.latestAnswerQuestion,
+                latestAnswerText: latestAnswerContext.latestAnswerText,
+                latestAnswerTopic: latestAnswerContext.latestAnswerTopic,
                 sourcePlatform: runtimePlatform,
                 answerMode: "auto",
                 isCustomQuery: true,
+                manualQueryType,
               }),
               aiModel,
             });
@@ -1637,6 +1778,10 @@ export const useAIChat = () => {
         ...(cachedContext?.previousAiAnswers?.length
           ? { previousAiAnswers: cachedContext.previousAiAnswers }
           : {}),
+        ...(cachedContext?.latestAnswerId ? { latestAnswerId: cachedContext.latestAnswerId } : {}),
+        ...(cachedContext?.latestAnswerQuestion ? { latestAnswerQuestion: cachedContext.latestAnswerQuestion } : {}),
+        ...(cachedContext?.latestAnswerText ? { latestAnswerText: cachedContext.latestAnswerText } : {}),
+        ...(cachedContext?.latestAnswerTopic ? { latestAnswerTopic: cachedContext.latestAnswerTopic } : {}),
         ...(cachedContext?.selectedAnswerId ? { selectedAnswerId: cachedContext.selectedAnswerId } : {}),
         ...(cachedContext?.selectedAnswerQuestion ? { selectedAnswerQuestion: cachedContext.selectedAnswerQuestion } : {}),
         ...(cachedContext?.selectedAnswerText ? { selectedAnswerText: cachedContext.selectedAnswerText } : {}),

@@ -224,8 +224,21 @@ export function detectActiveQuestion(input: {
     return build(intent.cleanedQuestion, "user_transcript", intent.confidence);
   }
 
+  // Narrow the fallback to recent messages only (last 6, within 90 s) to
+  // avoid pulling in questions from earlier in the session.
+  const latestFallbackTs = normalizedMessages.reduce(
+    (max, m) => Math.max(max, m.timestamp || 0),
+    0,
+  );
+  const fallbackCutoff = latestFallbackTs > 0 ? latestFallbackTs - 90_000 : 0;
+  const recentFallbackSrc = normalizedMessages.filter(
+    (m) => (m.timestamp || 0) >= fallbackCutoff,
+  );
+  const fallbackPool = (
+    recentFallbackSrc.length >= 2 ? recentFallbackSrc : normalizedMessages
+  ).slice(-6);
   const fallbackMerged = mergeChunks(
-    normalizedMessages.slice(-12).map((m) => m.text || "").filter(Boolean),
+    fallbackPool.map((m) => m.text || "").filter(Boolean),
   );
   if (fallbackMerged && !isFillerPhrase(fallbackMerged)) {
     const latestQuestionChunk = fallbackMerged

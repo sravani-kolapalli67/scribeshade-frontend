@@ -598,6 +598,11 @@ export function classifyTranscriptComplexity(transcript: string): TranscriptComp
 // Main classification function
 // ---------------------------------------------------------------------------
 
+// Control/demo speech uttered by the candidate while operating the app.
+// These must never be treated as interview questions.
+const CONTROL_SPEECH_RE =
+  /\b(click\s+ai\s+answer|clear\s+transcript|enable\s+automation|disable\s+automation|next\s+question|stop\s+recording|start\s+recording|open\s+overlay|close\s+overlay|hey\s+scribe|okay\s+scribe|ai\s+answer)\b/i;
+
 export function classifyTranscript(
   transcript: string,
   previousContext?: string,
@@ -608,6 +613,16 @@ export function classifyTranscript(
       type: 'noise',
       shouldGroup: false,
       segments: [],
+      confidence: 1.0,
+    };
+  }
+
+  // --- Priority 0: Control/demo speech — block before any other check ---
+  if (CONTROL_SPEECH_RE.test(trimmed)) {
+    return {
+      type: 'noise',
+      shouldGroup: false,
+      segments: [trimmed],
       confidence: 1.0,
     };
   }

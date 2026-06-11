@@ -1,4 +1,4 @@
-import { extractCodeBlocks, normalizeSpeakerType } from "@/types/ai-answer";
+import { AI_ANSWER_LIMITS, extractCodeBlocks, normalizeSpeakerType } from "@/types/ai-answer";
 import { normalizeSttTranscript } from "@/features/session/transcript/stt-normalizer";
 
 const CONNECTOR_TAIL_RE = /\b(and|or|then|also|plus|because|so|where)\s*$/i;
@@ -182,14 +182,32 @@ function dedupeAndMergeEntries(
 function buildInterviewerCompoundQuestion(
   entries: AdaptiveTranscriptEntry[],
 ): string {
-  const interviewerChunks = entries
+  const RECENT_WINDOW_MS = 90_000;
+
+  // Prefer chunks from the last 90 s so old answered questions don't pollute
+  // the compound. Fall back to the full set when the window yields too few.
+  const latestTs = entries.reduce((max, e) => Math.max(max, e.timestamp ?? 0), 0);
+  const recentSrc =
+    latestTs > 0
+      ? entries.filter((e) => (e.timestamp ?? 0) >= latestTs - RECENT_WINDOW_MS)
+      : entries;
+  const sourceEntries = recentSrc.length >= 2 ? recentSrc : entries;
+
+  const interviewerChunks = sourceEntries
     .filter((entry) => entry.sender === "Interviewer")
     .map((entry) => entry.text.trim())
     .filter(Boolean);
   if (!interviewerChunks.length) return "";
-  const startIndex = interviewerChunks.findIndex((chunk) =>
-    INTERVIEW_PROMPT_START_RE.test(chunk),
-  );
+
+  // Find the LAST question-start marker to anchor to the most recent question.
+  let startIndex = -1;
+  for (let i = interviewerChunks.length - 1; i >= 0; i--) {
+    if (INTERVIEW_PROMPT_START_RE.test(interviewerChunks[i])) {
+      startIndex = i;
+      break;
+    }
+  }
+
   const interviewer =
     startIndex >= 0 ? interviewerChunks.slice(startIndex) : interviewerChunks;
   return interviewer
@@ -283,7 +301,7 @@ function buildPreviousAnswers(
 ): AdaptivePreviousAnswer[] {
   return aiMessages
     .filter((message) => (message.text || "").trim().length > 0)
-    .slice(-2)
+    .slice(-AI_ANSWER_LIMITS.previousAiAnswersMax)
     .map((message) => {
       const answer = (message.text || "").trim();
       const question = (message.question || "").trim();

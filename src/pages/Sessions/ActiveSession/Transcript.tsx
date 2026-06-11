@@ -32,6 +32,10 @@ export interface Message {
       answer: string;
       codeBlocks?: string[];
     }[];
+    latestAnswerId?: string;
+    latestAnswerQuestion?: string;
+    latestAnswerText?: string;
+    latestAnswerTopic?: string;
     selectedAnswerId?: string;
     selectedAnswerQuestion?: string;
     selectedAnswerText?: string;
@@ -52,6 +56,8 @@ export interface Message {
       | "explain_existing_code"
       | "system_design";
     sourcePlatform?: "web" | "tauri";
+    activeInterviewMode?: string;
+    manualQueryType?: "full_question" | "short_followup" | "command" | "unknown";
     generatedAnswerText?: string;
     generatedCodeBlocks?: string[];
   };
