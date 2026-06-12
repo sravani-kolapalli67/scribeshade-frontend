@@ -4181,7 +4181,7 @@ dependencies = [
 
 [[package]]
 name = "scribeshade-frontend"
-version = "2.1.46"
+version = "2.1.48"
 dependencies = [
  "axum",
  "base64 0.22.1",

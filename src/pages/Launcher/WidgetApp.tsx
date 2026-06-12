@@ -507,7 +507,8 @@ function WidgetContent() {
           position: "absolute",
           left: cardPos.x,
           top: cardPos.y,
-          opacity,
+          // Do NOT put opacity here — that makes text/icons fade too.
+          // Background-only transparency is applied to the card element below.
           pointerEvents: "auto",
         }}
       >
@@ -540,7 +541,8 @@ function WidgetContent() {
             >
       <div
         ref={cardRef}
-        className="relative rounded-3xl bg-white shadow-2xl shadow-black/20"
+        className="relative rounded-3xl shadow-2xl shadow-black/20"
+        style={{ backgroundColor: `rgba(255, 255, 255, ${opacity})` }}
       >
         <div
           ref={innerContentRef}

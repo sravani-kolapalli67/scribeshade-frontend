@@ -20,6 +20,20 @@ use deepgram::{DeepgramConfig, SttChannel, SystemHealthAtoms, SystemHealthPayloa
 
 static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Guards lazy event-handler registration on the mini window.
+/// The mini window is created on demand (first session start or 2 s background prewarm).
+/// `show_mini_top_center` registers CloseRequested/Resized/macOS-reinforce handlers
+/// exactly once regardless of which code path created the window first.
+static MINI_HANDLERS_REGISTERED: AtomicBool = AtomicBool::new(false);
+
+/// Tracks the last cursor passthrough state dispatched to Win32 so we can skip
+/// redundant SetWindowLongPtrW + SetWindowPos(SWP_FRAMECHANGED) calls.
+/// useCursorPassthrough fires at ~8 Hz; without dedup every tick queues a DWM
+/// flush to the UI thread even when passthrough hasn't changed — causing input
+/// lag under any concurrent render spike (AI answer, transcript update).
+#[cfg(target_os = "windows")]
+static CURSOR_PASSTHROUGH_STATE: AtomicBool = AtomicBool::new(false);
+
 /// Tracks the user's current Private Mode preference (content protection).
 /// false = normal mode (window visible in screenshots)
 /// true  = private mode (window hidden from screenshots)
@@ -316,11 +330,15 @@ fn emit_system_health_event(app: &AppHandle, generation: u64, state: &str) {
     }
     let payload = SystemHealthPayload {
         channel: "system".to_string(),
-        capture_running: SYSTEM_STT_RUNNING.load(Ordering::SeqCst),
-        deepgram_running: SYSTEM_DEEPGRAM_RUNNING.load(Ordering::SeqCst),
-        pcm_frames_sent: SYSTEM_PCM_FRAMES_SENT.load(Ordering::SeqCst),
-        last_pcm_at: SYSTEM_LAST_PCM_AT.load(Ordering::SeqCst),
-        empty_final_streak: SYSTEM_EMPTY_FINAL_STREAK.load(Ordering::SeqCst),
+        // Relaxed is sufficient for these display-only counters: they are never used
+        // to guard any critical section and are not synchronized with each other.
+        // SeqCst would issue a full memory barrier on every PCM callback (up to 1 kHz),
+        // serializing the entire CPU memory bus for no observable correctness benefit.
+        capture_running: SYSTEM_STT_RUNNING.load(Ordering::Relaxed),
+        deepgram_running: SYSTEM_DEEPGRAM_RUNNING.load(Ordering::Relaxed),
+        pcm_frames_sent: SYSTEM_PCM_FRAMES_SENT.load(Ordering::Relaxed),
+        last_pcm_at: SYSTEM_LAST_PCM_AT.load(Ordering::Relaxed),
+        empty_final_streak: SYSTEM_EMPTY_FINAL_STREAK.load(Ordering::Relaxed),
         generation,
         state: state.to_string(),
     };
@@ -685,8 +703,12 @@ async fn capture_screen(app: AppHandle, window: Window) -> Result<String, String
 async fn show_mini_top_center(app: AppHandle) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let _ = set_macos_activation_policy("accessory".to_string());
-    // The mini window is destroyed when a session ends (getCurrentWindow().close()).
-    // Re-create it with the same config as tauri.conf.json when it no longer exists.
+    // The mini window is created on first session start (not at app launch — doing so
+    // initializes a second WebView2/WKWebView instance at startup, adding 500 ms–2 s
+    // of cold-start overhead on Windows before the launcher even appears).
+    // The mini window may already exist (pre-warmed by the 2s background task in setup())
+    // or needs to be created now (first session before the prewarm fires).
+    // Either way, event handlers are registered lazily once via MINI_HANDLERS_REGISTERED.
     let window = match app.get_webview_window("mini") {
         Some(w) => w,
         None => WebviewWindowBuilder::new(
@@ -711,6 +733,71 @@ async fn show_mini_top_center(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?,
     };
 
+    // ── Lazy event-handler registration ──────────────────────────────────────
+    // Runs exactly once regardless of whether this window was just created above
+    // or was pre-warmed by the background task in setup(). The handlers live for
+    // the window's entire lifetime (CloseRequested prevents destruction).
+    if !MINI_HANDLERS_REGISTERED.swap(true, Ordering::Relaxed) {
+        // CloseRequested: hide instead of destroy to avoid GPU compositor flash.
+        // Resized: catch OS-level minimize → hide, restore launcher if idle.
+        {
+            let h = app.clone();
+            window.on_window_event(move |event| {
+                match event {
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        if let Some(w) = h.get_webview_window("mini") {
+                            let _ = w.hide();
+                        }
+                    }
+                    tauri::WindowEvent::Resized(_) => {
+                        if let Some(w) = h.get_webview_window("mini") {
+                            if w.is_minimized().unwrap_or(false) {
+                                let _ = w.hide();
+                                if !SESSION_ACTIVE.load(Ordering::SeqCst) {
+                                    if let Some(launcher) = h.get_webview_window("launcher") {
+                                        let _ = apply_overlay_policy_to_window(
+                                            &launcher,
+                                            OverlayMode::FullscreenOverlay,
+                                        );
+                                        #[cfg(not(target_os = "macos"))]
+                                        {
+                                            let _ = launcher.show();
+                                            let _ = launcher.set_focus();
+                                        }
+                                        set_overlay_passthrough(&launcher);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            });
+        }
+
+        // macOS: re-apply window level on Focused/Resized/Moved so the overlay
+        // stays above fullscreen apps after Space transitions.
+        // Do NOT force passthrough on Focused(false) — desyncs JS lastPassthrough cache.
+        #[cfg(target_os = "macos")]
+        {
+            let h = app.clone();
+            window.on_window_event(move |event| {
+                if matches!(
+                    event,
+                    tauri::WindowEvent::Focused(true)
+                        | tauri::WindowEvent::Resized(_)
+                        | tauri::WindowEvent::Moved(_)
+                        | tauri::WindowEvent::ScaleFactorChanged { .. }
+                ) {
+                    if let Some(w) = h.get_webview_window("mini") {
+                        reinforce_window_level(&w);
+                    }
+                }
+            });
+        }
+    }
+
     // Expand mini to fill the entire primary monitor — same architecture as
     // the launcher window.  The React overlay positions the widget card
     // absolutely at top-center; the fullscreen transparent host ensures
@@ -723,28 +810,7 @@ async fn show_mini_top_center(app: AppHandle) -> Result<(), String> {
     let screen = monitor.size();
     let mon_pos = monitor.position();
 
-    // On Windows, set_size/set_position/set_minimizable/set_maximizable route through
-    // Win32 SendMessage which requires the call to originate on the UI thread. Route
-    // through run_on_main_thread to avoid a cross-thread SendMessage round-trip.
-    // Other platforms make direct Cocoa/GTK calls that are safe from any thread.
-    #[cfg(target_os = "windows")]
-    {
-        let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
-        let w = window.clone();
-        let size = PhysicalSize::new(screen.width, screen.height);
-        let pos = PhysicalPosition { x: mon_pos.x, y: mon_pos.y };
-        app.run_on_main_thread(move || {
-            let result = (|| -> Result<(), String> {
-                w.set_size(size).map_err(|e| e.to_string())?;
-                w.set_position(pos).map_err(|e| e.to_string())?;
-                w.set_minimizable(false).map_err(|e| e.to_string())?;
-                w.set_maximizable(false).map_err(|e| e.to_string())?;
-                Ok(())
-            })();
-            let _ = tx.send(result);
-        }).map_err(|e| e.to_string())?;
-        rx.await.map_err(|_| "window thread dropped".to_string())??;
-    }
+    // ── Non-Windows: apply size/position directly (safe from any thread) ─────
     #[cfg(not(target_os = "windows"))]
     {
         window
@@ -756,6 +822,10 @@ async fn show_mini_top_center(app: AppHandle) -> Result<(), String> {
         window.set_minimizable(false).map_err(|e| e.to_string())?;
         window.set_maximizable(false).map_err(|e| e.to_string())?;
     }
+
+    // ── macOS / Linux overlay policy ──────────────────────────────────────
+    // Windows consolidates everything (incl. size/position) into one closure below.
+    #[cfg(not(target_os = "windows"))]
     apply_overlay_policy_to_window(&window, OverlayMode::FullscreenOverlay)?;
 
     #[cfg(target_os = "macos")]
@@ -771,33 +841,54 @@ async fn show_mini_top_center(app: AppHandle) -> Result<(), String> {
     }
 
     // ── Windows ───────────────────────────────────────────────────────────
-    // ShowWindow is safe cross-thread. The HWND-level operations below have strict
-    // thread-affinity requirements and must run on the window-owner (UI) thread:
-    //   winvd::pin_window  — VirtualDesktop COM, STA required
-    //   remove_window_border — DwmSetWindowAttribute + SetWindowLongPtrW, DWM stall
-    //   SetWindowSubclass  — MSDN: must be installed from the thread that owns the
-    //                         window; off-thread install silently breaks WM_NCCALCSIZE
-    //                         interception, leaving a visible NC border.
+    // ALL Win32 operations (size, position, overlay policy, HWND ops, show,
+    // passthrough) are consolidated into ONE fire-and-forget run_on_main_thread
+    // closure. Previously this was split across a blocking oneshot (size/pos) +
+    // two fire-and-forget dispatches (style + passthrough) — 3 dispatches total.
+    // The blocking oneshot forced the Tokio worker to wait 50–200 ms for the
+    // UI thread to acknowledge the size/pos calls. Eliminating the wait and
+    // including show() inside the same closure makes the overall sequence atomic
+    // from the UI thread's perspective: size → style → show → passthrough in one
+    // DWM compositor frame. The frontend's emitSessionInitWithHandshake uses a
+    // retry+ack handshake so it handles the window appearing slightly after
+    // invoke("show_mini_top_center") returns.
     #[cfg(target_os = "windows")]
     {
-        window.show().map_err(|e| e.to_string())?;
-        if let Ok(hwnd) = window.hwnd() {
-            // Cast to isize before the closure. hwnd.0 is *mut c_void which is
-            // !Send; isize is Send and can safely cross the thread boundary.
-            let raw = hwnd.0 as isize;
-            window
-                .run_on_main_thread(move || {
-                    let h = windows::Win32::Foundation::HWND(raw as *mut std::ffi::c_void);
-                    let _ = winvd::pin_window(h);
-                    remove_window_border(h);
-                    unsafe {
-                        let _ = windows::Win32::UI::Shell::SetWindowSubclass(
-                            h, Some(mini_subclass_proc), 1, 0,
-                        );
-                    }
-                })
-                .map_err(|e| e.to_string())?;
-        }
+        let raw = window.hwnd().map(|h| h.0 as isize);
+        let w = window.clone();
+        let size = PhysicalSize::new(screen.width, screen.height);
+        let pos = PhysicalPosition { x: mon_pos.x, y: mon_pos.y };
+        window.run_on_main_thread(move || {
+            // Size and position first so the window paints correctly on show()
+            let _ = w.set_size(size);
+            let _ = w.set_position(pos);
+            let _ = w.set_minimizable(false);
+            let _ = w.set_maximizable(false);
+            // Overlay policy
+            let _ = w.set_always_on_top(true);
+            let _ = w.set_visible_on_all_workspaces(true);
+            let _ = w.set_skip_taskbar(true);
+            let _ = w.set_decorations(false);
+            let _ = w.set_shadow(false);
+            // HWND ops: thread-affinity required
+            //   winvd::pin_window  — VirtualDesktop COM, STA required
+            //   remove_window_border — DwmSetWindowAttribute + SetWindowLongPtrW
+            //   SetWindowSubclass  — must be installed from the window-owner thread
+            if let Ok(raw_val) = raw {
+                let h = windows::Win32::Foundation::HWND(raw_val as *mut std::ffi::c_void);
+                let _ = winvd::pin_window(h);
+                remove_window_border(h);
+                unsafe {
+                    let _ = windows::Win32::UI::Shell::SetWindowSubclass(
+                        h, Some(mini_subclass_proc), 1, 0,
+                    );
+                }
+            }
+            // Show after size + style are committed so no flash of wrong geometry
+            let _ = w.show();
+            // Passthrough
+            let _ = w.set_ignore_cursor_events(true);
+        }).map_err(|e| e.to_string())?;
     }
 
     // ── Linux ─────────────────────────────────────────────────────────────
@@ -807,9 +898,13 @@ async fn show_mini_top_center(app: AppHandle) -> Result<(), String> {
     }
 
     // On macOS focus is handled by activateIgnoringOtherApps in the block above.
-    #[cfg(not(target_os = "macos"))]
+    // On Windows set_focus is not called — the mini overlay is a passive transparent
+    // surface and must never steal key focus from the active app (Zoom, Meet, etc.).
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     window.set_focus().map_err(|e| e.to_string())?;
 
+    // Passthrough for non-Windows (Windows handles it in the consolidated closure).
+    #[cfg(not(target_os = "windows"))]
     set_overlay_passthrough(&window);
 
     Ok(())
@@ -1916,9 +2011,9 @@ async fn start_system_audio_transcription(
     let my_gen = SYSTEM_STT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     SYSTEM_STT_RUNNING.store(true, Ordering::SeqCst);
     SYSTEM_DEEPGRAM_RUNNING.store(false, Ordering::SeqCst);
-    SYSTEM_PCM_FRAMES_SENT.store(0, Ordering::SeqCst);
-    SYSTEM_LAST_PCM_AT.store(0, Ordering::SeqCst);
-    SYSTEM_EMPTY_FINAL_STREAK.store(0, Ordering::SeqCst);
+    SYSTEM_PCM_FRAMES_SENT.store(0, Ordering::Relaxed);
+    SYSTEM_LAST_PCM_AT.store(0, Ordering::Relaxed);
+    SYSTEM_EMPTY_FINAL_STREAK.store(0, Ordering::Relaxed);
     emit_system_health_event(&app, my_gen, "starting");
     #[cfg(debug_assertions)]
     eprintln!("[stt:system] systemCaptureStarted");
@@ -1995,8 +2090,8 @@ async fn start_system_audio_transcription(
                     }
                 }
                 if !pcm.is_empty() {
-                    let prev = SYSTEM_PCM_FRAMES_SENT.fetch_add(1, Ordering::SeqCst);
-                    SYSTEM_LAST_PCM_AT.store(now_epoch_millis_u64(), Ordering::SeqCst);
+                    let prev = SYSTEM_PCM_FRAMES_SENT.fetch_add(1, Ordering::Relaxed);
+                    SYSTEM_LAST_PCM_AT.store(now_epoch_millis_u64(), Ordering::Relaxed);
                     if prev == 0 {
                         #[cfg(debug_assertions)]
                         eprintln!("[stt:system] systemFirstPcmFrame");
@@ -2060,7 +2155,7 @@ async fn start_system_audio_transcription(
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            let last_pcm = SYSTEM_LAST_PCM_AT.load(Ordering::SeqCst);
+            let last_pcm = SYSTEM_LAST_PCM_AT.load(Ordering::Relaxed);
             if last_pcm == 0 {
                 continue;
             }
@@ -2116,7 +2211,7 @@ fn stop_system_audio_transcription() {
     SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
     SYSTEM_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
     SYSTEM_DEEPGRAM_RUNNING.store(false, Ordering::SeqCst);
-    SYSTEM_EMPTY_FINAL_STREAK.store(0, Ordering::SeqCst);
+    SYSTEM_EMPTY_FINAL_STREAK.store(0, Ordering::Relaxed);
 }
 
 // ── macOS: cpal mic → Deepgram ────────────────────────────────────────────────
@@ -2316,9 +2411,9 @@ async fn start_system_audio_transcription(
     let my_gen = SYSTEM_STT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     SYSTEM_STT_RUNNING.store(true, Ordering::SeqCst);
     SYSTEM_DEEPGRAM_RUNNING.store(false, Ordering::SeqCst);
-    SYSTEM_PCM_FRAMES_SENT.store(0, Ordering::SeqCst);
-    SYSTEM_LAST_PCM_AT.store(0, Ordering::SeqCst);
-    SYSTEM_EMPTY_FINAL_STREAK.store(0, Ordering::SeqCst);
+    SYSTEM_PCM_FRAMES_SENT.store(0, Ordering::Relaxed);
+    SYSTEM_LAST_PCM_AT.store(0, Ordering::Relaxed);
+    SYSTEM_EMPTY_FINAL_STREAK.store(0, Ordering::Relaxed);
     emit_system_health_event(&app, my_gen, "starting");
     #[cfg(debug_assertions)]
     eprintln!("[stt:system] systemCaptureStarted");
@@ -2342,8 +2437,8 @@ async fn start_system_audio_transcription(
                     let has_pcm = !pcm.is_empty();
                     let _ = tx.send(Arc::new(pcm));
                     if has_pcm {
-                        let prev = SYSTEM_PCM_FRAMES_SENT.fetch_add(1, Ordering::SeqCst);
-                        SYSTEM_LAST_PCM_AT.store(now_epoch_millis_u64(), Ordering::SeqCst);
+                        let prev = SYSTEM_PCM_FRAMES_SENT.fetch_add(1, Ordering::Relaxed);
+                        SYSTEM_LAST_PCM_AT.store(now_epoch_millis_u64(), Ordering::Relaxed);
                         if prev == 0 {
                             #[cfg(debug_assertions)]
                             eprintln!("[stt:system] systemFirstPcmFrame");
@@ -2367,8 +2462,8 @@ async fn start_system_audio_transcription(
                     let has_pcm = !pcm.is_empty();
                     let _ = tx.send(Arc::new(pcm));
                     if has_pcm {
-                        let prev = SYSTEM_PCM_FRAMES_SENT.fetch_add(1, Ordering::SeqCst);
-                        SYSTEM_LAST_PCM_AT.store(now_epoch_millis_u64(), Ordering::SeqCst);
+                        let prev = SYSTEM_PCM_FRAMES_SENT.fetch_add(1, Ordering::Relaxed);
+                        SYSTEM_LAST_PCM_AT.store(now_epoch_millis_u64(), Ordering::Relaxed);
                         if prev == 0 {
                             #[cfg(debug_assertions)]
                             eprintln!("[stt:system] systemFirstPcmFrame");
@@ -2439,7 +2534,7 @@ async fn start_system_audio_transcription(
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            let last_pcm = SYSTEM_LAST_PCM_AT.load(Ordering::SeqCst);
+            let last_pcm = SYSTEM_LAST_PCM_AT.load(Ordering::Relaxed);
             if last_pcm == 0 {
                 continue;
             }
@@ -2496,7 +2591,7 @@ fn stop_system_audio_transcription() {
     SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
     SYSTEM_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
     SYSTEM_DEEPGRAM_RUNNING.store(false, Ordering::SeqCst);
-    SYSTEM_EMPTY_FINAL_STREAK.store(0, Ordering::SeqCst);
+    SYSTEM_EMPTY_FINAL_STREAK.store(0, Ordering::Relaxed);
 }
 
 // ── Windows: cpal mic input → Deepgram ───────────────────────────────────────
@@ -3203,9 +3298,32 @@ async fn open_main_dashboard(
 fn show_launcher_widget(app: AppHandle) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let _ = set_macos_activation_policy("accessory".to_string());
-    let window = app
-        .get_webview_window("launcher")
-        .ok_or("launcher window not found")?;
+
+    // Launcher is created on first call (not pre-defined in tauri.conf.json) so
+    // that both overlay windows are managed entirely in Rust with identical patterns.
+    let window = match app.get_webview_window("launcher") {
+        Some(w) => w,
+        None => WebviewWindowBuilder::new(
+            &app,
+            "launcher",
+            WebviewUrl::App("launcher.html".into()),
+        )
+        .title("ScribeShade")
+        .inner_size(460f64, 260f64)
+        .transparent(true)
+        .shadow(false)
+        .decorations(false)
+        .always_on_top(true)
+        .minimizable(false)
+        .maximizable(false)
+        .resizable(false)
+        .skip_taskbar(true)
+        .visible(false)
+        .visible_on_all_workspaces(true)
+        .accept_first_mouse(true)
+        .build()
+        .map_err(|e| e.to_string())?,
+    };
 
     let monitor = window
         .primary_monitor()
@@ -3220,12 +3338,14 @@ fn show_launcher_widget(app: AppHandle) -> Result<(), String> {
     window
         .set_size(PhysicalSize::new(screen.width, screen.height))
         .map_err(|e| e.to_string())?;
-
     window
         .set_position(PhysicalPosition { x: mon_pos.x, y: mon_pos.y })
         .map_err(|e| e.to_string())?;
     window.set_minimizable(false).map_err(|e| e.to_string())?;
     window.set_maximizable(false).map_err(|e| e.to_string())?;
+
+    // ── macOS / Linux overlay policy ──────────────────────────────────────
+    #[cfg(not(target_os = "windows"))]
     apply_overlay_policy_to_window(&window, OverlayMode::FullscreenOverlay)?;
 
     #[cfg(target_os = "macos")]
@@ -3235,33 +3355,39 @@ fn show_launcher_widget(app: AppHandle) -> Result<(), String> {
     }
 
     // ── Windows ───────────────────────────────────────────────────────────
-    // ShowWindow is safe cross-thread. The HWND-level operations below have strict
-    // thread-affinity requirements and must run on the window-owner (UI) thread:
-    //   winvd::pin_window  — VirtualDesktop COM, STA required
-    //   remove_window_border — DwmSetWindowAttribute + SetWindowLongPtrW, DWM stall
-    //   SetWindowSubclass  — MSDN: must be installed from the thread that owns the
-    //                         window; off-thread install silently breaks WM_NCCALCSIZE
-    //                         interception, leaving a visible NC border.
+    // All HWND-level and style operations consolidated into ONE fire-and-forget
+    // run_on_main_thread closure (down from 3 separate dispatches), matching the
+    // pattern used in show_mini_top_center. Saves 2 UI-thread context switches and
+    // batches all DWM attribute changes into a single compositor notification:
+    //   Old dispatch 1: apply_overlay_policy_to_window → set_always_on_top etc.
+    //   Old dispatch 2: winvd::pin_window + remove_window_border + SetWindowSubclass
+    //   Old dispatch 3: set_overlay_passthrough → set_ignore_cursor_events
     #[cfg(target_os = "windows")]
     {
         window.show().map_err(|e| e.to_string())?;
-        if let Ok(hwnd) = window.hwnd() {
-            // Cast to isize before the closure. hwnd.0 is *mut c_void which is
-            // !Send; isize is Send and can safely cross the thread boundary.
-            let raw = hwnd.0 as isize;
-            window
-                .run_on_main_thread(move || {
-                    let h = windows::Win32::Foundation::HWND(raw as *mut std::ffi::c_void);
-                    let _ = winvd::pin_window(h);
-                    remove_window_border(h);
-                    unsafe {
-                        let _ = windows::Win32::UI::Shell::SetWindowSubclass(
-                            h, Some(mini_subclass_proc), 1, 0,
-                        );
-                    }
-                })
-                .map_err(|e| e.to_string())?;
-        }
+        let raw = window.hwnd().map(|h| h.0 as isize);
+        let w = window.clone();
+        window.run_on_main_thread(move || {
+            // Overlay policy
+            let _ = w.set_always_on_top(true);
+            let _ = w.set_visible_on_all_workspaces(true);
+            let _ = w.set_skip_taskbar(true);
+            let _ = w.set_decorations(false);
+            let _ = w.set_shadow(false);
+            // HWND ops: thread-affinity required
+            if let Ok(raw_val) = raw {
+                let h = windows::Win32::Foundation::HWND(raw_val as *mut std::ffi::c_void);
+                let _ = winvd::pin_window(h);
+                remove_window_border(h);
+                unsafe {
+                    let _ = windows::Win32::UI::Shell::SetWindowSubclass(
+                        h, Some(mini_subclass_proc), 1, 0,
+                    );
+                }
+            }
+            // Passthrough
+            let _ = w.set_ignore_cursor_events(true);
+        }).map_err(|e| e.to_string())?;
     }
 
     // ── Linux ─────────────────────────────────────────────────────────────
@@ -3270,10 +3396,12 @@ fn show_launcher_widget(app: AppHandle) -> Result<(), String> {
         window.show().map_err(|e| e.to_string())?;
     }
 
-    // macOS: focus handled by activateIgnoringOtherApps in the block above.
+    // macOS: focus handled by activateIgnoringOtherApps above.
     #[cfg(not(target_os = "macos"))]
     window.set_focus().map_err(|e| e.to_string())?;
 
+    // Passthrough for non-Windows (Windows handles it in the consolidated closure).
+    #[cfg(not(target_os = "windows"))]
     set_overlay_passthrough(&window);
 
     Ok(())
@@ -3318,23 +3446,25 @@ fn set_cursor_passthrough(window: Window, passthrough: bool) -> Result<(), Strin
     }
 
     // On Windows, set_ignore_cursor_events routes through Win32 SetWindowLongPtrW +
-    // SetWindowPos(SWP_FRAMECHANGED). Called from a Tokio worker this triggers the
-    // cross-thread SendMessage path — the worker BLOCKS until the Win32 message pump
-    // drains the call. useCursorPassthrough fires this 8×/second (120ms cadence);
-    // under any render spike (AI answer, transcript update) these 8 queued SendMessages
-    // stall the IPC thread → all concurrent invoke calls appear frozen to the user.
+    // SetWindowPos(SWP_FRAMECHANGED). Each call causes a DWM flush — visible as a
+    // brief input-lag spike on the UI thread. useCursorPassthrough fires at 8 Hz
+    // (120 ms cadence); posting 8 DWM flushes/sec to the UI thread under any render
+    // spike (AI answer, transcript update) stalls IPC → buttons appear frozen.
     //
-    // Fix: post fire-and-forget to the UI thread, matching the macOS pattern exactly.
-    // The caller does not need to wait for the Win32 commit; state is tracked client-
-    // side via lastPassthrough ref so redundant calls are already deduplicated.
+    // Fix 1: post fire-and-forget (no blocking wait on the calling Tokio worker).
+    // Fix 2: skip the dispatch entirely when the state hasn't changed (server-side
+    //   dedup via CURSOR_PASSTHROUGH_STATE, complementing the client-side lastPassthrough
+    //   ref). Together these reduce DWM flushes from ~8/s to at most 1 per state change.
     #[cfg(target_os = "windows")]
     {
-        let w = window.clone();
-        window
-            .run_on_main_thread(move || {
-                let _ = w.set_ignore_cursor_events(passthrough);
-            })
-            .map_err(|e| e.to_string())?;
+        if CURSOR_PASSTHROUGH_STATE.swap(passthrough, Ordering::Relaxed) != passthrough {
+            let w = window.clone();
+            window
+                .run_on_main_thread(move || {
+                    let _ = w.set_ignore_cursor_events(passthrough);
+                })
+                .map_err(|e| e.to_string())?;
+        }
     }
 
     // Linux: GTK/X11 set_ignore_cursor_events is safe from any thread; keep direct.
@@ -3455,11 +3585,47 @@ pub fn run() {
             if let Err(e) = show_launcher_widget(app.handle().clone()) {
                 eprintln!("[setup] show_launcher_widget failed: {e}");
             }
-            let _ = apply_overlay_policy_for_label(
-                &app.handle().clone(),
-                "launcher",
-                OverlayMode::FullscreenOverlay,
-            );
+            // apply_overlay_policy_for_label("launcher") omitted — show_launcher_widget
+            // already applies the full overlay policy (including macOS ObjC + Windows
+            // HWND ops) in its consolidated run_on_main_thread closure. Calling it again
+            // would queue a redundant dispatch and, on macOS, re-invoke the ObjC window
+            // property setters a third time with activate_app=false, partially undoing
+            // the activate_app=true call that brought the launcher to the front.
+
+            // ── Pre-warm the mini window ───────────────────────────────────
+            // Creating two WebView2/WKWebView instances simultaneously at startup
+            // doubles cold-start overhead. Instead: let the launcher render fully
+            // first, then create the mini window in the background after 2 s so it
+            // is ready (and its JS bundle JIT-compiled) before the first session starts.
+            // Event handlers are registered lazily by show_mini_top_center on first
+            // call via MINI_HANDLERS_REGISTERED — safe even if prewarm runs first.
+            {
+                let prewarm_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    if prewarm_handle.get_webview_window("mini").is_none() {
+                        let _ = WebviewWindowBuilder::new(
+                            &prewarm_handle,
+                            "mini",
+                            WebviewUrl::App("floating.html".into()),
+                        )
+                        .title("ScribeShade Floating Screen")
+                        .inner_size(700f64, 360f64)
+                        .transparent(true)
+                        .decorations(false)
+                        .always_on_top(true)
+                        .minimizable(false)
+                        .maximizable(false)
+                        .resizable(false)
+                        .skip_taskbar(true)
+                        .visible(false)
+                        .visible_on_all_workspaces(true)
+                        .accept_first_mouse(true)
+                        .content_protected(true)
+                        .build();
+                    }
+                });
+            }
 
             // ── Deep-link: handle auth ticket + bring widget to front ────
             // scribeshade://auth-callback?ticket=TOKEN  ← browser login flow
@@ -3555,73 +3721,6 @@ pub fn run() {
                 }
             }
 
-            // ── Mini window events ─────────────────────────────────────────
-            // When the active-session overlay is minimized, restore the widget.
-            if let Some(mini_win) = app.get_webview_window("mini") {
-                let mini_handle = app.handle().clone();
-                mini_win.on_window_event(move |event| {
-                    match event {
-                        tauri::WindowEvent::Resized(_) => {
-                            if let Some(mini) = mini_handle.get_webview_window("mini") {
-                                let minimized = mini.is_minimized().unwrap_or(false);
-                                #[cfg(debug_assertions)]
-                                println!("[Tauri][WindowLifecycle] mini resized; minimized={}", minimized);
-                                if minimized {
-                                    let _ = mini.hide();
-                                    #[cfg(debug_assertions)]
-                                    println!("[Tauri][WindowLifecycle] mini hidden after minimize event");
-                                    if !SESSION_ACTIVE.load(Ordering::SeqCst) {
-                                        if let Some(widget) = mini_handle.get_webview_window("launcher") {
-                                            let _ = apply_overlay_policy_to_window(
-                                                &widget,
-                                                OverlayMode::FullscreenOverlay,
-                                            );
-                                            #[cfg(target_os = "macos")]
-                                            {
-                                                let _ = apply_macos_overlay_policy(&widget, true);
-                                                set_overlay_passthrough(&widget);
-                                            }
-                                            #[cfg(not(target_os = "macos"))]
-                                            {
-                                                let _ = widget.show();
-                                                let _ = widget.set_focus();
-                                                set_overlay_passthrough(&widget);
-                                            }
-                                            #[cfg(debug_assertions)]
-                                            println!("[Tauri][WindowLifecycle] launcher restored after mini minimize");
-                                        }
-                                    }
-                                }
-                            } else {
-                                #[cfg(debug_assertions)]
-                                println!("[Tauri][WindowLifecycle] mini handle missing on resize event");
-                            }
-                        }
-                        // BUG FIX: Intercept close requests on the mini overlay.
-                        //
-                        // ROOT CAUSE: Calling `getCurrentWindow().close()` from the
-                        // frontend destroys the transparent + content-protected WKWebView.
-                        // During teardown the GPU compositor momentarily renders the
-                        // underlying framebuffer as solid black before the window
-                        // disappears — visible to all screen-share participants.
-                        //
-                        // FIX: Prevent the window from being destroyed. Hide it instead.
-                        // The window stays alive (just invisible) so the next session
-                        // can call show_mini_top_center without recreating anything.
-                        tauri::WindowEvent::CloseRequested { api, .. } => {
-                            api.prevent_close();
-                            if let Some(win) = mini_handle.get_webview_window("mini") {
-                                let _ = win.hide();
-                                println!("[Tauri][WindowLifecycle] mini close requested -> hide");
-                            } else {
-                                println!("[Tauri][WindowLifecycle] mini close requested but handle missing");
-                            }
-                        }
-                        _ => {}
-                    }
-                });
-            }
-
             // Cancellation flag for the macOS reinforce loop — set on launcher Destroyed.
             #[cfg(target_os = "macos")]
             let reinforce_stop = Arc::new(AtomicBool::new(false));
@@ -3681,30 +3780,6 @@ pub fn run() {
                     });
                 }
 
-                // mini overlay — shown during active sessions
-                if let Some(win) = app.get_webview_window("mini") {
-                    let mini_handle = app.handle().clone();
-                    win.on_window_event(move |event| {
-                        // NOTE: do NOT force passthrough on Focused(false). Forcing
-                        // setIgnoresMouseEvents(true) here desyncs the native state
-                        // from the JS poll's lastPassthrough cache: JS still believes
-                        // the window is interactive, its dedup skips re-applying, and
-                        // the first click after deactivation falls through. Passthrough
-                        // recovery is owned entirely by the cursor poll
-                        // (useCursorPassthrough), which re-asserts native state on blur.
-                        if matches!(
-                            event,
-                            tauri::WindowEvent::Focused(true)
-                                | tauri::WindowEvent::Resized(_)
-                                | tauri::WindowEvent::Moved(_)
-                                | tauri::WindowEvent::ScaleFactorChanged { .. }
-                        ) {
-                            if let Some(w) = mini_handle.get_webview_window("mini") {
-                                reinforce_window_level(&w);
-                            }
-                        }
-                    });
-                }
             }
 
             // ── macOS: Space-transition overlay reinforcement ─────────────────
@@ -3734,7 +3809,7 @@ pub fn run() {
                 let reinforce_stop_loop = reinforce_stop.clone();
                 tauri::async_runtime::spawn(async move {
                     loop {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
                         if reinforce_stop_loop.load(Ordering::Relaxed) { break; }
                         for label in ["launcher", "mini"] {
                             if let Some(win) = reinforce_handle.get_webview_window(label) {

@@ -52,14 +52,13 @@ export const FloatingSurface: React.FC<FloatingSurfaceProps> = ({
   children,
   divRef,
 }) => {
-  // Clamp opacity to a sane visible range.
-  // alpha controls the glass tint; blur scales with the same factor so that
-  // at low opacity the user sees the actual content behind the window
-  // (transparency), not a frosted blur.
   const opacityFactor = Math.min(1, Math.max(0.05, opacity));
   const alpha = opacityFactor * 0.95;
-  // 24px max blur (matches Tailwind's backdrop-blur-2xl) → 0 at full transparency.
   const blurPx = +(opacityFactor * 24).toFixed(1);
+  // Text-shadow strengthens as background fades so white text stays readable
+  // against any bright screen content behind the transparent window.
+  // At opacity=1 the shadow is zero (invisible); at opacity=0.2 it's ~0.6 alpha.
+  const shadowAlpha = +((1 - opacityFactor) * 0.75).toFixed(2);
 
   return (
     <div
@@ -112,6 +111,12 @@ export const FloatingSurface: React.FC<FloatingSurfaceProps> = ({
         style={{
           zIndex: 1,
           zoom,
+          // text-shadow scales in as background fades — keeps white text legible
+          // over any bright content on screen behind the transparent window.
+          // text-shadow does NOT promote a GPU layer (safe for WKWebView).
+          textShadow: shadowAlpha > 0.01
+            ? `0 1px 4px rgba(0,0,0,${shadowAlpha}), 0 0 2px rgba(0,0,0,${+(shadowAlpha * 0.5).toFixed(2)})`
+            : "none",
         }}
       >
         {children}
