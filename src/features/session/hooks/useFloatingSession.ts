@@ -193,6 +193,8 @@ const SYSTEM_HEALTH_LOG_INTERVAL_MS = 5000;
 const SYSTEM_RESTART_MAX_PER_WINDOW = 3;
 const SYSTEM_RESTART_WINDOW_MS = 60_000;
 const SYSTEM_RESTART_BUDGET_RESET_MS = 75_000;
+const SYSTEM_RESTART_COOLDOWN_MS = 12_000;
+const SYSTEM_TERMINAL_AUTO_RETRY_BLOCK_MS = 45_000;
 const EMPTY_FINAL_LOG_THRESHOLDS = [3, 6, 10] as const;
 const isDeepgramAuthFailureMessage = (value: string | null | undefined): boolean => {
   if (!value) return false;
@@ -672,6 +674,10 @@ export function useFloatingSession() {
   const [micInterimTranscript, setMicInterimTranscript] = useState("");
   const [tabStatus, setTabStatus] = useState<"idle" | "connecting" | "transcribing" | "error">("idle");
   const [tabError, setTabError] = useState<string | null>(null);
+  const tabStatusRef = useRef<"idle" | "connecting" | "transcribing" | "error">("idle");
+  const tabErrorRef = useRef<string | null>(null);
+  tabStatusRef.current = tabStatus;
+  tabErrorRef.current = tabError;
   const [tabErrorPermissionType, setTabErrorPermissionType] = useState<"microphone" | "screen-recording" | null>(null);
   const [permissionIdentity, setPermissionIdentity] = useState<MacAppIdentity | null>(null);
   const [permissionRequiresRestart, setPermissionRequiresRestart] = useState(false);
@@ -709,6 +715,7 @@ export function useFloatingSession() {
     lastPcmAt: number;
     lastPcmFramesSent: number;
     lastDeepgramRunningAt: number;
+    lastTerminalSystemAudioAt: number;
     captureRunning: boolean;
     deepgramRunning: boolean;
     healthState: string;
@@ -727,6 +734,7 @@ export function useFloatingSession() {
     lastPcmAt: 0,
     lastPcmFramesSent: 0,
     lastDeepgramRunningAt: 0,
+    lastTerminalSystemAudioAt: 0,
     captureRunning: false,
     deepgramRunning: false,
     healthState: "idle",
@@ -1427,6 +1435,13 @@ export function useFloatingSession() {
     if (systemReacquireInFlightRef.current) return;
     const now = Date.now();
     const health = systemHealthRef.current;
+    if (tabStatusRef.current === "error" || tabErrorRef.current) return;
+    if (health.lastTerminalSystemAudioAt > 0 && now - health.lastTerminalSystemAudioAt < SYSTEM_TERMINAL_AUTO_RETRY_BLOCK_MS) {
+      return;
+    }
+    if (health.lastSystemRestartAt > 0 && now - health.lastSystemRestartAt < SYSTEM_RESTART_COOLDOWN_MS) {
+      return;
+    }
     if (health.lastHealthyAt && now - health.lastHealthyAt >= SYSTEM_RESTART_BUDGET_RESET_MS) {
       health.systemRestartCount = 0;
       health.systemRestartWindowStartAt = now;
@@ -1567,9 +1582,11 @@ export function useFloatingSession() {
         const health = systemHealthRef.current;
         health.lastDeepgramRunningAt = now;
         health.lastHealthyAt = now;
+        health.lastTerminalSystemAudioAt = 0;
         setIsSystemStale(false);
       }
       if (status === "error" && error) {
+        systemHealthRef.current.lastTerminalSystemAudioAt = Date.now();
         setTabError(error);
         if (isDeepgramAuthFailureMessage(error)) {
           // Explicit auth failures are non-retryable until the key changes.
@@ -1595,6 +1612,10 @@ export function useFloatingSession() {
       }
       if (payload.state === "capturing" || payload.state === "connected") {
         health.lastHealthyAt = now;
+        health.lastTerminalSystemAudioAt = 0;
+      }
+      if (payload.state === "error" || payload.state === "stopped") {
+        health.lastTerminalSystemAudioAt = now;
       }
       if (import.meta.env.DEV) {
         const stateChanged = previousHealthStateRef.current !== health.healthState;
@@ -1654,6 +1675,7 @@ export function useFloatingSession() {
         lastPcmAt: 0,
         lastPcmFramesSent: 0,
         lastDeepgramRunningAt: 0,
+        lastTerminalSystemAudioAt: 0,
         captureRunning: false,
         deepgramRunning: false,
         healthState: "idle",
@@ -1710,8 +1732,14 @@ export function useFloatingSession() {
       const staleBySilenceWithWeakPcm = noMeaningful && weakPhysicalHealth;
       const staleByEmptyStorm = emptyFinalStorm && weakPhysicalHealth;
       const staleByNoEvents = noSystemEvents && weakPhysicalHealth;
-      const staleByExplicitHealth =
-        health.healthState === "error" || health.healthState === "starved" || health.healthState === "stopped";
+      const staleByExplicitHealth = health.healthState === "starved";
+      const terminalStopRecently =
+        health.lastTerminalSystemAudioAt > 0
+        && now - health.lastTerminalSystemAudioAt < SYSTEM_TERMINAL_AUTO_RETRY_BLOCK_MS;
+      if (terminalStopRecently || tabStatusRef.current === "error" || tabErrorRef.current) {
+        setIsSystemStale(true);
+        return;
+      }
       const stale = !healthySilentWindow
         && (staleBySilenceWithWeakPcm || staleByEmptyStorm || staleByNoEvents || deepgramDead || staleByExplicitHealth);
 

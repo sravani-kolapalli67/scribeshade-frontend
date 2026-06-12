@@ -287,6 +287,16 @@ fn now_epoch_millis_u64() -> u64 {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn average_i32_pcm_frame_to_i16(frame: &[i32]) -> i16 {
+    if frame.is_empty() {
+        return 0;
+    }
+    let sum: i64 = frame.iter().map(|&sample| sample as i64).sum();
+    let average = sum / frame.len() as i64;
+    (average >> 16).clamp(i16::MIN as i64, i16::MAX as i64) as i16
+}
+
 #[cfg(target_os = "macos")]
 fn current_macos_identity(app: &AppHandle) -> MacOsAppIdentity {
     let executable_path = std::env::current_exe()
@@ -2116,7 +2126,12 @@ async fn start_system_audio_transcription(
         let _ = stream.stop_capture();
         #[cfg(debug_assertions)]
         eprintln!("[stt:system] systemCaptureThreadExited");
-        emit_system_health_event(&app_capture, my_gen, "stopped");
+        let final_state = if SYSTEM_STT_GENERATION.load(Ordering::Relaxed) == my_gen {
+            "error"
+        } else {
+            "stopped"
+        };
+        emit_system_health_event(&app_capture, my_gen, final_state);
     });
 
     match tokio::time::timeout(std::time::Duration::from_secs(10), init_rx).await {
@@ -2374,7 +2389,6 @@ async fn start_system_audio_transcription(
     api_key: Option<String>,
 ) -> Result<(), String> {
     let api_key = resolve_deepgram_api_key(&dg_key, api_key);
-    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use tokio::sync::broadcast;
 
     // ── 3-state idempotency guard ─────────────────────────────────────────
@@ -2385,18 +2399,6 @@ async fn start_system_audio_transcription(
         Err(AUDIO_STARTING) => return Ok(()),
         Err(_) => return Ok(()),
     }
-
-    let host = cpal::default_host();
-    let device = host.default_output_device().ok_or_else(|| {
-        SYSTEM_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
-        "No output device for loopback".to_string()
-    })?;
-    let config = device.default_output_config().map_err(|e| {
-        SYSTEM_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
-        e.to_string()
-    })?;
-    let sample_rate = config.sample_rate().0;
-    let ch = config.channels() as usize;
 
     let (init_tx, init_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
     let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(128);
@@ -2413,7 +2415,32 @@ async fn start_system_audio_transcription(
     eprintln!("[stt:system] systemCaptureStarted");
 
     let app_capture = app.clone();
+    let (sample_rate_tx, sample_rate_rx) = tokio::sync::oneshot::channel::<u32>();
     std::thread::spawn(move || {
+        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+        let host = cpal::default_host();
+        let device = match host.default_output_device() {
+            Some(d) => d,
+            None => {
+                SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
+                SYSTEM_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+                let _ = init_tx.send(Err("No default output device found for WASAPI loopback.".to_string()));
+                return;
+            }
+        };
+        let config = match device.default_output_config() {
+            Ok(c) => c,
+            Err(e) => {
+                SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
+                SYSTEM_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+                let _ = init_tx.send(Err(format!("WASAPI loopback: failed to get output device config: {e}")));
+                return;
+            }
+        };
+        let sample_rate = config.sample_rate().0;
+        let ch = config.channels() as usize;
+        let _ = sample_rate_tx.send(sample_rate);
+
         let tx = tx_capture;
         let app_for_callback = app_capture.clone();
         let err_fn = |e| eprintln!("[wasapi-stt] stream error: {e}");
@@ -2468,6 +2495,29 @@ async fn start_system_audio_transcription(
                     }
                 }, err_fn, None,
             ),
+            cpal::SampleFormat::I32 => device.build_input_stream(
+                &config.into(),
+                move |data: &[i32], _| {
+                    if !SYSTEM_STT_RUNNING.load(Ordering::Relaxed) { return; }
+                    let pcm: Vec<u8> = data.chunks(ch).flat_map(|frame| {
+                        let mono = average_i32_pcm_frame_to_i16(frame);
+                        mono.to_le_bytes()
+                    }).collect();
+                    let has_pcm = !pcm.is_empty();
+                    let _ = tx.send(Arc::new(pcm));
+                    if has_pcm {
+                        let prev = SYSTEM_PCM_FRAMES_SENT.fetch_add(1, Ordering::Relaxed);
+                        SYSTEM_LAST_PCM_AT.store(now_epoch_millis_u64(), Ordering::Relaxed);
+                        if prev == 0 {
+                            #[cfg(debug_assertions)]
+                            eprintln!("[stt:system] systemFirstPcmFrame");
+                            emit_system_health_event(&app_for_callback, my_gen, "capturing");
+                        } else if prev % 50 == 0 {
+                            emit_system_health_event(&app_for_callback, my_gen, "capturing");
+                        }
+                    }
+                }, err_fn, None,
+            ),
             _ => {
                 SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
                 emit_system_health_event(&app_capture, my_gen, "error");
@@ -2492,7 +2542,12 @@ async fn start_system_audio_transcription(
                 }
                 #[cfg(debug_assertions)]
                 eprintln!("[stt:system] systemCaptureThreadExited");
-                emit_system_health_event(&app_capture, my_gen, "stopped");
+                let final_state = if SYSTEM_STT_GENERATION.load(Ordering::Relaxed) == my_gen {
+                    "error"
+                } else {
+                    "stopped"
+                };
+                emit_system_health_event(&app_capture, my_gen, final_state);
             }
             Err(e) => {
                 SYSTEM_STT_RUNNING.store(false, Ordering::SeqCst);
@@ -2519,6 +2574,7 @@ async fn start_system_audio_transcription(
             return Err("System audio STT stream timed out".into());
         }
     }
+    let sample_rate = sample_rate_rx.await.unwrap_or(48000);
     let app_watchdog = app.clone();
     tokio::spawn(async move {
         loop {
@@ -2600,7 +2656,6 @@ async fn start_mic_transcription(
     api_key: Option<String>,
 ) -> Result<(), String> {
     let api_key = resolve_deepgram_api_key(&dg_key, api_key);
-    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use tokio::sync::broadcast;
 
     // ── 3-state idempotency guard ─────────────────────────────────────────
@@ -2612,18 +2667,6 @@ async fn start_mic_transcription(
         Err(_) => return Ok(()),
     }
 
-    let host = cpal::default_host();
-    let device = host.default_input_device().ok_or_else(|| {
-        MIC_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
-        "No microphone found".to_string()
-    })?;
-    let config = device.default_input_config().map_err(|e| {
-        MIC_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
-        e.to_string()
-    })?;
-    let sample_rate = config.sample_rate().0;
-    let ch = config.channels() as usize;
-
     let (init_tx, init_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
     let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(256);
     let tx_arc = Arc::new(tx);
@@ -2631,7 +2674,32 @@ async fn start_mic_transcription(
     let my_gen = MIC_STT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     MIC_STT_RUNNING.store(true, Ordering::SeqCst);
 
+    let (mic_sr_tx, mic_sr_rx) = tokio::sync::oneshot::channel::<u32>();
     std::thread::spawn(move || {
+        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+        let host = cpal::default_host();
+        let device = match host.default_input_device() {
+            Some(d) => d,
+            None => {
+                MIC_STT_RUNNING.store(false, Ordering::SeqCst);
+                MIC_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+                let _ = init_tx.send(Err("No microphone found. Check Windows Settings → Privacy → Microphone.".to_string()));
+                return;
+            }
+        };
+        let config = match device.default_input_config() {
+            Ok(c) => c,
+            Err(e) => {
+                MIC_STT_RUNNING.store(false, Ordering::SeqCst);
+                MIC_STT_STATE.store(AUDIO_STOPPED, Ordering::SeqCst);
+                let _ = init_tx.send(Err(format!("Failed to get mic config: {e}")));
+                return;
+            }
+        };
+        let sample_rate = config.sample_rate().0;
+        let ch = config.channels() as usize;
+        let _ = mic_sr_tx.send(sample_rate);
+
         let tx = tx_capture;
         let err_fn = |e| eprintln!("[mic-stt-win] cpal error: {e}");
         let stream = match config.sample_format() {
@@ -2656,6 +2724,17 @@ async fn start_mic_transcription(
                         let sum: i32 = frame.iter().map(|&s| s as i32).sum();
                         let mono = (sum / frame.len() as i32)
                             .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                        mono.to_le_bytes()
+                    }).collect();
+                    let _ = tx.send(Arc::new(pcm));
+                }, err_fn, None,
+            ),
+            cpal::SampleFormat::I32 => device.build_input_stream(
+                &config.into(),
+                move |data: &[i32], _| {
+                    if !MIC_STT_RUNNING.load(Ordering::Relaxed) { return; }
+                    let pcm: Vec<u8> = data.chunks(ch).flat_map(|frame| {
+                        let mono = average_i32_pcm_frame_to_i16(frame);
                         mono.to_le_bytes()
                     }).collect();
                     let _ = tx.send(Arc::new(pcm));
@@ -2701,6 +2780,7 @@ async fn start_mic_transcription(
         }
     }
 
+    let sample_rate = mic_sr_rx.await.unwrap_or(48000);
     let deepgram_keyterms = normalize_deepgram_keyterms(&model, keyterms);
     let app_c = app.clone();
     tokio::spawn(async move {
