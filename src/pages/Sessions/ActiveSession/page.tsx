@@ -1228,6 +1228,7 @@ export default function ActiveSession() {
           previousAiAnswers: adaptiveCtx.previousAiAnswers,
           sourcePlatform: isTauri() ? "tauri" : "web",
           answerMode: "auto",
+          triggerSource: "auto",
         },
         selectedModel,
       );
@@ -1247,6 +1248,7 @@ export default function ActiveSession() {
               previousAiAnswers: adaptiveCtx.previousAiAnswers,
               sourcePlatform: isTauri() ? "tauri" : "web",
               answerMode: "auto",
+              triggerSource: "auto",
             },
             selectedModel,
           );
@@ -1820,6 +1822,7 @@ export default function ActiveSession() {
           }
         : {}),
       answerMode: "auto",
+      triggerSource: "manual_click",
       sourcePlatform: isTauri() ? "tauri" : "web",
     };
     console.log("[AI Answer][Timing][FE][Web]", {
@@ -2013,6 +2016,7 @@ export default function ActiveSession() {
   const onToggleMicRef = useRef(toggleTauriOrBrowserMic);
   const onClearRef = useRef(onClear);
   const endSessionNowRef = useRef(endSessionNow);
+  const isAiGenerationBusyRef = useRef(false);
 
   onAiAnswerRef.current = onAiAnswer;
   onAnalyzeScreenRef.current = onAnalyzeScreen;
@@ -2020,6 +2024,7 @@ export default function ActiveSession() {
   endSessionNowRef.current = endSessionNow;
   onToggleMicRef.current = toggleTauriOrBrowserMic;
   onClearRef.current = onClear;
+  isAiGenerationBusyRef.current = isAnswering || isAnalyzing;
 
   // Listen for overlay events (AI answer, analyze screen, exit)
   useEffect(() => {
@@ -2030,10 +2035,20 @@ export default function ActiveSession() {
       if (!isTauri()) return;
       const [u1, u2, u3, u4, uModel, u5, u6, u7, u8, u9] = await Promise.all([
         listen("overlay-ai-answer", () => {
-          if (active) onAiAnswerRef.current();
+          if (!active) return;
+          if (isAiGenerationBusyRef.current) {
+            console.log("[AI Answer][Dedup] overlay request ignored while generation is active");
+            return;
+          }
+          onAiAnswerRef.current();
         }),
         listen("overlay-analyze-screen", (event) => {
-          if (active) onAnalyzeScreenRef.current(event.payload);
+          if (!active) return;
+          if (isAiGenerationBusyRef.current) {
+            console.log("[Analyze Screen][Dedup] overlay request ignored while generation is active");
+            return;
+          }
+          onAnalyzeScreenRef.current(event.payload);
         }),
         listen("overlay-exit", async () => {
           if (active) {
@@ -2131,11 +2146,12 @@ export default function ActiveSession() {
       (messages.length === 0 &&
         !activeMicInterimTranscript &&
         !mergedTabInterimTranscript) ||
-      isAnswering,
+      isAnswering ||
+      isAnalyzing,
   });
 
   useKeyboardShortcut("k", onAnalyzeScreen, {
-    disabled: isAnalyzing,
+    disabled: isAnalyzing || isAnswering,
   });
 
   const transcriptProps = {

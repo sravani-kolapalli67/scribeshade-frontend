@@ -1262,6 +1262,9 @@ export const useAIChat = () => {
         controller,
       );
       if (!opAcquire.acquired) {
+        activeRequestIdRef.current = opAcquire.existing.requestId;
+        activeAbortControllerRef.current =
+          opAcquire.existing.controller || activeAbortControllerRef.current;
         console.warn("[AI Answer][Dedup] Ignored duplicate AI answer call while request is active", {
           sessionId,
           requestId,
@@ -1325,6 +1328,18 @@ export const useAIChat = () => {
           body: JSON.stringify(requestBody),
           signal: controller.signal,
         });
+
+        if (response.status === 409) {
+          // A request is already in flight for this session (e.g. user
+          // clicked again while the question was still evolving). Drop this
+          // duplicate's placeholder silently; the in-flight answer stands.
+          console.warn("[useAIChat] handleAiAnswer: duplicate_in_flight, dropping placeholder", {
+            requestId,
+            messageId,
+          });
+          safeSetAiChat((prev) => prev.filter((msg) => msg.id !== messageId));
+          return;
+        }
 
         if (!response.ok) {
           console.error(`[useAIChat] handleAiAnswer: Server returned status ${response.status}`);
@@ -1442,6 +1457,9 @@ export const useAIChat = () => {
         controller,
       );
       if (!customOp.acquired) {
+        activeRequestIdRef.current = customOp.existing.requestId;
+        activeAbortControllerRef.current =
+          customOp.existing.controller || activeAbortControllerRef.current;
         console.warn("[AI Answer][Dedup] Ignored duplicate manual query while request is active", {
           sessionId,
           requestId: reqId,
@@ -1590,6 +1608,14 @@ export const useAIChat = () => {
       const segmentId = generateSegmentId(decision.groupedTranscript);
       if (!generationGuardRef.current.canStartGeneration(segmentId, decision.groupedTranscript)) {
         console.log(`[useAIChat] handleCustomQuery: Generation guard blocked duplicate segment.`);
+        operationRegistryRef.current.release(sessionId, "ai-answer", reqId);
+        if (activeRequestIdRef.current === reqId) {
+          pendingLoadingResetRef.current = null;
+          setIsAnswering(false);
+        }
+        setAiChat((prev) =>
+          prev.filter((msg) => msg.id !== userMessage.id && msg.id !== aiMessageId),
+        );
         return;
       }
 
@@ -1636,6 +1662,7 @@ export const useAIChat = () => {
                 latestAnswerTopic: latestAnswerContext.latestAnswerTopic,
                 sourcePlatform: runtimePlatform,
                 answerMode: "auto",
+                triggerSource: "custom_query",
                 isCustomQuery: true,
                 manualQueryType,
               }),
@@ -1643,8 +1670,8 @@ export const useAIChat = () => {
             }),
             signal: controller.signal,
           },
-        );
-        if (import.meta.env.DEV) {
+	        );
+	        if (import.meta.env.DEV) {
           console.log("[AI Answer Debug][FE][Manual] POST /ai-answer body:", {
               ...sanitizeAIAnswerPayload({
                 transcript: transcriptForRequest,
@@ -1671,16 +1698,26 @@ export const useAIChat = () => {
                 latestAnswerTopic: latestAnswerContext.latestAnswerTopic,
                 sourcePlatform: runtimePlatform,
                 answerMode: "auto",
+                triggerSource: "custom_query",
                 isCustomQuery: true,
                 manualQueryType,
               }),
               aiModel,
             });
-        }
+	        }
 
-        if (!response.ok) {
-          console.error(`[useAIChat] handleCustomQuery: Server returned status ${response.status}`);
-          throw new Error("AI request failed");
+	        if (response.status === 409) {
+	          console.warn("[useAIChat] handleCustomQuery: duplicate_in_flight, dropping placeholder", {
+	            requestId,
+	            aiMessageId,
+	          });
+	          setAiChat((prev) => prev.filter((msg) => msg.id !== aiMessageId));
+	          return;
+	        }
+
+	        if (!response.ok) {
+	          console.error(`[useAIChat] handleCustomQuery: Server returned status ${response.status}`);
+	          throw new Error("AI request failed");
         }
 
         console.log("[useAIChat] handleCustomQuery: Server responded OK. Obtaining stream reader.");
@@ -1815,6 +1852,9 @@ export const useAIChat = () => {
         controller,
       );
       if (!regenOp.acquired) {
+        activeRequestIdRef.current = regenOp.existing.requestId;
+        activeAbortControllerRef.current =
+          regenOp.existing.controller || activeAbortControllerRef.current;
         console.warn("[AI Answer][Dedup] Ignored duplicate regenerate while request is active", {
           sessionId,
           requestId: reqId,
@@ -1825,6 +1865,7 @@ export const useAIChat = () => {
       setIsAnswering(true);
       setIsAnalyzing(false);
 
+      const originalMessageText = targetMessage.text;
       console.log(`[useAIChat] handleRegenerate: Clearing text for messageId: ${messageId} to prepare for fresh stream. Preserving question field.`);
       setAiChat((prev) =>
         prev.map((msg) => (msg.id === messageId ? { ...msg, text: "" } : msg)),
@@ -1844,6 +1885,16 @@ export const useAIChat = () => {
       const segmentId = generateSegmentId(decision.groupedTranscript);
       if (!generationGuardRef.current.canStartGeneration(segmentId, decision.groupedTranscript)) {
         console.log("[useAIChat] handleRegenerate: Generation guard blocked duplicate segment.");
+        operationRegistryRef.current.release(sessionId, "ai-answer", reqId);
+        if (activeRequestIdRef.current === reqId) {
+          pendingLoadingResetRef.current = null;
+          setIsAnswering(false);
+        }
+        setAiChat((prev) =>
+          prev.map((msg) =>
+            msg.id === messageId ? { ...msg, text: originalMessageText } : msg,
+          ),
+        );
         return;
       }
 
@@ -1863,9 +1914,9 @@ export const useAIChat = () => {
           aiModel,
           snapshotId: targetMessage.snapshotId,
         };
-        console.log("[useAIChat] handleRegenerate: requestBody keys", Object.keys(requestBody));
-        console.log(`[useAIChat] handleRegenerate: Dispatching POST to ${targetUrl} with body:`, requestBody);
-        const response = await fetch(targetUrl, {
+	        console.log("[useAIChat] handleRegenerate: requestBody keys", Object.keys(requestBody));
+	        console.log(`[useAIChat] handleRegenerate: Dispatching POST to ${targetUrl} with body:`, requestBody);
+	        const response = await fetch(targetUrl, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -1874,9 +1925,22 @@ export const useAIChat = () => {
           },
           body: JSON.stringify(requestBody),
           signal: controller.signal,
-        });
+	        });
 
-        if (!response.ok) {
+	        if (response.status === 409) {
+	          console.warn("[useAIChat] handleRegenerate: duplicate_in_flight, restoring active answer", {
+	            requestId,
+	            messageId,
+	          });
+	          setAiChat((prev) =>
+	            prev.map((msg) =>
+	              msg.id === messageId ? { ...msg, text: originalMessageText } : msg,
+	            ),
+	          );
+	          return;
+	        }
+
+	        if (!response.ok) {
           console.error(`[useAIChat] handleRegenerate: Server returned status ${response.status}`);
           throw new Error("AI request failed");
         }

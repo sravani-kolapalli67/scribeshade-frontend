@@ -80,6 +80,7 @@ export interface AIAnswerRequestPayload {
     | "explain_existing_code"
     | "system_design";
   sourcePlatform?: "web" | "tauri";
+  triggerSource?: "auto" | "manual_click" | "overlay_click" | "custom_query";
   activeInterviewMode?: string;
   manualQueryType?: "full_question" | "short_followup" | "command" | "unknown";
   isRegenerate?: boolean;
@@ -276,6 +277,7 @@ export function sanitizeAIAnswerPayload(
     ...(payload.answerClickMode ? { answerClickMode: payload.answerClickMode } : {}),
     ...(payload.answerMode ? { answerMode: payload.answerMode } : {}),
     ...(payload.sourcePlatform ? { sourcePlatform: payload.sourcePlatform } : {}),
+    ...(payload.triggerSource ? { triggerSource: payload.triggerSource } : {}),
     ...(payload.activeInterviewMode ? { activeInterviewMode: payload.activeInterviewMode } : {}),
     ...(payload.manualQueryType ? { manualQueryType: payload.manualQueryType } : {}),
     ...(payload.isCustomQuery ? { isCustomQuery: true } : {}),

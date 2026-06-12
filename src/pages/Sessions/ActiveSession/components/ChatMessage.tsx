@@ -160,6 +160,7 @@ export const ChatMessage = ({
   isFullscreen = false,
   onRegenerate,
   onInteract,
+  regenerateDisabled = false,
 }: ChatMessageProps) => {
   const isAI = message.sender !== "User";
 
@@ -479,18 +480,20 @@ export const ChatMessage = ({
                         Copy Answer
                       </button>
                     )}
-                    {onRegenerate && (
-                      <button
-                        onClick={onRegenerate}
-                        onMouseDown={() => onInteract?.(message.id)}
-                        className={cn(
-                          "flex items-center justify-center p-1.5 rounded-md transition-all active:scale-95",
-                          isFullscreen
-                            ? "bg-white/10 hover:bg-white/20 text-white/60 border border-white/20"
-                            : "bg-white hover:bg-slate-50 text-slate-400 border border-slate-200 shadow-sm"
-                        )}
-                        title="Regenerate answer"
-                      >
+	                    {onRegenerate && (
+	                      <button
+	                        onClick={onRegenerate}
+	                        onMouseDown={() => onInteract?.(message.id)}
+	                        disabled={regenerateDisabled}
+	                        className={cn(
+	                          "flex items-center justify-center p-1.5 rounded-md transition-all active:scale-95",
+	                          isFullscreen
+	                            ? "bg-white/10 hover:bg-white/20 text-white/60 border border-white/20"
+	                            : "bg-white hover:bg-slate-50 text-slate-400 border border-slate-200 shadow-sm",
+	                          regenerateDisabled && "cursor-not-allowed opacity-50 hover:bg-white"
+	                        )}
+	                        title={regenerateDisabled ? "Wait for the active answer to finish" : "Regenerate answer"}
+	                      >
                         <RefreshCw className="h-3.5 w-3.5" />
                       </button>
                     )}
@@ -529,4 +532,5 @@ interface ChatMessageProps {
   isFullscreen?: boolean;
   onRegenerate?: () => void;
   onInteract?: (messageId: string) => void;
+  regenerateDisabled?: boolean;
 }

@@ -2054,7 +2054,13 @@ export function useFloatingSession() {
     let question = detection.cleanedQuestion.trim();
     const source = detection.source;
     let effectiveDetection = detection;
-    let forcedByExplicitClick = false;
+    // This handler is only ever invoked by an explicit user action (the
+    // overlay AI Answer button or the Cmd/Ctrl+G shortcut), never by the
+    // auto-generation path. Always-answer contract: a deliberate click must
+    // produce an answer even while the transcript is still evolving. Rapid
+    // double-clicks are already debounced by `isAnswering` in FloatingApp and
+    // the backend in-flight (409) lock, so we never silently drop a click.
+    let forcedByExplicitClick = true;
     const stableQuestionHash =
       preDebounceDetection.cleanedQuestion.trim().toLowerCase() ===
       question.toLowerCase();
@@ -2272,6 +2278,7 @@ export function useFloatingSession() {
           }
         : {}),
       answerMode: "auto",
+      triggerSource: "overlay_click",
       sourcePlatform: "tauri",
     };
 

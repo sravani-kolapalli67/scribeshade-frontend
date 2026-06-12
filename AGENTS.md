@@ -4,23 +4,23 @@
 
 ScribeShade is a **desktop-first productivity app** built with **Tauri v2 + React + TypeScript + Vite**. The desktop experience consists of three windows and is _not_ a traditional single-page app:
 
-| Window label | HTML entry | Purpose |
-|---|---|---|
-| `launcher` | `launcher.html` → `WidgetApp.tsx` | Always-visible floating widget |
-| `mini` | `floating.html` | Active-session transcription overlay |
-| `main` | `index.html` → `App.tsx` | Full dashboard (lazily created) |
+| Window label | HTML entry                        | Purpose                              |
+| ------------ | --------------------------------- | ------------------------------------ |
+| `launcher`   | `launcher.html` → `WidgetApp.tsx` | Always-visible floating widget       |
+| `mini`       | `floating.html`                   | Active-session transcription overlay |
+| `main`       | `index.html` → `App.tsx`          | Full dashboard (lazily created)      |
 
 ## Tech Stack
 
-| Layer | Stack |
-|---|---|
-| Frontend | React 18, TypeScript, Vite, Tailwind CSS v4, shadcn/ui |
-| Desktop shell | Tauri v2 |
-| Auth | Clerk (`@clerk/clerk-react`) |
-| State | Redux Toolkit (`src/store/slices/`) |
-| API | REST via `VITE_BACKEND_URL`; real-time events via SSE |
-| Payments | Razorpay (permitted to load inside the main webview) |
-| Deploy (web) | Vercel |
+| Layer         | Stack                                                  |
+| ------------- | ------------------------------------------------------ |
+| Frontend      | React 18, TypeScript, Vite, Tailwind CSS v4, shadcn/ui |
+| Desktop shell | Tauri v2                                               |
+| Auth          | Clerk (`@clerk/clerk-react`)                           |
+| State         | Redux Toolkit (`src/store/slices/`)                    |
+| API           | REST via `VITE_BACKEND_URL`; real-time events via SSE  |
+| Payments      | Razorpay (permitted to load inside the main webview)   |
+| Deploy (web)  | Vercel                                                 |
 
 ## Build & Dev Commands
 
@@ -48,17 +48,17 @@ pnpm lint             # ESLint
 
 ## Directory Guide
 
-| Path | Contents |
-|---|---|
-| `src-tauri/src/lib.rs` | All Tauri commands and app setup (single large file) |
-| `src-tauri/tauri.conf.json` | Window declarations, deep-link scheme (`craftvita://`) |
-| `src/pages/Launcher/WidgetApp.tsx` | Floating launcher widget (~1400 lines) |
-| `src/pages/Sessions/ActiveSession/` | Session recording / transcription page |
-| `src/components/GoogleOAuthButton.tsx` | OAuth via `tauri-plugin-oauth` + `tauri-plugin-opener` |
-| `src/App.tsx` | Main app router; handles `craftvita://` deep links |
-| `src/lib/utils.ts` | `isTauri()` helper and shared utilities |
-| `src/store/slices/` | Redux slices |
-| `.github/docs/` | API reference, frontend integration guide, pricing docs |
+| Path                                   | Contents                                                |
+| -------------------------------------- | ------------------------------------------------------- |
+| `src-tauri/src/lib.rs`                 | All Tauri commands and app setup (single large file)    |
+| `src-tauri/tauri.conf.json`            | Window declarations, deep-link scheme (`craftvita://`)  |
+| `src/pages/Launcher/WidgetApp.tsx`     | Floating launcher widget (~1400 lines)                  |
+| `src/pages/Sessions/ActiveSession/`    | Session recording / transcription page                  |
+| `src/components/GoogleOAuthButton.tsx` | OAuth via `tauri-plugin-oauth` + `tauri-plugin-opener`  |
+| `src/App.tsx`                          | Main app router; handles `craftvita://` deep links      |
+| `src/lib/utils.ts`                     | `isTauri()` helper and shared utilities                 |
+| `src/store/slices/`                    | Redux slices                                            |
+| `.github/docs/`                        | API reference, frontend integration guide, pricing docs |
 
 ## Documentation
 

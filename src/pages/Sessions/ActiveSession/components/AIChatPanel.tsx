@@ -48,6 +48,8 @@ export const AIChatPanel = ({
   selectedModel,
   onModelChange,
 }: AIChatPanelProps) => {
+  const isGenerationBusy = isAnalyzing || isAnswering;
+
   return (
     <div className={cn(
         "h-full flex flex-col overflow-hidden relative transition-all duration-300", 
@@ -66,10 +68,11 @@ export const AIChatPanel = ({
       <div className="flex-1 flex flex-col overflow-hidden relative">
         <ChatMessageList
           messages={messages}
-          isStreaming={isAnalyzing || isAnswering}
+          isStreaming={isGenerationBusy}
           isFullscreen={isFullscreen}
           onRegenerate={onRegenerate}
           onMessageInteract={onMessageInteract}
+          disableRegenerate={isGenerationBusy}
         />
       </div>
 
@@ -82,6 +85,7 @@ export const AIChatPanel = ({
           onChange={onInputChange} 
           onSend={onSend}
           isFullscreen={isFullscreen} 
+          disabled={isGenerationBusy}
         />
         <ChatActionButtons
           onAiAnswer={onAiAnswer}

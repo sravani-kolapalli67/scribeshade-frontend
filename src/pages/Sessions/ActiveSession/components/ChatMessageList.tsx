@@ -10,6 +10,7 @@ interface ChatMessageListProps {
   isFullscreen?: boolean;
   onRegenerate?: (messageId: string) => void;
   onMessageInteract?: (messageId: string) => void;
+  disableRegenerate?: boolean;
 }
 
 export const ChatMessageList = ({
@@ -18,6 +19,7 @@ export const ChatMessageList = ({
   isFullscreen = false,
   onRegenerate,
   onMessageInteract,
+  disableRegenerate = false,
 }: ChatMessageListProps) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const lastMessageCountRef = useRef(0);
@@ -90,6 +92,7 @@ export const ChatMessageList = ({
                 isStreaming && chat.id === messages[messages.length - 1].id
               }
               onRegenerate={onRegenerate ? () => onRegenerate(chat.id) : undefined}
+              regenerateDisabled={disableRegenerate}
               onInteract={onMessageInteract}
             />
           ))}
