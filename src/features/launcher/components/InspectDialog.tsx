@@ -79,7 +79,7 @@ export function InspectDialog({ open, onClose }: InspectDialogProps) {
         visibility: open ? "visible" : "hidden",
         transition: "opacity 180ms cubic-bezier(0.16, 1, 0.3, 1), transform 180ms cubic-bezier(0.16, 1, 0.3, 1)",
       }}
-      data-interactive
+      {...(open ? { "data-interactive": true } : {})}
     >
       <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-200 bg-white shrink-0">
         <div className="flex items-center gap-2">

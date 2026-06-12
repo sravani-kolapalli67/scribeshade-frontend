@@ -12,27 +12,29 @@ interface UseCursorPassthroughOptions {
  * based on whether the cursor overlaps a [data-interactive] element.
  *
  * CRITICAL: WKWebView/WebView2 receives ZERO mouse events while pass-through
- * is ON, so we cannot use mousemove. We poll a Rust command on a setTimeout
- * chain.
+ * is ON, so we cannot use mousemove for entry detection. We poll a Rust
+ * command on a setTimeout chain.
+ *
+ * While passthrough is OFF (interactive mode), the window DOES receive mouse
+ * events. We install a mousemove listener at that point for instant exit
+ * detection — the moment the cursor leaves all [data-interactive] rects,
+ * passthrough is enabled immediately without waiting for the next poll tick.
  *
  * Key design constraints:
  *
  * 1. Loop immortality — the continuation MUST be in the outermost finally block
  *    so the loop survives every exit path: early return (forcePassthrough /
- *    isDragging), exceptions, and concurrent-skip guards. Any `return` inside
- *    a try block skips code after that block, so a single missed scheduling
- *    call kills the loop permanently. Previously the continuation was outside
- *    the try/finally, so early returns murdered it.
+ *    isDragging), exceptions, and concurrent-skip guards.
  *
  * 2. setTimeout, not RAF — WKWebView pauses requestAnimationFrame callbacks
  *    while ScribeShade is not the active macOS application. setTimeout keeps
  *    firing while deactivated, so the cursor poll continues and passthrough
- *    recovers (window becomes interactive) BEFORE the user's first click back.
+ *    recovers BEFORE the user's first click back.
  *
  * 3. macOS watchdog — every REASSERT_INTERVAL_MS the desired native state is
- *    re-applied even if our cached JS value is unchanged, bounding any
- *    JS/native desync to that interval. Disabled on Windows (would reintroduce
- *    DWM surface flicker from excessive setIgnoreCursorEvents churn, WN1/WN6).
+ *    re-applied even if our cached JS value is unchanged. Disabled on Windows
+ *    (would reintroduce DWM surface flicker from excessive setIgnoreCursorEvents
+ *    churn, WN1/WN6).
  *
  * 4. Blur cache invalidation — on app deactivation we drop the window-bounds /
  *    scale cache and clear lastPassthrough so the very next poll re-asserts
@@ -48,8 +50,6 @@ export function useCursorPassthrough({
     let timer = 0;
     let startTimeout = 0;
     let cancelled = false;
-    // Prevent concurrent ticks: if an IPC await is still pending when the
-    // next scheduled tick fires, skip the body but still schedule the next.
     let isTickRunning = false;
     let lastPassthrough: boolean | null = null;
     let cachedScale = 1;
@@ -57,35 +57,22 @@ export function useCursorPassthrough({
     let lastCacheUpdate = 0;
     let idleCycles = 0;
     let lastReassert = 0;
+    // True while the document-level mousemove listener for instant exit
+    // detection is installed. Only installed when passthrough is OFF.
+    let mouseMoveInstalled = false;
 
     const ua = navigator.userAgent.toLowerCase();
     const isWindows = ua.includes("windows");
-    const POLL_BASE_MS = isWindows ? 120 : 32;
-    const POLL_IDLE_MS = isWindows ? 240 : 64;
+    // Windows: 40ms base (was 120ms) so cursor-over-card is detected in ≤40ms.
+    // Idle (unchanged state for IDLE_THRESHOLD cycles) slows to 80ms to save
+    // IPC overhead when the cursor is parked far from the card.
+    // macOS stays at 32/64ms — it has a native watchdog so the poll is already
+    // complemented by the force-reassert path.
+    const POLL_BASE_MS = isWindows ? 40 : 32;
+    const POLL_IDLE_MS = isWindows ? 80 : 64;
     const IDLE_THRESHOLD = 6;
     const CACHE_TTL_MS = isWindows ? 2000 : 500;
-    // Re-assert native passthrough state every 200 ms on macOS to bound any
-    // JS/native desync after Space transitions, deactivation, etc.
-    // Kept tighter than the previous 400 ms for faster first-click recovery.
     const REASSERT_INTERVAL_MS = 200;
-
-    async function setPassthrough(p: boolean, force = false) {
-      if (cancelled) return;
-      const changed = p !== lastPassthrough;
-      if (!changed && !force) return;
-      lastPassthrough = p;
-      if (changed) idleCycles = 0;
-      try {
-        await tauriOverlay.setIgnoreCursorEvents(p);
-        if (changed) {
-          console.debug(
-            `[passthrough] state -> ${p ? "PASSTHROUGH" : "INTERACTIVE"}`,
-          );
-        }
-      } catch (e) {
-        console.error("[passthrough] setIgnoreCursorEvents failed", e);
-      }
-    }
 
     function collectInteractiveRects(): DOMRect[] {
       const nodes = document.querySelectorAll<HTMLElement>("[data-interactive]");
@@ -104,11 +91,56 @@ export function useCursorPassthrough({
       return false;
     }
 
+    // Instant exit handler: fires via mousemove while the window is interactive.
+    // e.clientX/Y and getBoundingClientRect() are both in CSS viewport coordinates
+    // so no DPI conversion is needed here — the comparison is coordinate-exact.
+    const handleMouseMoveExit = (e: MouseEvent) => {
+      if (cancelled) return;
+      const rects = collectInteractiveRects();
+      const over = isPointInRects(rects, e.clientX, e.clientY);
+      if (!over) {
+        // Remove the listener before the async call so re-entrant events
+        // during the IPC await don't trigger duplicate setPassthrough calls.
+        document.removeEventListener("mousemove", handleMouseMoveExit, true);
+        mouseMoveInstalled = false;
+        void setPassthrough(true);
+      }
+    };
+
+    async function setPassthrough(p: boolean, force = false) {
+      if (cancelled) return;
+      const changed = p !== lastPassthrough;
+      if (!changed && !force) return;
+      lastPassthrough = p;
+      if (changed) idleCycles = 0;
+
+      // While interactive (p=false) and not in a forced mode, install the
+      // mousemove listener so cursor exit is detected instantly — no poll lag.
+      // While passthrough (p=true), remove it (window gets no events anyway).
+      if (!p && !mouseMoveInstalled && !forceInteractive && !forcePassthrough) {
+        mouseMoveInstalled = true;
+        document.addEventListener("mousemove", handleMouseMoveExit, {
+          capture: true,
+          passive: true,
+        });
+      } else if (p && mouseMoveInstalled) {
+        mouseMoveInstalled = false;
+        document.removeEventListener("mousemove", handleMouseMoveExit, true);
+      }
+
+      try {
+        await tauriOverlay.setIgnoreCursorEvents(p);
+        if (changed) {
+          console.debug(
+            `[passthrough] state -> ${p ? "PASSTHROUGH" : "INTERACTIVE"}`,
+          );
+        }
+      } catch (e) {
+        console.error("[passthrough] setIgnoreCursorEvents failed", e);
+      }
+    }
+
     async function runTickBody() {
-      // forcePassthrough / isDragging / forceInteractive are fast paths that do
-      // not need cursor-position IPC. They no longer use early `return` — instead
-      // they just resolve `desired` and fall through to the single setPassthrough
-      // call, so the outer finally always schedules the next tick.
       let desired: boolean;
 
       if (forcePassthrough) {
@@ -129,8 +161,6 @@ export function useCursorPassthrough({
 
         const [gx, gy] = await tauriOverlay.getCursorPosition();
 
-        // Test both physical and logical coordinate conversions so DPI scaling
-        // ambiguity (Retina macOS, Windows 125%/150%) never causes a miss.
         const localPhysX = (gx - cachedWinPos.x) / cachedScale;
         const localPhysY = (gy - cachedWinPos.y) / cachedScale;
         const localLogX = gx - cachedWinPos.x;
@@ -143,8 +173,6 @@ export function useCursorPassthrough({
 
         desired = !over;
 
-        // macOS watchdog: periodically force-re-assert native state to bound
-        // JS/native desync after deactivation or Space transitions.
         const forceReassert = !isWindows && now - lastReassert > REASSERT_INTERVAL_MS;
         if (forceReassert) lastReassert = now;
 
@@ -153,21 +181,14 @@ export function useCursorPassthrough({
         if (lastPassthrough === before) {
           idleCycles = Math.min(idleCycles + 1, IDLE_THRESHOLD + 1);
         }
-        return; // already called setPassthrough above
+        return;
       }
 
-      // fast-path: forcePassthrough or isDragging/forceInteractive
       await setPassthrough(desired);
     }
 
     async function tick() {
       if (cancelled) return;
-
-      // The outermost finally ALWAYS schedules the next tick regardless of
-      // how the body exits: normal completion, early return (isTickRunning
-      // guard), or any thrown exception. This is the single most important
-      // invariant — without it the loop dies the first time the body is
-      // skipped or throws.
       try {
         if (isTickRunning) return;
         isTickRunning = true;
@@ -181,9 +202,6 @@ export function useCursorPassthrough({
       } finally {
         if (!cancelled) {
           const interval = idleCycles >= IDLE_THRESHOLD ? POLL_IDLE_MS : POLL_BASE_MS;
-          // setTimeout keeps firing while the macOS app is deactivated.
-          // RAF pauses, which is why we switched: cursor state still updates
-          // so the window becomes interactive before the user's first click.
           timer = window.setTimeout(() => void tick(), interval);
         }
       }
@@ -199,15 +217,14 @@ export function useCursorPassthrough({
     };
     document.addEventListener("contextmenu", handleContextMenu, true);
 
-    // On app deactivation: drop the window-bounds/scale cache and nullify
-    // lastPassthrough so the very next poll tick re-asserts native state
-    // unconditionally, eliminating any desync without waiting for the watchdog.
-    // blur/visibilitychange fire on focus events, not mouse events, so they
-    // work even while the window is in passthrough mode.
+    // On app deactivation: drop cache, null lastPassthrough, and reset idle
+    // counter so the very next poll tick runs at full speed and re-asserts
+    // native state unconditionally — no waiting for the watchdog or idle decay.
     const invalidateForRecovery = () => {
       lastCacheUpdate = 0;
       lastPassthrough = null;
-      lastReassert = 0; // also reset watchdog so next tick is a force-reassert
+      lastReassert = 0;
+      idleCycles = 0; // ensure next tick runs at POLL_BASE_MS, not POLL_IDLE_MS
     };
     const handleBlur = () => invalidateForRecovery();
     const handleVisibility = () => { if (!document.hidden) invalidateForRecovery(); };
@@ -218,7 +235,11 @@ export function useCursorPassthrough({
       timer = window.setTimeout(() => void tick(), 0);
     };
     if (isWindows) {
-      startTimeout = window.setTimeout(scheduleFirstTick, 300);
+      // 80ms (was 300ms): enough for the Rust run_on_main_thread closure that
+      // sets set_ignore_cursor_events(true) to have executed before the poll
+      // starts overriding it, while keeping the interactive-area cold-start
+      // delay below perceptible threshold.
+      startTimeout = window.setTimeout(scheduleFirstTick, 80);
     } else {
       scheduleFirstTick();
     }
@@ -227,6 +248,10 @@ export function useCursorPassthrough({
       cancelled = true;
       clearTimeout(startTimeout);
       clearTimeout(timer);
+      if (mouseMoveInstalled) {
+        document.removeEventListener("mousemove", handleMouseMoveExit, true);
+        mouseMoveInstalled = false;
+      }
       document.removeEventListener("contextmenu", handleContextMenu, true);
       window.removeEventListener("blur", handleBlur);
       document.removeEventListener("visibilitychange", handleVisibility);

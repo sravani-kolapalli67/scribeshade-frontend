@@ -27,12 +27,6 @@ static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 static MINI_HANDLERS_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 /// Tracks the last cursor passthrough state dispatched to Win32 so we can skip
-/// redundant SetWindowLongPtrW + SetWindowPos(SWP_FRAMECHANGED) calls.
-/// useCursorPassthrough fires at ~8 Hz; without dedup every tick queues a DWM
-/// flush to the UI thread even when passthrough hasn't changed — causing input
-/// lag under any concurrent render spike (AI answer, transcript update).
-#[cfg(target_os = "windows")]
-static CURSOR_PASSTHROUGH_STATE: AtomicBool = AtomicBool::new(false);
 
 /// Tracks the user's current Private Mode preference (content protection).
 /// false = normal mode (window visible in screenshots)
@@ -3446,25 +3440,26 @@ fn set_cursor_passthrough(window: Window, passthrough: bool) -> Result<(), Strin
     }
 
     // On Windows, set_ignore_cursor_events routes through Win32 SetWindowLongPtrW +
-    // SetWindowPos(SWP_FRAMECHANGED). Each call causes a DWM flush — visible as a
-    // brief input-lag spike on the UI thread. useCursorPassthrough fires at 8 Hz
-    // (120 ms cadence); posting 8 DWM flushes/sec to the UI thread under any render
-    // spike (AI answer, transcript update) stalls IPC → buttons appear frozen.
+    // SetWindowPos(SWP_FRAMECHANGED). Calling it from a Tokio worker causes a
+    // cross-thread SendMessage stall. Post fire-and-forget to the UI thread so the
+    // worker is never blocked.
     //
-    // Fix 1: post fire-and-forget (no blocking wait on the calling Tokio worker).
-    // Fix 2: skip the dispatch entirely when the state hasn't changed (server-side
-    //   dedup via CURSOR_PASSTHROUGH_STATE, complementing the client-side lastPassthrough
-    //   ref). Together these reduce DWM flushes from ~8/s to at most 1 per state change.
+    // Server-side global dedup (CURSOR_PASSTHROUGH_STATE) was removed: it was a single
+    // AtomicBool shared across both launcher and mini windows. The consolidated show
+    // closures set native passthrough=true directly (not via this command), so the
+    // static stayed at its initial false. JS then called set_cursor_passthrough(false)
+    // to make windows interactive — old==new so the dispatch was skipped, leaving
+    // windows permanently unclickable. The JS-side lastPassthrough ref (per-window
+    // closure in useCursorPassthrough) already deduplicates correctly; no server-side
+    // dedup is needed.
     #[cfg(target_os = "windows")]
     {
-        if CURSOR_PASSTHROUGH_STATE.swap(passthrough, Ordering::Relaxed) != passthrough {
-            let w = window.clone();
-            window
-                .run_on_main_thread(move || {
-                    let _ = w.set_ignore_cursor_events(passthrough);
-                })
-                .map_err(|e| e.to_string())?;
-        }
+        let w = window.clone();
+        window
+            .run_on_main_thread(move || {
+                let _ = w.set_ignore_cursor_events(passthrough);
+            })
+            .map_err(|e| e.to_string())?;
     }
 
     // Linux: GTK/X11 set_ignore_cursor_events is safe from any thread; keep direct.
