@@ -3,7 +3,6 @@ import { useEffect } from "react";
 import { ATSAnalysisDialog } from "./Resume/ATSAnalysisDialog";
 import { BuildResumeDialog } from "./Resume/BuildResumeDialog";
 import CreateSessionDialog from "@/components/Sessions/CreateSessionDialog";
-import UploadDocumentDialog from "@/components/Document/UploadDocumentDialog";
 import { CreditsBadge } from "@/components/CreditsBadge";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 
@@ -53,9 +52,6 @@ const Navbar = () => {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // intentionally run only once on mount
 
-  const isDocumentPage = location.pathname.startsWith("/document");
-  const userId = localStorage.getItem("userId") || "";
-
   return (
     <nav className="flex items-center justify-between px-4 py-3 bg-white/80 backdrop-blur-md border-b border-gray-100 sticky top-0 z-50 shadow-sm w-full h-18">
       <div className="flex items-center gap-2">
@@ -79,7 +75,6 @@ const Navbar = () => {
           </>
         )}
         {isATSAnalysisPage && <ATSAnalysisDialog />}
-        {isDocumentPage && <UploadDocumentDialog userId={userId} />}
 
         {/* Credit balance badge */}
         <CreditsBadge />

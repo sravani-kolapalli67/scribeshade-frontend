@@ -34,7 +34,10 @@ use tokio::sync::broadcast;
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{
-        client::IntoClientRequest, http::header::AUTHORIZATION, protocol::CloseFrame,
+        client::IntoClientRequest,
+        http::header::{HeaderValue, AUTHORIZATION},
+        protocol::CloseFrame,
+        Error as WsError,
         Message as WsMsg,
     },
 };
@@ -196,6 +199,26 @@ impl ExitReason {
     }
 }
 
+fn format_connect_error(e: &WsError) -> String {
+    match e {
+        WsError::Http(resp) => {
+            let status = resp.status();
+            let body = resp
+                .body()
+                .as_ref()
+                .map(|b| String::from_utf8_lossy(b).into_owned())
+                .unwrap_or_default();
+            let body_trim = body.trim();
+            if body_trim.is_empty() {
+                format!("HTTP {status}")
+            } else {
+                format!("HTTP {status}: {body_trim}")
+            }
+        }
+        other => other.to_string(),
+    }
+}
+
 /// Run a complete Deepgram session: connect, forward PCM, parse transcripts,
 /// keep alive, and clean up. Returns when the user stops (`running=false`),
 /// the generation counter is bumped, the remote closes, or an error occurs.
@@ -330,25 +353,9 @@ pub async fn run_session(
     );
     emit_system_health(&app, system_health.as_ref(), my_gen, "starting");
 
-    let mut req = match dg_url.as_str().into_client_request() {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("[{tag}] request build FAILED: {e}");
-            running.store(false, Ordering::SeqCst);
-            let _ = app.emit(
-                status_evt,
-                SttStatusPayload {
-                    status: "error".into(),
-                    error: Some(format!("Deepgram request build failed: {e}")),
-                },
-            );
-            return;
-        }
-    };
-    // Auth is set EXACTLY ONCE here. The query string contains no `token=`
-    // param and no `Sec-WebSocket-Protocol` subprotocol token, so Deepgram
-    // sees a single, unambiguous credential.
-    let auth_value = match format!("Token {}", cfg.api_key.trim()).parse() {
+    // Parse auth header once — cloned into each retry attempt since the request
+    // is consumed by connect_async and must be rebuilt per attempt.
+    let auth_value: HeaderValue = match format!("Token {}", cfg.api_key.trim()).parse() {
         Ok(v) => v,
         Err(e) => {
             eprintln!("[{tag}] Authorization header invalid: {e}");
@@ -363,49 +370,86 @@ pub async fn run_session(
             return;
         }
     };
-    req.headers_mut().insert(AUTHORIZATION, auth_value);
 
-    let ws = match connect_async(req).await {
-        Ok((ws, _resp)) => ws,
-        Err(e) => {
-            // For HTTP failures (400/401/403), tungstenite's Error::Http variant
-            // carries the response with the body. Deepgram puts a JSON error
-            // message there (e.g. `{"err_code":"INVALID_AUTH","err_msg":"..."}`)
-            // — surface it so the user sees the real reason rather than a
-            // generic "HTTP error".
-            let detail = match &e {
-                tokio_tungstenite::tungstenite::Error::Http(resp) => {
-                    let status = resp.status();
-                    let body = resp
-                        .body()
-                        .as_ref()
-                        .map(|b| String::from_utf8_lossy(b).into_owned())
-                        .unwrap_or_default();
-                    let body_trim = body.trim();
-                    if body_trim.is_empty() {
-                        format!("HTTP {status}")
-                    } else {
-                        format!("HTTP {status}: {body_trim}")
-                    }
-                }
-                other => other.to_string(),
-            };
-            eprintln!("[{tag}] Deepgram connect FAILED: {detail}");
-            running.store(false, Ordering::SeqCst);
-            if let Some(h) = system_health {
-                h.deepgram_running.store(false, Ordering::SeqCst);
+    // Connect with timeout + retry so a slow DNS or transient network hiccup
+    // does not kill the capture thread. Capture keeps running the whole time;
+    // only set running=false if every attempt fails.
+    const MAX_ATTEMPTS: u32 = 4;
+    const CONNECT_TIMEOUT_SECS: u64 = 8;
+    const RETRY_BACKOFF_MS: u64 = 1_500;
+
+    let ws = {
+        let mut ws_result = None;
+        let mut last_err = String::from("unknown error");
+        for attempt in 0..MAX_ATTEMPTS {
+            if !running.load(Ordering::Relaxed) || generation.load(Ordering::Relaxed) != my_gen {
+                return;
             }
-            let _ = app.emit(
-                status_evt,
-                SttStatusPayload {
-                    status: "error".into(),
-                    error: Some(format!("Deepgram connect failed: {detail}")),
-                },
-            );
-            emit_system_health(&app, system_health.as_ref(), my_gen, "error");
-            return;
+            if attempt > 0 {
+                eprintln!("[{tag}] Deepgram connect retry {attempt}/{}", MAX_ATTEMPTS - 1);
+                tokio::time::sleep(Duration::from_millis(RETRY_BACKOFF_MS)).await;
+                if !running.load(Ordering::Relaxed) || generation.load(Ordering::Relaxed) != my_gen {
+                    return;
+                }
+            }
+            let mut req = match dg_url.as_str().into_client_request() {
+                Ok(r) => r,
+                Err(e) => {
+                    last_err = format!("request build failed: {e}");
+                    eprintln!("[{tag}] {last_err}");
+                    break;
+                }
+            };
+            req.headers_mut().insert(AUTHORIZATION, auth_value.clone());
+            match tokio::time::timeout(
+                Duration::from_secs(CONNECT_TIMEOUT_SECS),
+                connect_async(req),
+            )
+            .await
+            {
+                Ok(Ok((ws, _))) => {
+                    ws_result = Some(ws);
+                    break;
+                }
+                Ok(Err(e)) => {
+                    last_err = format_connect_error(&e);
+                    eprintln!("[{tag}] Deepgram connect FAILED (attempt {attempt}): {last_err}");
+                }
+                Err(_elapsed) => {
+                    last_err = format!("timed out after {CONNECT_TIMEOUT_SECS}s");
+                    eprintln!("[{tag}] Deepgram connect TIMEOUT (attempt {attempt})");
+                }
+            }
+        }
+        match ws_result {
+            Some(ws) => ws,
+            None => {
+                eprintln!("[{tag}] Deepgram connect FAILED all {MAX_ATTEMPTS} attempts: {last_err}");
+                running.store(false, Ordering::SeqCst);
+                if let Some(h) = system_health {
+                    h.deepgram_running.store(false, Ordering::SeqCst);
+                }
+                let _ = app.emit(
+                    status_evt,
+                    SttStatusPayload {
+                        status: "error".into(),
+                        error: Some(format!("Deepgram connect failed: {last_err}")),
+                    },
+                );
+                emit_system_health(&app, system_health.as_ref(), my_gen, "error");
+                return;
+            }
         }
     };
+
+    // Drain PCM that buffered while we were connecting so Deepgram receives
+    // fresh audio from this moment forward, not a stale burst.
+    loop {
+        match pcm_rx.try_recv() {
+            Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+            _ => break,
+        }
+    }
 
     if let Some(h) = system_health {
         h.deepgram_running.store(true, Ordering::SeqCst);

@@ -132,6 +132,16 @@ async function sharePdf(dataUrl: string, filename: string) {
 // ─── Streaming helper ─────────────────────────────────────────────────────────
 
 const STREAM_DELIM = "|||PROJECT_END|||";
+function parseStreamedProjectChunk(text: string): ProjectResponse | null {
+  const cleaned = text.trim().replace(/^```json\n?/i, "").replace(/\n?```$/i, "").trim();
+  if (!cleaned) return null;
+  try {
+    return JSON.parse(cleaned) as ProjectResponse;
+  } catch {
+    return null;
+  }
+}
+
 async function streamProjects(res: Response, onProject: (p: ProjectResponse) => void) {
   if (!res.body) throw new Error("ReadableStream not supported");
   const reader = res.body.getReader(); const decoder = new TextDecoder(); let buf = "";
@@ -141,11 +151,12 @@ async function streamProjects(res: Response, onProject: (p: ProjectResponse) => 
     buf += decoder.decode(value, { stream: true });
     const parts = buf.split(STREAM_DELIM); buf = parts.pop() ?? "";
     for (const part of parts) {
-      const t = part.trim().replace(/^```json\n?/i, "").replace(/\n?```$/i, "").trim();
-      if (!t) continue;
-      try { onProject(JSON.parse(t) as ProjectResponse); } catch { /* skip */ }
+      const project = parseStreamedProjectChunk(part);
+      if (project) onProject(project);
     }
   }
+  const finalProject = parseStreamedProjectChunk(buf);
+  if (finalProject) onProject(finalProject);
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -238,7 +249,11 @@ export default function ProjectRecommendations() {
       try {
         const token = await getToken();
         const storedUserId = localStorage.getItem("userId") ?? undefined;
-        const body: Record<string, string> = { position: data.position, jobDescription: data.jobDescription ?? "" };
+        const body: Record<string, string | boolean> = {
+          position: data.position,
+          jobDescription: data.jobDescription ?? "",
+          persistGeneratedRecord: false,
+        };
         if (storedUserId)         body.userId          = storedUserId;
         if (data.resumeId)        body.resumeId        = data.resumeId;
         if (data.industry)        body.industry        = data.industry;

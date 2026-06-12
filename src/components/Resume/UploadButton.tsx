@@ -130,7 +130,7 @@ export default function UploadButton({ userId }: { userId: string }) {
         onClick={handleClick}
         disabled={loading}
         size="sm"
-        className="gap-2 bg-black text-white hover:bg-black/90 rounded-lg px-4"
+        className="gap-2 rounded-xl bg-blue-600 px-4 text-white shadow-md shadow-blue-600/15 transition-all duration-150 hover:-translate-y-0.5 hover:bg-blue-700 hover:text-white hover:shadow-blue-700/25 active:translate-y-0 active:bg-blue-800"
       >
         <UploadIcon className="h-4 w-4" />
         {loading ? "Uploading..." : "Upload Resume"}

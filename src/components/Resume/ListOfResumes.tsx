@@ -622,7 +622,7 @@ export default function ListOfResumes({
         renderToolbarContent={() => (
           <UploadResumeDialog
             userId={userId}
-            triggerClassName="h-9 rounded-md"
+            triggerClassName="h-10 px-5 text-[13px] font-semibold"
           />
         )}
         config={{

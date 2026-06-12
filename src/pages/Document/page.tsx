@@ -8,6 +8,7 @@ import { Eye, Trash2 } from "lucide-react";
 import type { ExportableData } from "@/components/data-table/utils/export-utils";
 import { DeleteDocumentDialog } from "@/components/Document/DeleteDocumentDialog";
 import DocumentPreview from "@/components/Document/DocumentPreview";
+import UploadDocumentDialog from "@/components/Document/UploadDocumentDialog";
 import {
   Dialog,
   DialogContent,
@@ -189,6 +190,12 @@ export default function DocumentPage() {
           getColumns={() => columns}
           fetchDataFn={fetchDocuments}
           idField="id"
+          renderToolbarContent={() => (
+            <UploadDocumentDialog
+              userId={userId || ""}
+              triggerClassName="h-10 px-5 text-[13px] font-semibold"
+            />
+          )}
         />
       </div>
 

@@ -1248,7 +1248,6 @@ export default function BuildResume() {
               Build, tailor, and manage your resumes. Every resume here can be enhanced with AI in seconds.
             </p>
           </div>
-          <BuildResumeDialog />
         </div>
 
         {/* ── Hero banner ── */}
@@ -1276,17 +1275,20 @@ export default function BuildResume() {
                 scores ATS match, and drafts cover letters for every role you apply to.
               </p>
             </div>
-            <div className="flex items-center gap-5 shrink-0">
-              <div className="text-center">
-                <p className="text-[10px] text-muted-foreground/60 font-medium uppercase tracking-wide mb-0.5">Resumes</p>
-                <p className="text-[22px] font-bold text-foreground tabular-nums">{allEntries.length}</p>
-              </div>
-              <div className="w-px h-10 bg-border" />
-              <div className="text-center">
-                <p className="text-[10px] text-muted-foreground/60 font-medium uppercase tracking-wide mb-0.5">Completed</p>
-                <p className="text-[22px] font-bold text-brand tabular-nums">
-                  {allEntries.filter((e) => e.status === "completed").length}
-                </p>
+            <div className="flex w-full shrink-0 flex-col items-stretch gap-4 sm:w-auto sm:items-end">
+              <BuildResumeDialog triggerClassName="h-12 min-w-[220px] px-7 text-[15px] hover:-translate-y-0.5" />
+              <div className="flex items-center justify-end gap-5">
+                <div className="text-center">
+                  <p className="text-[10px] text-muted-foreground/60 font-medium uppercase tracking-wide mb-0.5">Resumes</p>
+                  <p className="text-[22px] font-bold text-foreground tabular-nums">{allEntries.length}</p>
+                </div>
+                <div className="w-px h-10 bg-border" />
+                <div className="text-center">
+                  <p className="text-[10px] text-muted-foreground/60 font-medium uppercase tracking-wide mb-0.5">Completed</p>
+                  <p className="text-[22px] font-bold text-brand tabular-nums">
+                    {allEntries.filter((e) => e.status === "completed").length}
+                  </p>
+                </div>
               </div>
             </div>
           </div>

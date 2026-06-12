@@ -1,6 +1,6 @@
  ;
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { ColumnDef } from "@tanstack/react-table";
 import { toast } from "sonner";
@@ -67,6 +67,7 @@ export interface ActiveJob {
 interface AIProjectsTableProps {
   activeJob?:      ActiveJob;
   refreshTrigger?: number;
+  toolbarAction?:  ReactNode;
 }
 
 // ─── In-Progress Row (rendered inside shared table border) ───────────────────
@@ -160,7 +161,7 @@ function InlineProgressRow({ job }: { job: ActiveJob }) {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-export function AIProjectsTable({ activeJob, refreshTrigger = 0 }: AIProjectsTableProps) {
+export function AIProjectsTable({ activeJob, refreshTrigger = 0, toolbarAction }: AIProjectsTableProps) {
   const navigate     = useNavigate();
   const { getToken } = useAuth();
 
@@ -525,6 +526,7 @@ export function AIProjectsTable({ activeJob, refreshTrigger = 0 }: AIProjectsTab
               columnWidths: [{ wch: 30 }, { wch: 20 }],
               headers: ["position", "createdAt"],
             }}
+            renderToolbarContent={() => toolbarAction}
           />
         </div>
       </div>

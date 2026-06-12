@@ -156,6 +156,21 @@ const ACTIVE_QUESTION_CONFIDENCE_THRESHOLD = 0.58;
 // transcript chunks can arrive before rebuilding the question context.
 const REGENERATE_CONTEXT_DELAY_MS = 2200;
 
+// ── Auto AI answer (pause detection) ─────────────────────────────────────────
+// Polls on a tight cadence and triggers once the speaker has been silent long
+// enough. Activity is tracked directly in the STT stream handler (not via React
+// state) so the timestamp is as accurate as possible.
+//
+// The required pause is ADAPTIVE: a clearly-complete question (ends with "?" or
+// high detector confidence) fires fast; an ambiguous / possibly-unfinished
+// phrase waits a little longer so we don't cut the speaker off mid-thought.
+const AUTO_ANSWER_FAST_PAUSE_MS = 800;         // complete question → fire quickly
+const AUTO_ANSWER_SLOW_PAUSE_MS = 1600;        // ambiguous phrase → wait a bit more
+const AUTO_ANSWER_CONFIDENCE_THRESHOLD = 0.65; // higher than manual (0.58) to avoid false positives
+const AUTO_ANSWER_COMPLETE_CONFIDENCE = 0.7;   // at/above this we treat it as a complete question
+const AUTO_ANSWER_COOLDOWN_MS = 6_000;         // minimum gap between auto-triggers
+const AUTO_ANSWER_CHECK_INTERVAL_MS = 150;     // polling cadence — keeps trigger time constant
+
 // Extra historical context added during regenerate.
 // Helps reconstruct incomplete interviewer questions.
 const REGENERATE_CONTEXT_LOOKBACK_MS = 15000;
@@ -843,6 +858,21 @@ export function useFloatingSession() {
     }),
   );
 
+  // Auto-answer refs — last speech activity (mic OR system) and last triggered timestamp
+  const lastSpeechActivityAtRef = useRef<number>(0);
+  const lastAutoAnswerAtRef = useRef<number>(0);
+  // Memoized detection result so the poll doesn't re-run the regex-heavy
+  // detectActiveQuestion() on every tick — only when the transcript changes.
+  const autoAnswerEvalCacheRef = useRef<{
+    len: number;
+    lastTs: number;
+    answerable: boolean;
+    requiredPauseMs: number;
+    confidence: number;
+    isComplete: boolean;
+    source: string;
+  } | null>(null);
+
   // ── AI Chat hook (streaming state lives here, not in Redux) ─────────────────
   const {
     aiChat,
@@ -1515,6 +1545,11 @@ export function useFloatingSession() {
       const now = Date.now();
       const health = systemHealthRef.current;
       health.lastSystemEventAt = now;
+      // Track last speech moment for auto-answer pause detection.
+      // Update on any meaningful STT activity (interim words or non-empty final).
+      if (normalizedText.trim()) {
+        lastSpeechActivityAtRef.current = now;
+      }
       if (is_final) {
         health.lastSystemFinalAt = now;
         const trimmed = normalizedText.trim();
@@ -1661,6 +1696,9 @@ export function useFloatingSession() {
   useEffect(() => {
     if (!sessionInfo?.sessionId) {
       systemStartIssuedForSessionRef.current = null;
+      lastSpeechActivityAtRef.current = 0;
+      lastAutoAnswerAtRef.current = 0;
+      autoAnswerEvalCacheRef.current = null;
       systemHealthRef.current = {
         lastSystemInterimAt: 0,
         lastSystemFinalAt: 0,
@@ -1786,6 +1824,10 @@ export function useFloatingSession() {
     listen<{ text: string; is_final: boolean }>("stt:mic", (event) => {
       const { text, is_final } = event.payload;
       const normalizedText = normalizeSttTranscript(text || "");
+      // Track last speech moment for auto-answer pause detection (mic channel).
+      if (normalizedText.trim()) {
+        lastSpeechActivityAtRef.current = Date.now();
+      }
       if (is_final) {
         setMicInterimTranscript("");
         handleUserTranscriptRef.current(normalizedText, true);
@@ -2376,6 +2418,10 @@ export function useFloatingSession() {
     isAiAnswerUiLocked,
   ]);
 
+  // Stable ref so the auto-answer timer callback always has the latest version
+  const handleAiAnswerClickRef = useRef(handleAiAnswerClick);
+  handleAiAnswerClickRef.current = handleAiAnswerClick;
+
   const handleAnalyzeScreenClick = useCallback(
     async (screenshotBlob?: Blob) => {
       console.log("[useFloatingSession] handleAnalyzeScreenClick triggered.");
@@ -2549,6 +2595,122 @@ export function useFloatingSession() {
     },
     [handleRegenerate],
   );
+
+  // ── Auto AI answer (pause detection) ─────────────────────────────────────────
+  // Polls every AUTO_ANSWER_CHECK_INTERVAL_MS ms. Activity timestamps are written
+  // directly in the STT stream handler (not via React state) for maximum accuracy.
+  // Triggers once the interviewer has been silent for AUTO_ANSWER_PAUSE_MS and a
+  // high-confidence question is detected.
+  useEffect(() => {
+    if (!sessionInfo?.autoAnswer) return;
+
+    const interval = setInterval(() => {
+      // All guards use refs — no stale closures.
+      if (!sessionInfoRef.current?.autoAnswer) return;
+      if (isAiAnswerRunningRef.current || isAiAnswerUiLocked) return;
+
+      const now = Date.now();
+
+      // No speech activity recorded yet this session.
+      if (lastSpeechActivityAtRef.current === 0) return;
+
+      // Not even the minimum (fast) pause has elapsed yet — cheap early exit
+      // that also keeps us from running detection on every single tick.
+      const silenceMs = now - lastSpeechActivityAtRef.current;
+      if (silenceMs < AUTO_ANSWER_FAST_PAUSE_MS) return;
+
+      // Still within cooldown since last auto-trigger.
+      if (now - lastAutoAnswerAtRef.current < AUTO_ANSWER_COOLDOWN_MS) return;
+
+      // Interim buffer non-empty on either channel — speaker is still mid-word
+      // (these refs are fresher than the React interim-transcript state).
+      if (sttSourceStateRef.current.system.latestInterimText?.trim()) return;
+      if (sttSourceStateRef.current.mic.latestInterimText?.trim()) return;
+
+      // Require new transcript content (mic OR system) since the last answer.
+      const cutoffTs =
+        lastAnswerTimestampRef.current !== null
+          ? Math.min(lastAnswerTimestampRef.current, now - 5000)
+          : now - FIRST_ANSWER_WINDOW_MS;
+      const msgs = messagesRef.current;
+      const hasNewContent = msgs.some(
+        (m) =>
+          (m.sender === "Interviewer" || m.sender === "User") &&
+          m.timestamp > cutoffTs &&
+          !!m.text?.trim(),
+      );
+      if (!hasNewContent) return;
+
+      // Detection memoization: detectActiveQuestion() is regex-heavy, so only
+      // re-run it when the transcript actually changed (length or last
+      // timestamp). On unchanged transcript we reuse the cached evaluation and
+      // the per-tick cost collapses to a couple of number comparisons — keeps
+      // the 150ms poll feather-light on both Windows and macOS.
+      const len = msgs.length;
+      const lastTs = msgs[len - 1]?.timestamp ?? 0;
+      let evalResult = autoAnswerEvalCacheRef.current;
+      if (!evalResult || evalResult.len !== len || evalResult.lastTs !== lastTs) {
+        const { forDetection } = getOrBuildNormalizedMsgs();
+        const detection = detectActiveQuestion({
+          liveInterimText: "",
+          allMessages: forDetection,
+          cutoffTimestamp: cutoffTs,
+          selectedAnswerQuestion: "",
+        });
+        // Gate: skip pure noise/filler. Otherwise accept when EITHER the detector
+        // is confident enough OR the text is clearly question-like (handles cases
+        // like "please introduce yourself?" that score low on the user channel
+        // but are obvious questions). handleAiAnswerClick has its own robust
+        // fallback so a slightly-low confidence still produces a good answer.
+        const q = detection.cleanedQuestion.trim();
+        const answerable =
+          !!q &&
+          !detection.ignoredNoise &&
+          (detection.confidenceScore >= AUTO_ANSWER_CONFIDENCE_THRESHOLD ||
+            isQuestionLikeText(q));
+        // Adaptive pause: a complete question (ends with "?" or high confidence)
+        // fires at the fast threshold; anything ambiguous waits for the slow one
+        // so a speaker who briefly pauses mid-sentence isn't cut off.
+        const isComplete =
+          q.endsWith("?") || detection.confidenceScore >= AUTO_ANSWER_COMPLETE_CONFIDENCE;
+        evalResult = {
+          len,
+          lastTs,
+          answerable,
+          requiredPauseMs: isComplete ? AUTO_ANSWER_FAST_PAUSE_MS : AUTO_ANSWER_SLOW_PAUSE_MS,
+          confidence: detection.confidenceScore,
+          isComplete,
+          source: detection.source,
+        };
+        autoAnswerEvalCacheRef.current = evalResult;
+      }
+
+      if (!evalResult.answerable) return;
+      if (silenceMs < evalResult.requiredPauseMs) return;
+
+      console.log(
+        "[auto-answer] pause detected — silence:",
+        silenceMs,
+        "ms | required:",
+        evalResult.requiredPauseMs,
+        "ms | confidence:",
+        evalResult.confidence,
+        "| complete:",
+        evalResult.isComplete,
+        "| source:",
+        evalResult.source,
+      );
+
+      // Advance refs so the interval doesn't re-fire immediately, and drop the
+      // cache so the next question is evaluated fresh.
+      lastAutoAnswerAtRef.current = now;
+      lastSpeechActivityAtRef.current = now;
+      autoAnswerEvalCacheRef.current = null;
+      void handleAiAnswerClickRef.current();
+    }, AUTO_ANSWER_CHECK_INTERVAL_MS);
+
+    return () => clearInterval(interval);
+  }, [sessionInfo?.autoAnswer, isAiAnswerUiLocked, getOrBuildNormalizedMsgs]);
 
   // ── Mic toggle ──────────────────────────────────────────────────────────────
 

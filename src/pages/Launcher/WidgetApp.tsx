@@ -923,7 +923,7 @@ function WidgetContent() {
                                 </div>
 
                                 <div className="space-y-3">
-                                  {/* <div className="flex items-center justify-between">
+                                  <div className="flex items-center justify-between">
                                     <div className="flex items-center gap-2">
                                       <Sparkles className="w-4 h-4 text-zinc-600" />
                                       <Label className="text-sm font-medium text-zinc-700">
@@ -942,7 +942,7 @@ function WidgetContent() {
                                         dispatch(updateSessionInfo({ autoGenerateAI: val }))
                                       }
                                     />
-                                  </div> */}
+                                  </div>
 
                                   <div className="flex items-center justify-between">
                                     <div className="flex items-center gap-2">

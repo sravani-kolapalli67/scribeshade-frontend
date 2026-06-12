@@ -371,21 +371,21 @@ export default function AIProjectsPage() {
   // ─── Render ────────────────────────────────────────────────────────────
   return (
     <div className="space-y-4 max-w-7xl mx-auto w-full">
-
-      {/* Toolbar row — Generate button aligned right above the table */}
-      <div className="flex items-center justify-end">
-        <Button
-          onClick={handleOpenDialog}
-          disabled={generationStatus === "generating"}
-          className="gap-2 h-9 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-black text-xs tracking-wide shadow-md shadow-slate-900/10"
-        >
-          <Sparkles className="h-3.5 w-3.5" />
-          Generate Project
-        </Button>
-      </div>
-
       {/* Table — includes in-progress row and refreshes after generation */}
-      <AIProjectsTable activeJob={activeJob} refreshTrigger={refreshTrigger} />
+      <AIProjectsTable
+        activeJob={activeJob}
+        refreshTrigger={refreshTrigger}
+        toolbarAction={(
+          <Button
+            onClick={handleOpenDialog}
+            disabled={generationStatus === "generating"}
+            className="gap-2 h-10 px-5 rounded-xl bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-semibold text-[13px] tracking-wide shadow-md shadow-blue-600/20 hover:shadow-blue-700/25 transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0"
+          >
+            <Sparkles className="h-4 w-4" />
+            Generate Project
+          </Button>
+        )}
+      />
 
       {/* ── Generate Dialog ── */}
       <Dialog open={dialogOpen} onOpenChange={(o) => {
@@ -624,4 +624,3 @@ export default function AIProjectsPage() {
     </div>
   );
 }
-

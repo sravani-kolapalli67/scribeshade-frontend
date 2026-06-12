@@ -2009,7 +2009,7 @@ async fn start_system_audio_transcription(
     }
 
     let (init_tx, init_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
-    let (pcm_tx, _) = broadcast::channel::<Arc<Vec<u8>>>(256);
+    let (pcm_tx, _) = broadcast::channel::<Arc<Vec<u8>>>(1024);
     let tx_arc = Arc::new(pcm_tx);
     let tx_capture = tx_arc.clone();
     let my_gen = SYSTEM_STT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
@@ -2260,7 +2260,7 @@ async fn start_mic_transcription(
     let ch = config.channels() as usize;
 
     let (init_tx, init_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
-    let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(256);
+    let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(512);
     let tx_arc = Arc::new(tx);
     let tx_capture = tx_arc.clone();
     let my_gen = MIC_STT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
@@ -2401,7 +2401,7 @@ async fn start_system_audio_transcription(
     }
 
     let (init_tx, init_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
-    let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(128);
+    let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(1024);
     let tx_arc = Arc::new(tx);
     let tx_capture = tx_arc.clone();
     let my_gen = SYSTEM_STT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
@@ -2668,7 +2668,7 @@ async fn start_mic_transcription(
     }
 
     let (init_tx, init_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
-    let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(256);
+    let (tx, _rx) = broadcast::channel::<Arc<Vec<u8>>>(512);
     let tx_arc = Arc::new(tx);
     let tx_capture = tx_arc.clone();
     let my_gen = MIC_STT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;

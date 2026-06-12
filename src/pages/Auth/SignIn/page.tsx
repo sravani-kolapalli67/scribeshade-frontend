@@ -73,12 +73,23 @@ const SignInPage = () => {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const afterSignIn = async () => {
+  // prefetchedToken: token already fetched after setActive — avoids a redundant getToken() call in returnToTauri
+  const afterSignIn = async (prefetchedToken?: string | null) => {
     if (fromTauri) {
-      await returnToTauri(() => getToken());
+      await returnToTauri(prefetchedToken ? () => Promise.resolve(prefetchedToken) : () => getToken());
     } else {
       navigate("/dashboard");
     }
+  };
+
+  // After setActive: run persistDesktopSession + getToken in parallel, then fire-and-forget the desktop event
+  const finalizeSignIn = async (createdSessionId: string, source: string) => {
+    const [, token] = await Promise.all([
+      persistDesktopSession(createdSessionId),
+      getToken(),
+    ]);
+    void emitDesktopAuthStateChanged({ source, sessionId: createdSessionId, signedIn: true });
+    await afterSignIn(token);
   };
 
   const handleEmailSubmit = async (e: React.FormEvent) => {
@@ -92,13 +103,7 @@ const SignInPage = () => {
         const createdSessionId = result.createdSessionId;
         if (!createdSessionId) throw new Error("Clerk did not return a session id");
         await setActive!({ session: createdSessionId });
-        await persistDesktopSession(createdSessionId);
-        await emitDesktopAuthStateChanged({
-          source: "main",
-          sessionId: createdSessionId,
-          signedIn: true,
-        });
-        await afterSignIn();
+        await finalizeSignIn(createdSessionId, "main");
       } else {
         setStep("password");
       }
@@ -121,13 +126,7 @@ const SignInPage = () => {
         const createdSessionId = result.createdSessionId;
         if (!createdSessionId) throw new Error("Clerk did not return a session id");
         await setActive!({ session: createdSessionId });
-        await persistDesktopSession(createdSessionId);
-        await emitDesktopAuthStateChanged({
-          source: "main",
-          sessionId: createdSessionId,
-          signedIn: true,
-        });
-        await afterSignIn();
+        await finalizeSignIn(createdSessionId, "main");
       } else {
         setError("Sign-in incomplete. Please try again.");
       }

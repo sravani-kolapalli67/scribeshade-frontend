@@ -10,7 +10,6 @@ import { createSlice, createAsyncThunk, type PayloadAction } from "@reduxjs/tool
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { toast } from "sonner";
 import { resetOverlaySettings } from "@/lib/overlaySettings";
 import type { RootState } from "@/store/store";
 
@@ -25,6 +24,7 @@ export interface SessionInitData {
   startedAt: string | null;
   maxAllowedMinutes: number | null;
   saveTranscript?: boolean;
+  autoAnswer?: boolean;
 }
 
 export interface TranscriptMessage {
@@ -104,7 +104,6 @@ const initialState: FloatingSessionState = {
 
 // ─── Async thunk: end session ─────────────────────────────────────────────────
 
-const FREE_ZONE_MINUTES = 5;
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "";
 
 interface EndSessionArgs {
@@ -169,12 +168,13 @@ export const endSessionThunk = createAsyncThunk<void, EndSessionArgs | void>(
     try { sessionStorage.removeItem("scribeshade.session-init"); } catch {}
     resetOverlaySettings();
 
-    if (durationMinutes !== null && durationMinutes <= FREE_ZONE_MINUTES) {
-      toast.success("Session ended — no credits charged (under 5 min)");
-    }
-
     // Notify launcher to reset its UI before showing it.
     await emit("session:reset").catch(() => {});
+    // The launcher's onSessionReset handler runs async in its own WebView context
+    // (cross-window Tauri IPC). Wait 300ms — covers IPC round-trip (~15ms) +
+    // React re-render (~16ms) + the 300ms animate-in CSS transition on the
+    // session creation form so it is fully unmounted before the window is shown.
+    await new Promise<void>((resolve) => setTimeout(resolve, 300));
 
     // Show launcher, then hide mini — order matters so the user always has a
     // visible window during the transition.

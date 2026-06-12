@@ -67,9 +67,13 @@ const EXTRACTION_FIELDS = [
   { id: "certifications",label: "Certifications"         },
 ];
 
+interface BuildResumeDialogProps {
+  triggerClassName?: string;
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export function BuildResumeDialog() {
+export function BuildResumeDialog({ triggerClassName }: BuildResumeDialogProps) {
   const navigate = useNavigate();
   const { getToken, userId: clerkUserId } = useAuth();
   const { refresh: refreshBalance } = useCreditsBalance();
@@ -472,7 +476,12 @@ export function BuildResumeDialog() {
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
-        <Button className="gap-2 px-5 py-2.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800 transition-all duration-150 font-medium text-sm shadow-sm">
+        <Button
+          className={cn(
+            "gap-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800 transition-all duration-150 font-semibold shadow-md shadow-blue-600/20 hover:shadow-blue-700/25",
+            triggerClassName,
+          )}
+        >
           <FilePlus className="h-4 w-4" />
           Build Resume
         </Button>
@@ -599,7 +608,7 @@ export function BuildResumeDialog() {
                 <button
                   onClick={goNext}
                   disabled={isNextDisabled()}
-                  className="flex items-center gap-1.5 px-5 py-2 rounded-lg bg-slate-900 text-white text-[13px] font-medium hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-150 active:scale-[0.98]"
+                  className="flex items-center gap-1.5 px-5 py-2 rounded-lg bg-blue-600 text-white text-[13px] font-semibold shadow-sm shadow-blue-600/15 hover:bg-blue-700 active:bg-blue-800 disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-150 active:scale-[0.98]"
                 >
                   {stepId === "template" ? "Generate Resume" : "Continue"}
                   <ChevronRight className="h-3.5 w-3.5" />

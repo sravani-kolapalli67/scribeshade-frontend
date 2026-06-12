@@ -19,7 +19,7 @@ export function TauriReturnBanner() {
     let timerId = 0;
     setLoading(true);
     returnToTauri(() => getToken()).finally(() => {
-      timerId = window.setTimeout(() => setLoading(false), 3000);
+      timerId = window.setTimeout(() => setLoading(false), 800);
     });
     return () => clearTimeout(timerId);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -30,7 +30,7 @@ export function TauriReturnBanner() {
   const handleReturn = async () => {
     setLoading(true);
     await returnToTauri(() => getToken());
-    setTimeout(() => setLoading(false), 3000);
+    setTimeout(() => setLoading(false), 800);
   };
 
   const handleDismiss = () => {

@@ -9,6 +9,7 @@ export interface SessionInitPayload {
   startedAt: string | null;
   maxAllowedMinutes: number | null;
   saveTranscript?: boolean;
+  autoAnswer?: boolean;
 }
 
 export interface InspectAuthPayload {

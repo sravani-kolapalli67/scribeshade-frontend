@@ -16,7 +16,15 @@ const isTauri = () => typeof window !== "undefined" && "__TAURI__" in window;
 
 const API = import.meta.env.VITE_BACKEND_URL || "";
 
-export default function UploadDocumentDialog({ userId }: { userId: string }) {
+interface UploadDocumentDialogProps {
+  userId: string;
+  triggerClassName?: string;
+}
+
+export default function UploadDocumentDialog({
+  userId,
+  triggerClassName,
+}: UploadDocumentDialogProps) {
   const [open, setOpen] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
@@ -160,7 +168,12 @@ export default function UploadDocumentDialog({ userId }: { userId: string }) {
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
-        <Button className="gap-2 px-6 py-6 rounded-xl bg-black dark:bg-white text-white dark:text-black hover:opacity-90 transition-all font-semibold shadow-lg">
+        <Button
+          className={cn(
+            "gap-2 rounded-xl bg-blue-600 text-white shadow-md shadow-blue-600/15 transition-all duration-150 hover:-translate-y-0.5 hover:bg-blue-700 hover:text-white hover:shadow-blue-700/25 active:translate-y-0 active:bg-blue-800",
+            triggerClassName,
+          )}
+        >
           <UploadIcon className="h-4 w-4" />
           Upload Document
         </Button>

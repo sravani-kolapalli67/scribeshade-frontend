@@ -169,7 +169,7 @@ export default function UploadResumeDialog({
       <DialogTrigger asChild>
         <Button
           className={cn(
-            "gap-2 border border-primary bg-primary text-primary-foreground shadow-sm hover:bg-primary/90 hover:text-primary-foreground",
+            "gap-2 rounded-xl border border-blue-600 bg-blue-600 text-white shadow-md shadow-blue-600/15 transition-all duration-150 hover:-translate-y-0.5 hover:bg-blue-700 hover:text-white hover:shadow-blue-700/25 active:translate-y-0 active:bg-blue-800",
             triggerClassName,
           )}
         >
