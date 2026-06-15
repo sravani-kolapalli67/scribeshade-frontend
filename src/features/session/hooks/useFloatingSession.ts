@@ -164,12 +164,12 @@ const REGENERATE_CONTEXT_DELAY_MS = 2200;
 // The required pause is ADAPTIVE: a clearly-complete question (ends with "?" or
 // high detector confidence) fires fast; an ambiguous / possibly-unfinished
 // phrase waits a little longer so we don't cut the speaker off mid-thought.
-const AUTO_ANSWER_FAST_PAUSE_MS = 800;         // complete question → fire quickly
-const AUTO_ANSWER_SLOW_PAUSE_MS = 1600;        // ambiguous phrase → wait a bit more
-const AUTO_ANSWER_CONFIDENCE_THRESHOLD = 0.65; // higher than manual (0.58) to avoid false positives
+const AUTO_ANSWER_FAST_PAUSE_MS = 2000; // Increased from 800ms — waits for full sentence before triggering         // complete question → fire quickly
+const AUTO_ANSWER_SLOW_PAUSE_MS = 3500; // Increased from 1600ms — gives more time for ambiguous phrases        // ambiguous phrase → wait a bit more
+const AUTO_ANSWER_CONFIDENCE_THRESHOLD = 0.75; // Raised from 0.65 — reduces false triggers on partial speech // higher than manual (0.58) to avoid false positives
 const AUTO_ANSWER_COMPLETE_CONFIDENCE = 0.7;   // at/above this we treat it as a complete question
-const AUTO_ANSWER_COOLDOWN_MS = 6_000;         // minimum gap between auto-triggers
-const AUTO_ANSWER_CHECK_INTERVAL_MS = 150;     // polling cadence — keeps trigger time constant
+const AUTO_ANSWER_COOLDOWN_MS = 10_000; // Increased from 6s — prevents multiple answers for same question         // minimum gap between auto-triggers
+const AUTO_ANSWER_CHECK_INTERVAL_MS = 300; // Increased from 150ms — reduces polling overhead     // polling cadence — keeps trigger time constant
 
 // Extra historical context added during regenerate.
 // Helps reconstruct incomplete interviewer questions.
@@ -196,7 +196,7 @@ const REGENERATE_CONTEXT_LOOKBACK_MS = 15000;
  * Returns { question, source } or null if there are no messages at all.
  */
 const FALLBACK_MSG_COUNT = 12;
-const NEAR_DUPLICATE_GAP_MS = 2500;
+const NEAR_DUPLICATE_GAP_MS = 4000; // Increased from 2500ms — catches sentence fragments arriving 1-2s apart
 const STT_INTERIM_FALLBACK_MS = 600;
 const SYSTEM_STT_INTERIM_FALLBACK_MS = 300;
 const MIN_INCLUDE_DUPLICATE_LEN = 20;
