@@ -820,7 +820,9 @@ export const useAIChat = () => {
       mode: ConversationMode,
     ) => {
       const topicInfo = extractTopicAndEntities(resolvedQuestion);
-      const answerSummary = summarizeAnswerForMemory(answerText);
+      // Only summarize the answer for memory — do NOT carry the full answer text forward
+      // to prevent answer content bleeding into subsequent unrelated questions
+      const answerSummary = summarizeAnswerForMemory(answerText.slice(0, 200)); // limit to brief summary
       conversationContinuityRef.current = {
         ...conversationContinuityRef.current,
         lastResolvedQuestion: resolvedQuestion || conversationContinuityRef.current.lastResolvedQuestion,
