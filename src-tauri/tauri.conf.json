@@ -1,73 +1,62 @@
 {
-  "$schema": "https://schema.tauri.app/config/2",
-  "productName": "ScribeShade",
-  "version": "2.1.51",
-  "identifier": "com.hiddenmindsolutions.scribeshade-frontend",
-  "build": {
-    "beforeDevCommand": "pnpm dev",
-    "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
-    "frontendDist": "../dist"
-  },
-  "app": {
-    "macOSPrivateApi": true,
-    "windows": [],
-    "security": {
-      "csp": null
-    }
-  },
-  "bundle": {
-    "active": true,
-    "targets": [
-      "app",
-      "appimage",
-      "deb",
-      "rpm",
-      "dmg",
-      "msi",
-      "nsis"
-    ],
-    "createUpdaterArtifacts": true,
-    "icon": [
-      "icons/icon.ico",
-      "icons/icon.icns",
-      "icons/32x32.png",
-      "icons/128x128.png",
-      "icons/128x128@2x.png"
-    ],
-    "macOS": {
-      "infoPlist": "Info.plist",
-      "entitlements": "entitlements.plist",
-      "minimumSystemVersion": "13.0"
+    "$schema": "https://schema.tauri.app/config/2",
+    "productName": "ScribeShade",
+    "version": "2.1.52",
+    "identifier": "com.hiddenmindsolutions.scribeshade-frontend",
+    "build": {
+          "beforeDevCommand": "pnpm dev",
+          "devUrl": "http://localhost:1420",
+          "beforeBuildCommand": "pnpm build",
+          "frontendDist": "../dist"
     },
-    "linux": {
-      "deb": {
-        "depends": []
-      },
-      "rpm": {
-        "depends": []
-      }
-    }
-  },
-  "plugins": {
-    "deep-link": {
-      "desktop": {
-        "schemes": [
-          "scribeshade"
-        ]
-      }
+    "app": {
+          "macOSPrivateApi": true,
+          "windows": [],
+          "security": {
+                  "csp": null
+          }
     },
-    "fs": {
-      "requireLiteralLeadingDot": true
+    "bundle": {
+          "active": true,
+          "targets": [
+                  "app",
+                  "dmg",
+                  "msi",
+                  "nsis"
+          ],
+          "createUpdaterArtifacts": true,
+          "icon": [
+                  "icons/icon.ico",
+                  "icons/icon.icns",
+                  "icons/32x32.png",
+                  "icons/128x128.png",
+                  "icons/128x128@2x.png"
+          ],
+          "macOS": {
+                  "infoPlist": "Info.plist",
+                  "entitlements": "entitlements.plist",
+                  "minimumSystemVersion": "13.0"
+          }
     },
-    "updater": {
-      "endpoints": [
-        "https://pub-992f115513ba42f681595c2ca5fac628.r2.dev/tauri-updates/latest.json"
-      ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI4MzRFNTZERkE3QTg0QQpSV1JLcUtmZlZrNkRBdW9HY2hmcWlOTUVqOVNEc1pKOGNYcDZDaG9aVTFnL1JhTURLR1B6MVRnVAo=",
-      "windows": {
-        "installMode": "passive"
-      }
+    "plugins": {
+          "deep-link": {
+                  "desktop": {
+                            "schemes": [
+                                        "scribeshade"
+                            ]
+                  }
+          },
+          "fs": {
+                  "requireLiteralLeadingDot": true
+          },
+          "updater": {
+                  "endpoints": [
+                            "https://api.scribeshade.org/tauri-updates/latest.json"
+                  ],
+                  "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEEwRDAxMEVDNDA4QUMzOUMKUldTY3c0cEE3QkRRb056cFA3UWpHMmlnUVhibEliWWJoV1NPWTJ3NlJjQVZJa0o0cExkVmYvcjcK",
+                  "windows": {
+                            "installMode": "passive"
+                  }
+          }
     }
-  }
 }
