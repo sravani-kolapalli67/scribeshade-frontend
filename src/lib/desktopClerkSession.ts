@@ -24,3 +24,32 @@ export function clearDesktopClerkSessionId(): void {
     // Ignore storage errors.
   }
 }
+
+// ── Desktop auth token (for floating window API calls) ────────────────────────
+
+const DESKTOP_AUTH_TOKEN_KEY = "ss.desktop.auth_token";
+
+export function getDesktopAuthToken(): string {
+  try {
+    return localStorage.getItem(DESKTOP_AUTH_TOKEN_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+export function saveDesktopAuthToken(token: string | null | undefined): void {
+  if (!token) return;
+  try {
+    localStorage.setItem(DESKTOP_AUTH_TOKEN_KEY, token);
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
+export function clearDesktopAuthToken(): void {
+  try {
+    localStorage.removeItem(DESKTOP_AUTH_TOKEN_KEY);
+  } catch {
+    // Ignore storage errors.
+  }
+}
