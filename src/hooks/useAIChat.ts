@@ -85,7 +85,7 @@ function buildOriginalGenerationContextFromPayload(
       ...(typeof entry.timestamp === "number" ? { timestamp: entry.timestamp } : {}),
     }));
   const previousAiAnswers = (payload.previousAiAnswers || [])
-    .slice(-AI_ANSWER_LIMITS.previousAiAnswersMax)
+    .slice(-1) // Cap to 1 to prevent context poisoning
     .map((entry) => ({
       ...(entry.question ? { question: entry.question.slice(0, 500) } : {}),
       answer: (entry.answer || "").slice(0, 1000),
