@@ -31,6 +31,7 @@ import {
   type GenerationDecision 
 } from '@/lib/generation-pipeline';
 import { normalizeSttTranscript } from "@/features/session/transcript/stt-normalizer";
+import { getDesktopAuthToken } from "@/lib/desktopClerkSession";
 
 const SEGMENT_MARKER = /\n?={3,}NEXT_QUESTION={3,}\n?/;
 const QUESTION_MARKER = /(?:\*\*\s*)?QUESTION\s*:/i;
