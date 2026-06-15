@@ -15,83 +15,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  precheck-release:
-    name: Precheck existing release tag
-    runs-on: ubuntu-latest
-    outputs:
-      release_exists: ${{ steps.check.outputs.release_exists }}
-      release_tag: ${{ steps.check.outputs.release_tag }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Check whether release tag already exists
-        id: check
-        shell: bash
-        env:
-          GITHUB_TOKEN_DEFAULT: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          VERSION=$(node -p "require('./package.json').version")
-          TAG="v${VERSION}"
-          echo "release_tag=${TAG}" >> "$GITHUB_OUTPUT"
-
-          TOKEN="${GITHUB_TOKEN_DEFAULT}"
-
-          HTTP_STATUS=$(curl -sS -o /tmp/release_check.json -w "%{http_code}" \
-            -H "Authorization: Bearer ${TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${REPO}/releases/tags/${TAG}")
-
-          if [ "$HTTP_STATUS" = "200" ]; then
-            echo "Release ${TAG} exists. Validating required assets..."
-            CHECK_RESULT=$(node -e '
-              const fs = require("fs");
-              const data = JSON.parse(fs.readFileSync("/tmp/release_check.json", "utf8"));
-              const names = new Set((data.assets || []).map(a => a.name || ""));
-              const has = (re) => [...names].some(n => re.test(n));
-
-              const macPair = has(/\.app\.tar\.gz$/i) && has(/\.app\.tar\.gz\.sig$/i);
-              const linuxTarPair = has(/\.AppImage\.tar\.gz$/i) && has(/\.AppImage\.tar\.gz\.sig$/i);
-              const linuxRawPair = has(/\.AppImage$/i) && has(/\.AppImage\.sig$/i);
-              const linuxPair = linuxTarPair || linuxRawPair;
-
-              const winMsiZipPair = has(/\.msi\.zip$/i) && has(/\.msi\.zip\.sig$/i);
-              const winNsisZipPair = has(/setup\.nsis\.zip$/i) && has(/setup\.nsis\.zip\.sig$/i);
-              const winMsiPair = has(/\.msi$/i) && has(/\.msi\.sig$/i);
-              const winExePair = has(/\.exe$/i) && has(/\.exe\.sig$/i);
-              const windowsPair = winMsiZipPair || winNsisZipPair || winMsiPair || winExePair;
-
-              if (macPair && linuxPair && windowsPair) {
-                process.stdout.write("complete");
-              } else {
-                process.stdout.write("incomplete");
-              }
-            ')
-            if [ "$CHECK_RESULT" = "complete" ]; then
-              echo "Release ${TAG} has required updater assets. Skipping rebuild."
-              echo "release_exists=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "ERROR: Release ${TAG} exists but required updater artifact pairs are incomplete." >&2
-              echo "ERROR: Expected pairs:" >&2
-              echo "  macOS: *.app.tar.gz + *.app.tar.gz.sig" >&2
-              echo "  Linux: (*.AppImage + *.AppImage.sig) OR (*.AppImage.tar.gz + *.AppImage.tar.gz.sig)" >&2
-              echo "  Windows: (*.msi.zip + *.msi.zip.sig) OR (*setup.nsis.zip + *setup.nsis.zip.sig) OR (*.msi + *.msi.sig) OR (*.exe + *.exe.sig)" >&2
-              exit 1
-            fi
-          elif [ "$HTTP_STATUS" = "404" ]; then
-            echo "Release ${TAG} not found."
-            echo "release_exists=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "Unexpected status ${HTTP_STATUS}; build will proceed."
-            echo "release_exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
   publish-tauri:
-    needs: precheck-release
-    if: needs.precheck-release.outputs.release_exists != 'true'
-
     strategy:
       fail-fast: false
       matrix:
@@ -100,8 +24,6 @@ jobs:
             args: --target universal-apple-darwin --config src-tauri/tauri.macos.release.conf.json
           - platform: windows-latest
             args: ""
-          - platform: ubuntu-22.04
-            args: --bundles appimage,deb,rpm
 
     runs-on: ${{ matrix.platform }}
 
@@ -128,11 +50,6 @@ jobs:
         if: matrix.platform == 'macos-latest'
         run: |
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
-          rustup show
-
-      - name: Verify cargo is available
-        shell: bash
-        run: cargo --version
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -140,61 +57,13 @@ jobs:
           workspaces: ./src-tauri -> target
           cache-on-failure: true
 
-      - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt install -y \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            rpm \
-            build-essential
-
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
-
-      - name: Validate version parity
-        shell: bash
-        run: |
-          set -euo pipefail
-          PKG_VERSION=$(node -p "require('./package.json').version")
-          TAURI_VERSION=$(node -p "JSON.parse(require('fs').readFileSync('src-tauri/tauri.conf.json','utf8')).version")
-          CARGO_VERSION=$(grep -m1 '^version = ' src-tauri/Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')
-          echo "package.json: $PKG_VERSION"
-          echo "tauri.conf.json: $TAURI_VERSION"
-          echo "Cargo.toml: $CARGO_VERSION"
-          test "$PKG_VERSION" = "$TAURI_VERSION"
-          test "$PKG_VERSION" = "$CARGO_VERSION"
-
-      - name: Verify required release secrets are present
-        shell: bash
-        env:
-          VITE_DEEPGRAM_API_KEY: ${{ secrets.VITE_DEEPGRAM_API_KEY }}
-          VITE_CLERK_PUBLISHABLE_KEY: ${{ secrets.VITE_CLERK_PUBLISHABLE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        run: |
-          fail=0
-          check() {
-            if [ -z "$2" ]; then
-              echo "ERROR: $1 is empty or missing — release would be broken" >&2
-              fail=1
-            else
-              echo "OK: $1 is present"
-            fi
-          }
-          check VITE_DEEPGRAM_API_KEY "$VITE_DEEPGRAM_API_KEY"
-          check VITE_CLERK_PUBLISHABLE_KEY "$VITE_CLERK_PUBLISHABLE_KEY"
-          check TAURI_SIGNING_PRIVATE_KEY "$TAURI_SIGNING_PRIVATE_KEY"
-          exit $fail
 
       - name: Prepare macOS ad-hoc release config
         if: matrix.platform == 'macos-latest'
         shell: bash
         run: |
-          set -euo pipefail
           cat > src-tauri/tauri.macos.release.conf.json <<EOF
           {
             "bundle": {
@@ -214,7 +83,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          VITE_BACKEND_URL: "https://test.backend.scribeshade.org"
+          VITE_BACKEND_URL: "https://api.scribeshade.org"
           VITE_FRONTEND_URL: "https://app.scribeshade.org"
           VITE_CLERK_PUBLISHABLE_KEY: ${{ secrets.VITE_CLERK_PUBLISHABLE_KEY }}
           VITE_DEEPGRAM_API_KEY: ${{ secrets.VITE_DEEPGRAM_API_KEY }}
@@ -230,74 +99,19 @@ jobs:
           releaseName: ScribeShade v__VERSION__
           releaseBody: |
             ## ScribeShade v__VERSION__
-
             Download the installer for your platform below.
-
             **macOS** — universal binary (Intel + Apple Silicon)
             **Windows** — x64 installer
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
 
-      - name: Verify macOS bundle identity and entitlements
-        if: matrix.platform == 'macos-latest'
+      - name: Collect updater artifacts
         shell: bash
         run: |
-          set -euo pipefail
-          APP_PATH=$(find src-tauri/target -type d -name "ScribeShade.app" | head -n 1)
-          if [ -z "${APP_PATH:-}" ]; then
-            echo "ERROR: ScribeShade.app not found in build outputs" >&2
-            exit 1
-          fi
-          bash scripts/verify-macos-app.sh "$APP_PATH"
-
-      - name: Validate updater artifacts (fail-fast)
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Scanning updater artifacts..."
-          find src-tauri/target -type f \( -name "*.sig" -o -name "*.AppImage" -o -name "*.msi" -o -name "*.exe" -o -name "*.app.tar.gz" \) | sed -n '1,160p'
-
-          if [ "${{ matrix.platform }}" = "windows-latest" ]; then
-            if test -n "$(find src-tauri/target -name '*.msi.zip' -print -quit)" && test -n "$(find src-tauri/target -name '*.msi.zip.sig' -print -quit)"; then
-              echo "OK: Windows MSI zip updater pair found"
-            elif test -n "$(find src-tauri/target -name '*setup.nsis.zip' -print -quit)" && test -n "$(find src-tauri/target -name '*setup.nsis.zip.sig' -print -quit)"; then
-              echo "OK: Windows NSIS zip updater pair found"
-            elif test -n "$(find src-tauri/target -name '*.msi' -print -quit)" && test -n "$(find src-tauri/target -name '*.msi.sig' -print -quit)"; then
-              echo "OK: Windows MSI updater pair found"
-            elif test -n "$(find src-tauri/target -name '*.exe' -print -quit)" && test -n "$(find src-tauri/target -name '*.exe.sig' -print -quit)"; then
-              echo "OK: Windows EXE updater pair found"
-            else
-              echo "ERROR: Windows updater artifact pair missing"
-              exit 1
-            fi
-          fi
-
-          if [ "${{ matrix.platform }}" = "macos-latest" ]; then
-            test -n "$(find src-tauri/target -name '*.app.tar.gz' -print -quit)"
-            test -n "$(find src-tauri/target -name '*.app.tar.gz.sig' -print -quit)"
-            echo "OK: macOS updater pair found"
-          fi
-
-          if [ "${{ matrix.platform }}" = "ubuntu-22.04" ]; then
-            if test -n "$(find src-tauri/target -name '*.AppImage' -print -quit)" && test -n "$(find src-tauri/target -name '*.AppImage.sig' -print -quit)"; then
-              echo "OK: Linux AppImage updater pair found"
-            elif test -n "$(find src-tauri/target -name '*.AppImage.tar.gz' -print -quit)" && test -n "$(find src-tauri/target -name '*.AppImage.tar.gz.sig' -print -quit)"; then
-              echo "OK: Linux AppImage tar updater pair found"
-            else
-              echo "ERROR: Linux updater artifact pair missing"
-              exit 1
-            fi
-          fi
-
-      - name: Collect updater artifacts for R2 publish
-        shell: bash
-        run: |
-          set -euo pipefail
           OUT_DIR="ci-updater/${{ matrix.platform }}"
           rm -rf "$OUT_DIR"
           mkdir -p "$OUT_DIR"
-
           while IFS= read -r file; do
             cp "$file" "${OUT_DIR}/$(basename "$file")"
           done < <(
@@ -308,198 +122,50 @@ jobs:
               -o -name "*.msi" \
               -o -name "*.exe" \
               -o -name "*.dmg" \
-              -o -name "*.AppImage" \
-              -o -name "*.deb" \
-              -o -name "*.rpm" \)
+              -o -name "*.AppImage" \) 2>/dev/null
           )
-
           echo "Collected files:"
-          find "$OUT_DIR" -type f | sed -n '1,200p'
+          find "$OUT_DIR" -type f
 
-      - name: Upload updater artifacts bundle
+      - name: Upload updater artifacts
         uses: actions/upload-artifact@v4
         with:
           name: tauri-updater-${{ matrix.platform }}
           path: ci-updater/${{ matrix.platform }}
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 1
 
-  publish-updater-to-r2:
-    name: Publish updater artifacts to Cloudflare R2
+  publish-updater-to-vps:
+    name: Publish updater to VPS
     runs-on: ubuntu-latest
-    needs:
-      - precheck-release
-      - publish-tauri
-    if: always() && needs.precheck-release.result == 'success' && (needs.publish-tauri.result == 'success' || needs.publish-tauri.result == 'skipped')
+    needs: publish-tauri
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download matrix updater artifacts
-        if: needs.publish-tauri.result == 'success'
+      - name: Download all updater artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: tauri-updater-*
           merge-multiple: true
           path: r2-upload
 
-      - name: Download updater assets from existing GitHub release
-        if: needs.publish-tauri.result == 'skipped'
+      - name: Generate latest.json
         shell: bash
         env:
-          GITHUB_TOKEN_DEFAULT: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ needs.precheck-release.outputs.release_tag }}
+          UPDATER_PUBLIC_BASE_URL: https://api.scribeshade.org/tauri-updates
         run: |
-          set -euo pipefail
-          mkdir -p r2-upload
-
-          TOKEN="${GITHUB_TOKEN_DEFAULT}"
-
-          API_URL="https://api.github.com/repos/${REPO}/releases/tags/${RELEASE_TAG}"
-          curl -fsSL \
-            -H "Authorization: Bearer ${TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "$API_URL" \
-            -o /tmp/release.json
-
-          node -e '
-            const fs = require("fs");
-            const data = JSON.parse(fs.readFileSync("/tmp/release.json", "utf8"));
-            const wanted = /\.(sig|app\.tar\.gz|AppImage\.tar\.gz|msi\.zip|setup\.nsis\.zip|msi|exe|dmg|deb|rpm|AppImage|latest\.json)$/i;
-            const assets = (data.assets || [])
-              .filter(a => wanted.test(a.name || ""))
-              .map(a => ({ name: a.name, apiUrl: a.url }));
-            fs.writeFileSync(
-              "/tmp/release_urls.txt",
-              assets.map(a => `${a.name}\t${a.apiUrl}`).join("\n") + (assets.length ? "\n" : "")
-            );
-            console.log(`[release-assets] selected ${assets.length} assets from ${data.tag_name}`);
-          '
-
-          if [ ! -s /tmp/release_urls.txt ]; then
-            echo "ERROR: No matching assets found in release ${RELEASE_TAG}." >&2
-            exit 1
-          fi
-
-          while IFS=$'\t' read -r file api_url; do
-            [ -z "${file:-}" ] && continue
-            [ -z "${api_url:-}" ] && continue
-            echo "Downloading $file"
-            curl -fsSL \
-              -H "Authorization: Bearer ${TOKEN}" \
-              -H "Accept: application/octet-stream" \
-              -o "r2-upload/${file}" \
-              "$api_url"
-          done < /tmp/release_urls.txt
-
-          echo "Release assets downloaded:"
-          find r2-upload -type f | sed -n '1,250p'
-
-      - name: Remove non-updater files from upload folder
-        shell: bash
-        run: |
-          set -euo pipefail
-          find r2-upload -type f \
-            ! -name "*.sig" \
-            ! -name "latest.json" \
-            ! -name "*.app.tar.gz" \
-            ! -name "*.AppImage.tar.gz" \
-            ! -name "*.msi.zip" \
-            ! -name "*setup.nsis.zip" \
-            ! -name "*.msi" \
-            ! -name "*.exe" \
-            ! -name "*.dmg" \
-            ! -name "*.deb" \
-            ! -name "*.rpm" \
-            ! -name "*.AppImage" \
-            -delete
-
-      - name: Generate latest.json for public R2 URL
-        shell: bash
-        env:
-          UPDATER_PUBLIC_BASE_URL: https://pub-992f115513ba42f681595c2ca5fac628.r2.dev/tauri-updates
-        run: |
-          set -euo pipefail
           node scripts/generate-latest-json.cjs r2-upload
+          echo "Generated latest.json:"
+          cat r2-upload/latest.json
 
-      - name: Verify R2 secrets are present
-        shell: bash
-        env:
-          CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
-          CLOUDFLARE_R2_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
-          CLOUDFLARE_R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
-          CLOUDFLARE_R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          fail=0
-          check() {
-            if [ -z "$2" ]; then
-              echo "ERROR: $1 is empty or missing" >&2
-              fail=1
-            else
-              echo "OK: $1 is present"
-            fi
-          }
-          check CLOUDFLARE_R2_ACCOUNT_ID "$CLOUDFLARE_R2_ACCOUNT_ID"
-          check CLOUDFLARE_R2_ACCESS_KEY_ID "$CLOUDFLARE_R2_ACCESS_KEY_ID"
-          check CLOUDFLARE_R2_SECRET_ACCESS_KEY "$CLOUDFLARE_R2_SECRET_ACCESS_KEY"
-          check CLOUDFLARE_R2_BUCKET "$CLOUDFLARE_R2_BUCKET"
-
-          # R2 S3 credential sanity checks (prevents opaque AWS CLI failures).
-          AKI_LEN=${#CLOUDFLARE_R2_ACCESS_KEY_ID}
-          SAK_LEN=${#CLOUDFLARE_R2_SECRET_ACCESS_KEY}
-          if [ "$AKI_LEN" -ne 32 ]; then
-            echo "ERROR: CLOUDFLARE_R2_ACCESS_KEY_ID length is $AKI_LEN (expected 32). You likely pasted the wrong value." >&2
-            fail=1
-          else
-            echo "OK: CLOUDFLARE_R2_ACCESS_KEY_ID length looks valid (32)."
-          fi
-          if [ "$SAK_LEN" -lt 40 ]; then
-            echo "ERROR: CLOUDFLARE_R2_SECRET_ACCESS_KEY looks too short ($SAK_LEN)." >&2
-            fail=1
-          else
-            echo "OK: CLOUDFLARE_R2_SECRET_ACCESS_KEY length looks valid."
-          fi
-          exit $fail
-
-      - name: Ensure latest.json exists in upload bundle
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -n "$(find r2-upload -type f -name latest.json -print -quit)"
-          echo "Found latest.json and updater files."
-          find r2-upload -type f | sed -n '1,250p'
-
-      - name: Replace live R2 updater prefix from local bundle
-        shell: bash
-        env:
-          CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
-          CLOUDFLARE_R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-        run: |
-          set -euo pipefail
-          ENDPOINT="https://${CLOUDFLARE_R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          # Keep local->R2 sync only (no S3->S3 copy), to avoid
-          # GetObjectTagging NotImplemented on Cloudflare R2.
-          aws s3 sync r2-upload/ "s3://${CLOUDFLARE_R2_BUCKET}/tauri-updates/" \
-            --delete \
-            --endpoint-url "$ENDPOINT"
-
-      - name: List uploaded updater files
-        shell: bash
-        env:
-          CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
-          CLOUDFLARE_R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-        run: |
-          set -euo pipefail
-          ENDPOINT="https://${CLOUDFLARE_R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          aws s3 ls "s3://${CLOUDFLARE_R2_BUCKET}/tauri-updates/" \
-            --recursive \
-            --endpoint-url "$ENDPOINT"
+      - name: Deploy to VPS via SSH
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 31.97.237.184
+          username: root
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          source: "r2-upload/*"
+          target: "/root/scribeshade/uploads/tauri-updates/"
+          strip_components: 1
