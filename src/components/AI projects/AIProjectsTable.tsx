@@ -336,8 +336,8 @@ export function AIProjectsTable({ activeJob, refreshTrigger = 0 }: AIProjectsTab
               <div className="min-w-0">
                 <p className="text-sm font-semibold truncate">{project.position}</p>
                 <p className="text-xs text-muted-foreground truncate max-w-[280px]">
-                  {project.jobDescription?.slice(0, 80) || "—"}
-                  {(project.jobDescription?.length ?? 0) > 80 ? "…" : ""}
+                  {(project.jobDescription?.replace(/\*\*|__|\*|_|`|#+\s/g, '') || "-").slice(0, 80)}
+                  {(project.jobDescription?.replace(/\*\*|__|\*|_|`|#+\s/g, '') ?? '').length > 80 ? '\u2026' : ''}
                 </p>
               </div>
             </div>
