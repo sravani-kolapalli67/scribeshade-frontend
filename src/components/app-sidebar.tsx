@@ -161,7 +161,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       </SidebarContent>
       <SidebarFooter>
         <NavUser />
-      </SidebarFooter>
+      <a href="mailto:97sravanikolapalli@gmail.com?subject=ScribeShade Support" className="flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground hover:text-foreground hover:bg-sidebar-accent rounded-md mx-2 mb-1 transition-colors">&#x1F4AC; Support &amp; Feedback</a></SidebarFooter>
       <SidebarRail />
     </Sidebar>
   );
