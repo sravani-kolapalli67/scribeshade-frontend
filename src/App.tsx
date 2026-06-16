@@ -197,7 +197,7 @@ function App() {
           <div className="flex-1 overflow-hidden">
             <Suspense fallback={<PageLoader />}>
               <Routes>
-                <Route path="/resume/editor" element={<ResumeEditor />} />
+                <Route path="/resume/editor" element={<ResumeEditor />} />              <Route path="/resume/studio" element={<Navigate to="/resume/build" replace />} />
                 <Route path="*" element={<Navigate to="/resume/editor" replace />} />
               </Routes>
             </Suspense>
@@ -223,7 +223,7 @@ function App() {
               <Route path="/resume/all" element={<AllResumes />} />
               <Route path="/resume/ats-analysis" element={<ATSAnalysis />} />
               <Route path="/resume/build" element={<BuildResume />} />
-              <Route path="/resume/editor" element={<ResumeEditor />} />
+              <Route path="/resume/editor" element={<ResumeEditor />} />              <Route path="/resume/studio" element={<Navigate to="/resume/build" replace />} />
               <Route path="/resume/cover-letter" element={<CoverLetter />} />
               <Route path="/resume/ats-result" element={<ATSResult />} />
               <Route path="/ai-projects" element={<AIProjects />} />
