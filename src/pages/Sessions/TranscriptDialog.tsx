@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { useAuth } from "@clerk/clerk-react";
 import type { VirtuosoHandle } from "react-virtuoso";
 import { Virtuoso } from "react-virtuoso";
 import {
@@ -29,7 +30,6 @@ import { cn } from "@/lib/utils";
 import { AskAIWorkspace } from "./components/AskAI/AskAIWorkspace";
 import { PostSessionAnswerEditor } from "./components/PostSessionAnswerEditor";
 import { TranscriptAnswerMarkdown } from "./components/TranscriptAnswerMarkdown";
-
 export interface Message {
   id?: string;
   messageId?: string;
@@ -43,7 +43,6 @@ export interface Message {
   patchedText?: string;
   answerVersion?: number;
 }
-
 interface TranscriptEntry {
   id: string;
   role: "USER" | "INTERVIEWER" | "AI_ASSISTANT";
@@ -55,7 +54,6 @@ interface TranscriptEntry {
   aiAnswer?: string;
   answerVersion?: number;
 }
-
 interface SessionNotes {
   id: string;
   sessionId: string;
@@ -65,14 +63,12 @@ interface SessionNotes {
   questions: string[];
   updatedAt: string;
 }
-
 interface TranscriptDialogProps {
   isOpen: boolean;
   onClose: () => void;
   sessionId: string;
   onDelete: (id: string) => void;
 }
-
 function messageKey(message: Message, index: number): string {
   return (
     message.messageId ||
@@ -81,7 +77,6 @@ function messageKey(message: Message, index: number): string {
     `message-${index}`
   );
 }
-
 function resolveRole(
   value: unknown,
 ): "USER" | "INTERVIEWER" | "AI_ASSISTANT" {
@@ -89,13 +84,11 @@ function resolveRole(
   if (value === "INTERVIEWER") return "INTERVIEWER";
   return "AI_ASSISTANT";
 }
-
 function resolveRoleLabel(role: TranscriptEntry["role"]): string {
   if (role === "USER") return "You";
   if (role === "INTERVIEWER") return "Interviewer";
   return "AI Assistant";
 }
-
 function resolveTime(
   message: Message,
   index: number,
@@ -115,7 +108,6 @@ function resolveTime(
   }
   return { time: "00:00", timestampMs: index };
 }
-
 function resolveTranscriptText(
   message: Message,
   role: TranscriptEntry["role"],
@@ -136,7 +128,6 @@ function resolveTranscriptText(
     ""
   );
 }
-
 function parseAiQuestionAnswer(message: Message): {
   question: string;
   answer: string;
@@ -146,7 +137,6 @@ function parseAiQuestionAnswer(message: Message): {
   if (!rawBody) {
     return { question: directQuestion || "Generated response", answer: "" };
   }
-
   const questionMatch = rawBody.match(
     /\*\*QUESTION:\*\*\s*([\s\S]*?)(?=\*\*ANSWER:\*\*|ANSWER:)/i,
   );
@@ -166,7 +156,6 @@ function parseAiQuestionAnswer(message: Message): {
       rawBody.split(/===NEXT_QUESTION===/gi)[0]?.trim() || rawBody,
   };
 }
-
 const TranscriptBubble = memo(function TranscriptBubble({
   entry,
 }: {
@@ -193,7 +182,6 @@ const TranscriptBubble = memo(function TranscriptBubble({
     </div>
   );
 });
-
 const AiAnswerCard = memo(function AiAnswerCard({
   entry,
   sessionId,
@@ -248,7 +236,6 @@ const AiAnswerCard = memo(function AiAnswerCard({
           </Button>
         </div>
       </div>
-
       <div className="my-3 h-px bg-slate-200" />
       <p className="m-0 text-[16px] font-bold leading-none text-slate-900">
         Answer:
@@ -260,7 +247,6 @@ const AiAnswerCard = memo(function AiAnswerCard({
         AI Answer · {entry.time}
         {entry.answerVersion ? ` · Version ${entry.answerVersion}` : ""}
       </div>
-
       {editing ? (
         <PostSessionAnswerEditor
           sessionId={sessionId}
@@ -276,7 +262,6 @@ const AiAnswerCard = memo(function AiAnswerCard({
     </article>
   );
 });
-
 function EmptyState({
   title,
   description,
@@ -304,13 +289,13 @@ function EmptyState({
     </div>
   );
 }
-
 export function TranscriptDialog({
   isOpen,
   onClose,
   sessionId,
   onDelete,
 }: TranscriptDialogProps) {
+  const { getToken } = useAuth();
   const [activeTab, setActiveTab] = useState("transcript");
   const [messages, setMessages] = useState<Message[]>([]);
   const [userId, setUserId] = useState("");
@@ -323,55 +308,60 @@ export function TranscriptDialog({
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const visibleStartIndexRef = useRef(0);
-
   useEffect(() => {
     if (!isOpen || !sessionId) return;
     let active = true;
-    Promise.all([
-      fetch(`${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionId}`),
-      fetch(
-        `${import.meta.env.VITE_BACKEND_URL}/api/session-notes/${sessionId}`,
-      ),
-    ])
-      .then(async ([sessionResponse, notesResponse]) => {
-        if (sessionResponse.ok) {
-          const data = await sessionResponse.json();
-          const sessionData = data.data ?? data;
-          const storedMessages = Array.isArray(sessionData.messages)
-            ? sessionData.messages
-            : [];
-          const storedTranscript = Array.isArray(sessionData.transcript)
-            ? sessionData.transcript
-            : [];
-          if (active) {
-            setMessages(
-              storedMessages.length > 0
-                ? storedMessages
-                : storedTranscript,
-            );
-            setUserId(sessionData.userId || "");
-            setIsEphemeral(sessionData.saveTranscription === false);
+    (async () => {
+      const token = await getToken();
+      const authHeaders = { Authorization: "Bearer " + token };
+      Promise.all([
+        fetch(`${import.meta.env.VITE_BACKEND_URL}/api/session/${sessionId}`, {
+          headers: authHeaders,
+        }),
+        fetch(
+          `${import.meta.env.VITE_BACKEND_URL}/api/session-notes/${sessionId}`,
+          { headers: authHeaders },
+        ),
+      ])
+        .then(async ([sessionResponse, notesResponse]) => {
+          if (sessionResponse.ok) {
+            const data = await sessionResponse.json();
+            const sessionData = data.data ?? data;
+            const storedMessages = Array.isArray(sessionData.messages)
+              ? sessionData.messages
+              : [];
+            const storedTranscript = Array.isArray(sessionData.transcript)
+              ? sessionData.transcript
+              : [];
+            if (active) {
+              setMessages(
+                storedMessages.length > 0
+                  ? storedMessages
+                  : storedTranscript,
+              );
+              setUserId(sessionData.userId || "");
+              setIsEphemeral(sessionData.saveTranscription === false);
+            }
           }
-        }
-        if (active) {
-          setNotes(
-            notesResponse.ok
-              ? (await notesResponse.json()).data
-              : null,
-          );
-        }
-      })
-      .catch((error) =>
-        console.error("Error fetching session details:", error),
-      )
-      .finally(() => {
-        if (active) setLoadedForSessionId(sessionId);
-      });
+          if (active) {
+            setNotes(
+              notesResponse.ok
+                ? (await notesResponse.json()).data
+                : null,
+            );
+          }
+        })
+        .catch((error) =>
+          console.error("Error fetching session details:", error),
+        )
+        .finally(() => {
+          if (active) setLoadedForSessionId(sessionId);
+        });
+    })();
     return () => {
       active = false;
     };
-  }, [isOpen, sessionId]);
-
+  }, [isOpen, sessionId, getToken]);
   const parsedTranscript = useMemo<TranscriptEntry[]>(() => {
     const rows: TranscriptEntry[] = [];
     messages.forEach((message, index) => {
@@ -406,7 +396,6 @@ export function TranscriptDialog({
     });
     return rows.sort((left, right) => left.timestampMs - right.timestampMs);
   }, [messages]);
-
   const indexByMessageId = useMemo(
     () =>
       new Map(
@@ -414,13 +403,11 @@ export function TranscriptDialog({
       ),
     [parsedTranscript],
   );
-
   const handleCopy = useCallback((id: string, text: string) => {
     void navigator.clipboard.writeText(text);
     setCopiedId(id);
     window.setTimeout(() => setCopiedId(null), 2000);
   }, []);
-
   const handleAnswerApplied = useCallback(
     (messageId: string, answer: string, version: number) => {
       setMessages((current) =>
@@ -439,7 +426,6 @@ export function TranscriptDialog({
     },
     [],
   );
-
   const handleNavigateToTimeline = useCallback(
     (interactionId: string) => {
       const index = indexByMessageId.get(interactionId);
@@ -455,7 +441,6 @@ export function TranscriptDialog({
     },
     [indexByMessageId],
   );
-
   const handleTabChange = useCallback((value: string) => {
     setActiveTab(value);
     if (value === "transcript") {
@@ -467,13 +452,13 @@ export function TranscriptDialog({
       }, 0);
     }
   }, []);
-
   const generateNotes = useCallback(async () => {
     setIsGenerating(true);
     try {
+      const token = await getToken();
       const response = await fetch(
         `${import.meta.env.VITE_BACKEND_URL}/api/session-notes/${sessionId}/generate`,
-        { method: "POST" },
+        { method: "POST", headers: { Authorization: "Bearer " + token } },
       );
       if (response.ok) {
         setNotes((await response.json()).data);
@@ -482,8 +467,7 @@ export function TranscriptDialog({
     } finally {
       setIsGenerating(false);
     }
-  }, [sessionId]);
-
+  }, [sessionId, getToken]);
   const downloadTranscript = useCallback(() => {
     const content = parsedTranscript
       .map((entry) => `[${entry.time}] ${entry.label}: ${entry.text}`)
@@ -499,7 +483,6 @@ export function TranscriptDialog({
     anchor.click();
     URL.revokeObjectURL(url);
   }, [parsedTranscript, sessionId]);
-
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="flex h-[85vh] w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden rounded-xl border bg-background p-0 shadow-xl sm:max-w-5xl">
@@ -543,7 +526,6 @@ export function TranscriptDialog({
             </Button>
           </div>
         </header>
-
         <Tabs
           value={activeTab}
           onValueChange={handleTabChange}
@@ -565,7 +547,6 @@ export function TranscriptDialog({
               </TabsTrigger>
             </TabsList>
           </div>
-
           <TabsContent
             value="transcript"
             className="min-h-0 flex-1 bg-slate-50/30"
@@ -613,7 +594,6 @@ export function TranscriptDialog({
               />
             )}
           </TabsContent>
-
           <TabsContent
             value="ai-notes"
             className="min-h-0 flex-1 overflow-y-auto bg-slate-50/30 p-6"
@@ -668,7 +648,6 @@ export function TranscriptDialog({
               )}
             </div>
           </TabsContent>
-
           <TabsContent value="ask-ai" className="min-h-0 flex-1">
             <AskAIWorkspace
               sessionId={sessionId}
