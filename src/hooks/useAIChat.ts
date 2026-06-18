@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
+import { useAuth } from "@clerk/clerk-react";
 import { Message } from "@/pages/Sessions/ActiveSession/Transcript";
 import {
   type AIAnswerRequestPayload,
@@ -719,6 +720,9 @@ async function consumeSegmentedStream(
 }
 
 export const useAIChat = () => {
+  const { getToken } = useAuth();
+  const authTokenRef = useRef("");
+  useEffect(() => { getToken().then((t) => { if (t) authTokenRef.current = t; }); }, [getToken]);
   const [aiChat, setAiChat] = useState<Message[]>([]);
   const [inputMessage, setInputMessage] = useState("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -994,6 +998,7 @@ export const useAIChat = () => {
         console.log(`[useAIChat] handleAnalyzeScreen: Dispatching POST to ${targetUrl}`);
         const response = await fetch(targetUrl, {
           method: "POST",
+          headers: { "Authorization": "Bearer " + authTokenRef.current },
           body: formData,
           signal: controller.signal,
         });
@@ -1324,6 +1329,7 @@ export const useAIChat = () => {
             "Content-Type": "application/json",
             "x-request-id": requestId,
             "x-session-id": sessionId,
+			"Authorization": "Bearer " + authTokenRef.current,
           },
           body: JSON.stringify(requestBody),
           signal: controller.signal,
@@ -1633,6 +1639,7 @@ export const useAIChat = () => {
               "Content-Type": "application/json",
               "x-request-id": requestId,
               "x-session-id": sessionId,
+			  "Authorization": "Bearer " + authTokenRef.current,
             },
             body: JSON.stringify({
               ...sanitizeAIAnswerPayload({
@@ -1922,6 +1929,7 @@ export const useAIChat = () => {
             "Content-Type": "application/json",
             "x-request-id": requestId,
             "x-session-id": sessionId,
+			"Authorization": "Bearer " + authTokenRef.current,
           },
           body: JSON.stringify(requestBody),
           signal: controller.signal,
