@@ -71,6 +71,7 @@ export default function Sessions() {
   }, [searchParams]);
   useEffect(() => {
     if (!userId) return;
+    dispatch(invalidateSessions());
     getToken().then((token) => {
       dispatch(
         fetchSessions({
