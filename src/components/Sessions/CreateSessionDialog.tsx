@@ -152,7 +152,7 @@ export default function CreateSessionDialog({
               sessionId: newSessionId,
               companyName: sessionData.companyName,
               jobTitle: sessionData.jobDescription.slice(0, 60),
-              extraContext: sessionData.instructions,
+              extraContext: sessionData.extraContext || sessionData.instructions,
               language: sessionData.language,
               simpleLanguage: sessionData.simpleLanguage,
               aiModel: sessionData.aiModel,
