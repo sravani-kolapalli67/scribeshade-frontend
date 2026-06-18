@@ -62,7 +62,7 @@ export function ResumeSelector({ onSelect, onDeselect, value, filter, includeBui
     if (!id) return;
 
     const fetchUploaded = fetch(`${import.meta.env.VITE_BACKEND_URL}/api/resume/list?userId=${id}`, {
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${await getToken()}` },
     }).then((res) => res.json()).then((response): Resume[] => {
       const list: Resume[] = Array.isArray(response) ? response : (response.data ?? []);
       return list.map((r) => ({ ...r, source: "uploaded" as const }));
