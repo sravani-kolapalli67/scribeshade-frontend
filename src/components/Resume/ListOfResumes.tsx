@@ -154,7 +154,8 @@ export default function ListOfResumes({
 
       // Single defer point for all API calls
       const url = `${import.meta.env.VITE_BACKEND_URL}/api/resume/list?${params.toString()}`;
-      const res = await fetch(url);
+    const token = await getToken();
+         const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
 
       if (!res.ok) {
         console.error("Resume fetch failed:", res.statusText);
