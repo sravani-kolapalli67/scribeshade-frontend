@@ -244,8 +244,3 @@ export const selectSessionsError = (state: RootState) => state.sessions.error;
 export default sessionsSlice.reducer;
 ```
 
-**Only 2 changes:**
-1. Added `token?: string;` to `FetchParams` interface
-2. Added `...(params.token ? { Authorization: \`Bearer ${params.token}\` } : {})` to the fetch headers
-
-Now paste the `Sessions/page.tsx` here and I'll give you the fixed version with `useAuth` and token passing.
