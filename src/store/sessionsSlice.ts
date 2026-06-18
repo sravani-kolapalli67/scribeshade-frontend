@@ -1,6 +1,3 @@
-Here's the fixed `sessionsSlice.ts` with the auth token added:
-
-```ts
 import { createSlice, createAsyncThunk, type PayloadAction } from "@reduxjs/toolkit";
 import type { RootState } from "./store";
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -69,12 +66,15 @@ export const fetchSessions = createAsyncThunk(
       if (params.search) qs.set("search", params.search);
       if (params.from_date) qs.set("from_date", params.from_date);
       if (params.to_date) qs.set("to_date", params.to_date);
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (params.token) {
+        headers["Authorization"] = "Bearer " + params.token;
+      }
       const res = await fetch(`${BACKEND_URL}/api/session/list?${qs}`, {
         method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          ...(params.token ? { Authorization: `Bearer ${params.token}` } : {}),
-        },
+        headers,
       });
       if (!res.ok) throw new Error("Failed to fetch sessions");
       const data = await res.json();
@@ -108,14 +108,11 @@ export const forceDeleteSession = createAsyncThunk(
   "sessions/forceDelete",
   async (id: string, { rejectWithValue }) => {
     try {
-      // 1. End session gracefully
       await fetch(`${BACKEND_URL}/api/session/${id}/deactivate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ transcript: "", aiUsage: 0 }),
       }).catch(() => {});
-      // Wait for the background credit-deduction job to finish processing
-      // and transition the session out of the COMPLETING state.
       let attempts = 0;
       while (attempts < 10) {
         await new Promise((resolve) => setTimeout(resolve, 500));
@@ -133,7 +130,6 @@ export const forceDeleteSession = createAsyncThunk(
         }
         attempts++;
       }
-      // 2. Delete
       const res = await fetch(`${BACKEND_URL}/api/session/${id}`, {
         method: "DELETE",
       });
@@ -185,22 +181,18 @@ const sessionsSlice = createSlice({
   name: "sessions",
   initialState,
   reducers: {
-    /** Force a re-fetch on next dispatch of fetchSessions */
     invalidateSessions(state) {
       state.lastFetchKey = null;
     },
-    /** Optimistically remove a session from the local list */
     removeSessionLocally(state, action: PayloadAction<string>) {
       state.items = state.items.filter((s) => s.id !== action.payload);
     },
-    /** Optimistically remove multiple sessions from the local list */
     removeSessionsLocally(state, action: PayloadAction<string[]>) {
       const idsSet = new Set(action.payload);
       state.items = state.items.filter((s) => !idsSet.has(s.id));
     },
   },
   extraReducers: (builder) => {
-    // ── fetchSessions ───────────────────────────────────────────────────────
     builder.addCase(fetchSessions.pending, (state) => {
       if (!state.hasFetched) {
         state.status = "loading";
@@ -219,15 +211,12 @@ const sessionsSlice = createSlice({
       state.status = "failed";
       state.error = action.payload as string;
     });
-    // ── deleteSession ───────────────────────────────────────────────────────
     builder.addCase(deleteSession.fulfilled, (state, action) => {
       state.items = state.items.filter((s) => s.id !== action.payload);
     });
-    // ── forceDeleteSession ──────────────────────────────────────────────────
     builder.addCase(forceDeleteSession.fulfilled, (state, action) => {
       state.items = state.items.filter((s) => s.id !== action.payload);
     });
-    // ── bulkDeleteSessions ──────────────────────────────────────────────────
     builder.addCase(bulkDeleteSessions.fulfilled, (state, action) => {
       const deletedSet = new Set(action.payload.deleted);
       state.items = state.items.filter((s) => !deletedSet.has(s.id));
@@ -236,11 +225,8 @@ const sessionsSlice = createSlice({
 });
 export const { invalidateSessions, removeSessionLocally, removeSessionsLocally } =
   sessionsSlice.actions;
-// ── Selectors ─────────────────────────────────────────────────────────────────
 export const selectSessionItems = (state: RootState) => state.sessions.items;
 export const selectSessionsStatus = (state: RootState) => state.sessions.status;
 export const selectSessionsHasFetched = (state: RootState) => state.sessions.hasFetched;
 export const selectSessionsError = (state: RootState) => state.sessions.error;
 export default sessionsSlice.reducer;
-```
-
