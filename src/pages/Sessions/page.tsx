@@ -6,9 +6,8 @@ import { DataTable } from "@/components/data-table/data-table";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Trash2, FileText, BarChart3, Play } from "lucide-react";
+import { Trash2, Play } from "lucide-react";
 import { TranscriptDialog } from "./TranscriptDialog";
-import { SessionAnalyticsDialog } from "./SessionAnalyticsDialog";
 import { useCreditsBalance } from "@/hooks/useCreditsBalance";
 import { OutOfCreditsDialog } from "@/components/Billing/OutOfCreditsDialog";
 import { BuyCreditsDialog } from "@/components/Billing/BuyCreditsDialog";
@@ -55,13 +54,21 @@ export default function Sessions() {
   const [isForceDeleting, setIsForceDeleting] = useState(false);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [isTranscriptDialogOpen, setIsTranscriptDialogOpen] = useState(false);
-  const [isAnalyticsDialogOpen, setIsAnalyticsDialogOpen] = useState(false);
-  const [selectedSessionForAnalytics, setSelectedSessionForAnalytics] = useState<Session | null>(null);
   const { balance, refresh: refreshBalance } = useCreditsBalance();
   const [isOutOfCreditsOpen, setIsOutOfCreditsOpen] = useState(false);
   const [isBuyCreditsOpen, setIsBuyCreditsOpen] = useState(false);
   const [currentSearch, setCurrentSearch] = useState("");
   const [currentDateRange, setCurrentDateRange] = useState({ from_date: "", to_date: "" });
+
+  const isSessionEnded = (row: Session) =>
+    !!row.endedAt ||
+    row.status === "COMPLETED" ||
+    row.status === "AUTO_ENDED" ||
+    row.status === "CREDIT_EXHAUSTED" ||
+    row.status === "FORCE_ENDED" ||
+    row.status === "ABANDONED" ||
+    row.status === "Ended";
+
   useEffect(() => {
     const viewId = searchParams.get("view");
     if (viewId) {
@@ -69,6 +76,7 @@ export default function Sessions() {
       setIsTranscriptDialogOpen(true);
     }
   }, [searchParams]);
+
   useEffect(() => {
     if (!userId) return;
     dispatch(invalidateSessions());
@@ -84,37 +92,38 @@ export default function Sessions() {
       );
     });
   }, [dispatch, userId, currentSearch, currentDateRange, getToken]);
+
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
-  const fetchDataForTable = useCallback(
-    async (params: any) => {
-      const page = params.page || 1;
-      const limit = params.limit || 10;
-      const items = sessionsRef.current;
-      const total_items = items.length;
-      const total_pages = Math.ceil(total_items / limit);
-      const startIndex = (page - 1) * limit;
-      const paginatedData = items.slice(startIndex, startIndex + limit);
-      return {
-        success: true,
-        data: paginatedData,
-        pagination: { page, limit, total_pages, total_items },
-      };
-    },
-    [],
-  );
+
+  const fetchDataForTable = useCallback(async (params: any) => {
+    const page = params.page || 1;
+    const limit = params.limit || 10;
+    const items = sessionsRef.current;
+    const total_items = items.length;
+    const total_pages = Math.ceil(total_items / limit);
+    const startIndex = (page - 1) * limit;
+    const paginatedData = items.slice(startIndex, startIndex + limit);
+    return { success: true, data: paginatedData, pagination: { page, limit, total_pages, total_items } };
+  }, []);
+
   const [dataVersion, setDataVersion] = useState(0);
-  useEffect(() => {
-    setDataVersion((v) => v + 1);
-  }, [sessions]);
+  useEffect(() => { setDataVersion((v) => v + 1); }, [sessions]);
   const stableFetchFn = useMemo(() => {
     const fn = async (params: any) => fetchDataForTable(params);
     return fn;
   }, [dataVersion, fetchDataForTable]);
+
   const handleDeleteClick = (id: string) => {
     setSessionToDelete(id);
     setIsDeleteDialogOpen(true);
   };
+
+  const openTranscript = (id: string) => {
+    setSelectedSessionId(id);
+    setIsTranscriptDialogOpen(true);
+  };
+
   const confirmDelete = async () => {
     if (!sessionToDelete) return;
     setIsDeleting(true);
@@ -135,6 +144,7 @@ export default function Sessions() {
       setSessionToDelete(null);
     }
   };
+
   const confirmForceDelete = async () => {
     if (!sessionToForceDelete) return;
     setIsForceDeleting(true);
@@ -149,6 +159,7 @@ export default function Sessions() {
       setIsForceDeleteDialogOpen(false);
     }
   };
+
   const confirmBulkDelete = async () => {
     if (bulkIdsToDelete.length === 0) return;
     setIsBulkDeleting(true);
@@ -169,6 +180,7 @@ export default function Sessions() {
       setIsBulkDeleting(false);
     }
   };
+
   const columns: ColumnDef<SessionRow>[] = useMemo(
     () => [
       {
@@ -196,9 +208,12 @@ export default function Sessions() {
         accessorKey: "companyName",
         header: "Company Name",
         cell: ({ row }) => (
-          <span className="font-bold text-foreground truncate max-w-48 block">
-            {row.getValue("companyName") || (row.original as any).company?.name || ""}
-          </span>
+          <button
+            onClick={() => openTranscript(row.original.id)}
+            className="font-bold text-foreground truncate max-w-48 block hover:text-primary hover:underline underline-offset-2 transition-colors text-left"
+          >
+            {row.getValue("companyName") || (row.original as any).company?.name || "—"}
+          </button>
         ),
       },
       {
@@ -224,7 +239,7 @@ export default function Sessions() {
         header: "Status",
         cell: ({ row }) => {
           const rowStatus = row.original.status;
-          const isEnded = rowStatus === "COMPLETED" || rowStatus === "AUTO_ENDED" || rowStatus === "Ended" || !!row.original.endedAt;
+          const ended = isSessionEnded(row.original);
           type StatusCfg = { label: string; className: string };
           const statusConfig: { [key: string]: StatusCfg } = {
             PRE_CHECK: { label: "Pending", className: "bg-muted text-muted-foreground border-border/60" },
@@ -238,7 +253,7 @@ export default function Sessions() {
             Ended: { label: "Completed", className: "bg-muted text-foreground border-border" },
             Active: { label: "Active", className: "bg-emerald-50 text-emerald-700 border-emerald-300" },
           };
-          const cfg = rowStatus ? statusConfig[rowStatus] : isEnded ? statusConfig["COMPLETED"] : statusConfig["ACTIVE"];
+          const cfg = rowStatus ? statusConfig[rowStatus] : ended ? statusConfig["COMPLETED"] : statusConfig["ACTIVE"];
           if (!cfg) return null;
           return (
             <Badge variant="outline" className={"text-[11px] font-semibold px-2.5 py-0.5 " + cfg.className}>
@@ -265,58 +280,56 @@ export default function Sessions() {
       {
         id: "actions",
         header: "Actions",
-        cell: ({ row }) => (
-          <div className="flex items-center justify-end gap-2 pr-2">
-            {(row.original.status === "PRE_CHECK" ||
-              (!row.original.endedAt &&
-                row.original.status !== "COMPLETED" &&
-                row.original.status !== "AUTO_ENDED" &&
-                row.original.status !== "CREDIT_EXHAUSTED" &&
-                row.original.status !== "FORCE_ENDED" &&
-                row.original.status !== "ABANDONED")) && (
+        cell: ({ row }) => {
+          const ended = isSessionEnded(row.original);
+          return (
+            <div className="flex items-center justify-end gap-2 pr-2">
+              {!ended && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => {
+                    if (!row.original.free && balance) {
+                      const available = parseFloat(balance.totalAvailable);
+                      if (available <= 0) { setIsOutOfCreditsOpen(true); return; }
+                    }
+                    navigate("/sessions/" + row.original.id, {
+                      state: {
+                        showConnect: true,
+                        connectData: {
+                          sessionId: row.original.id,
+                          companyName: row.original.companyName || (row.original as any).company?.name,
+                          jobTitle: row.original.jobDescription,
+                          language: "English",
+                          simpleLanguage: false,
+                          aiModel: "Gemini 2.0 Flash",
+                        },
+                      },
+                    });
+                  }}
+                  className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                  title="Resume session"
+                >
+                  <Play className="h-4 w-4" />
+                </Button>
+              )}
               <Button
                 variant="ghost"
                 size="icon"
-                onClick={() => {
-                  if (!row.original.free && balance) {
-                    const available = parseFloat(balance.totalAvailable);
-                    if (available <= 0) { setIsOutOfCreditsOpen(true); return; }
-                  }
-                  navigate("/sessions/" + row.original.id, {
-                    state: {
-                      showConnect: true,
-                      connectData: {
-                        sessionId: row.original.id,
-                        companyName: row.original.companyName || (row.original as any).company?.name,
-                        jobTitle: row.original.jobDescription,
-                        language: "English",
-                        simpleLanguage: false,
-                        aiModel: "Gemini 2.0 Flash",
-                      },
-                    },
-                  });
-                }}
-                className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                onClick={() => handleDeleteClick(row.original.id)}
+                className="h-8 w-8 text-destructive hover:text-destructive hover:bg-destructive/10 transition-colors"
+                title="Delete session"
               >
-                <Play className="h-4 w-4" />
+                <Trash2 className="h-4 w-4" />
               </Button>
-            )}
-            <Button variant="ghost" size="icon" onClick={() => { setSelectedSessionForAnalytics(row.original); setIsAnalyticsDialogOpen(true); }} className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50 disabled:pointer-events-none" disabled={!row.original.endedAt}>
-              <BarChart3 className="h-4 w-4" />
-            </Button>
-            <Button variant="ghost" size="icon" onClick={() => { setSelectedSessionId(row.original.id); setIsTranscriptDialogOpen(true); }} className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50 disabled:pointer-events-none" disabled={!row.original.endedAt}>
-              <FileText className="h-4 w-4" />
-            </Button>
-            <Button variant="ghost" size="icon" onClick={() => handleDeleteClick(row.original.id)} className="h-8 w-8 text-destructive hover:text-destructive hover:bg-destructive/10 transition-colors">
-              <Trash2 className="h-4 w-4" />
-            </Button>
-          </div>
-        ),
+            </div>
+          );
+        },
       },
     ],
-    [],
+    [balance],
   );
-  const isFirstLoad = status === "loading" && !hasFetched;
+
   return (
     <div className="space-y-6 animate-in fade-in duration-700">
       <DataTable<SessionRow, unknown>
@@ -385,7 +398,6 @@ export default function Sessions() {
         sessionId={selectedSessionId || ""}
         onDelete={(id: string) => { setIsTranscriptDialogOpen(false); handleDeleteClick(id); }}
       />
-      <SessionAnalyticsDialog isOpen={isAnalyticsDialogOpen} onClose={() => { setIsAnalyticsDialogOpen(false); setSelectedSessionForAnalytics(null); }} session={selectedSessionForAnalytics} />
       <OutOfCreditsDialog open={isOutOfCreditsOpen} onOpenChange={setIsOutOfCreditsOpen} onGetCredits={() => setIsBuyCreditsOpen(true)} />
       <BuyCreditsDialog open={isBuyCreditsOpen} onOpenChange={setIsBuyCreditsOpen} onSuccess={refreshBalance} />
     </div>
