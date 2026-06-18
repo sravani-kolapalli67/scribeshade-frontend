@@ -1,7 +1,7 @@
 import * as React from "react";
 import { useAuth } from "@clerk/clerk-react";
 import { useNavigate } from "react-router-dom";
-import {h
+import {
   Dialog,
   DialogContent,
   DialogHeader,
