@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useAuth } from "@clerk/clerk-react";
 import { useNavigate } from "react-router-dom";
 import {
   Dialog,
@@ -10,7 +11,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Play, Zap, ChevronLeft, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
-
 // Sub-components
 import {
   Step1_JobDetails,
@@ -29,14 +29,11 @@ import { toast } from "sonner";
 import { useCreditsBalance } from "@/hooks/useCreditsBalance";
 import { OutOfCreditsDialog } from "@/components/Billing/OutOfCreditsDialog";
 import { BuyCreditsDialog } from "@/components/Billing/BuyCreditsDialog";
-
 type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
-
 interface CreateSessionDialogProps {
   isFree?: boolean;
   defaultOpen?: boolean;
 }
-
 const INITIAL_SESSION_DATA = {
   companyName: "",
   jobDescription: "",
@@ -53,32 +50,27 @@ const INITIAL_SESSION_DATA = {
   saveTranscript: true,
   questionBankContributionOptIn: false,
 };
-
-
 export default function CreateSessionDialog({
   isFree = false,
   defaultOpen = false,
 }: CreateSessionDialogProps) {
   const navigate = useNavigate();
+  const { getToken } = useAuth();
   const [open, setOpen] = React.useState(defaultOpen);
   const [step, setStep] = React.useState<Step>(1);
   const [loading, setLoading] = React.useState(false);
   const [createdSessionId, setCreatedSessionId] = React.useState<string | null>(
     null,
   );
-
   // Credit check states
   const { balance, isLoading: isBalanceLoading, refresh: refreshBalance } = useCreditsBalance();
   const [isOutOfCreditsOpen, setIsOutOfCreditsOpen] = React.useState(false);
   const [isBuyCreditsOpen, setIsBuyCreditsOpen] = React.useState(false);
-
   // State for all steps
   const [sessionData, setSessionData] = React.useState(INITIAL_SESSION_DATA);
-
   const updateData = (field: string, value: any) => {
     setSessionData((prev) => ({ ...prev, [field]: value }));
   };
-
   const updateSaveTranscript = (saveTranscript: boolean) => {
     setSessionData((previous) => ({
       ...previous,
@@ -88,7 +80,6 @@ export default function CreateSessionDialog({
         : false,
     }));
   };
-
   const handleNext = () => {
     if (step === 4 && sessionData.selectedProjectIds.length === 2 && !sessionData.primaryProjectId) {
       toast.error("Please select a primary project.");
@@ -98,29 +89,24 @@ export default function CreateSessionDialog({
       setStep((curr) => (curr + 1) as Step);
     }
   };
-
   const handleBack = () => {
     if (step > 1) {
       setStep((curr) => (curr - 1) as Step);
     }
   };
-
   const resetDialog = () => {
     setStep(1);
     setLoading(false);
     setSessionData(INITIAL_SESSION_DATA);
     setCreatedSessionId(null);
   };
-
   const createSession = async () => {
     setLoading(true);
     const userId = localStorage.getItem("userId");
-
     if (!userId) {
       toast.error("Don't ableto create");
       return;
     }
-
     const formData = new FormData();
     formData.append("userId", userId);
     formData.append("free", isFree.toString());
@@ -143,24 +129,22 @@ export default function CreateSessionDialog({
       "questionBankContributionOptIn",
       sessionData.questionBankContributionOptIn.toString(),
     );
-
     try {
+      const token = await getToken();
       const response = await fetch(
         `${import.meta.env.VITE_BACKEND_URL}/api/session/create-session`,
         {
           method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
           body: formData,
         },
       );
-
       const result = await response.json();
-
       if (response.ok) {
         const newSessionId = result.id || result.sessionId || "";
         setCreatedSessionId(newSessionId);
         setOpen(false);
         resetDialog();
-        // Redirect to ActiveSession page and show ConnectDialog there
         navigate(`/sessions/${newSessionId}`, {
           state: {
             showConnect: true,
@@ -197,10 +181,8 @@ export default function CreateSessionDialog({
       setLoading(false);
     }
   };
-
   const handleTriggerClick = (e: React.MouseEvent) => {
     if (!isFree) {
-      // While balance is still loading, don't open anything
       if (isBalanceLoading || balance === null) {
         e.preventDefault();
         return;
@@ -214,7 +196,6 @@ export default function CreateSessionDialog({
     }
     setOpen(true);
   };
-
   return (
     <>
       <Button
@@ -234,7 +215,6 @@ export default function CreateSessionDialog({
         )}
         {isFree ? "Start Free Session" : "Start Session"}
       </Button>
-
       <Dialog
         open={open}
         onOpenChange={(v) => {
@@ -242,7 +222,6 @@ export default function CreateSessionDialog({
           if (!v) resetDialog();
         }}
       >
-
         <DialogContent className="sm:max-w-2xl max-h-[calc(100dvh-2rem)] flex flex-col gap-0 border-none shadow-2xl rounded-3xl p-0 overflow-hidden bg-background" aria-describedby={undefined}>
           <DialogHeader className="shrink-0 pt-6 px-8 pb-0 relative">
             <div className="flex items-center justify-between mb-2">
@@ -262,7 +241,6 @@ export default function CreateSessionDialog({
                 </p>
               </div>
             </div>
-
             <div className="flex items-center gap-1 mb-0">
               {[1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
                 <div
@@ -279,26 +257,22 @@ export default function CreateSessionDialog({
               ))}
             </div>
           </DialogHeader>
-
           <div className="min-h-0 overflow-y-auto overscroll-contain px-8 pb-8 pt-4">
             {step === 1 && (
               <Step1_JobDetails data={sessionData} onChange={updateData} />
             )}
-
             {step === 2 && (
               <Step2_ResumeSelector
                 selectedResumeId={sessionData.selectedResume?.id || null}
                 onSelect={(resume) => updateData("selectedResume", resume)}
               />
             )}
-
             {step === 3 && (
               <Step3_DocumentSelector
                 selectedDocumentId={sessionData.selectedDocument?.id || null}
                 onSelect={(doc) => updateData("selectedDocument", doc)}
               />
             )}
-
             {step === 4 && (
               <Step4_AIProjects
                 selectedProjectIds={sessionData.selectedProjectIds}
@@ -307,21 +281,18 @@ export default function CreateSessionDialog({
                 onPrimaryChange={(id) => updateData("primaryProjectId", id)}
               />
             )}
-
             {step === 5 && (
               <Step5_LanguageAISettings
                 data={sessionData}
                 onChange={updateData}
               />
             )}
-
             {step === 6 && (
               <Step6_AutoGenerateAI
                 autoGenerate={sessionData.autoGenerateAI}
                 onChange={(v) => updateData("autoGenerateAI", v)}
               />
             )}
-
             {step === 7 && (
               <Step7_SaveTranscript
                 saveTranscript={sessionData.saveTranscript}
@@ -334,7 +305,6 @@ export default function CreateSessionDialog({
                 }
               />
             )}
-
             {step === 8 && (
               <Step8_Review
                 data={{
@@ -346,7 +316,6 @@ export default function CreateSessionDialog({
                 loading={loading}
               />
             )}
-
             {step < 8 && (
               <div className="flex items-center justify-between pt-6 border-t mt-6">
                 <Button
@@ -382,13 +351,11 @@ export default function CreateSessionDialog({
           </div>
         </DialogContent>
       </Dialog>
-
       <OutOfCreditsDialog
         open={isOutOfCreditsOpen}
         onOpenChange={setIsOutOfCreditsOpen}
         onGetCredits={() => setIsBuyCreditsOpen(true)}
       />
-
       <BuyCreditsDialog
         open={isBuyCreditsOpen}
         onOpenChange={setIsBuyCreditsOpen}
