@@ -721,8 +721,7 @@ async function consumeSegmentedStream(
 
 export const useAIChat = () => {
   const { getToken } = useAuth();
-  const authTokenRef = useRef("");
-  useEffect(() => { getToken().then((t) => { if (t) authTokenRef.current = t; }); }, [getToken]);
+  const authHeader = async () => { const t = await getToken(); return t ? "Bearer " + t : ""; };
   const [aiChat, setAiChat] = useState<Message[]>([]);
   const [inputMessage, setInputMessage] = useState("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -998,7 +997,7 @@ export const useAIChat = () => {
         console.log(`[useAIChat] handleAnalyzeScreen: Dispatching POST to ${targetUrl}`);
         const response = await fetch(targetUrl, {
           method: "POST",
-          headers: { "Authorization": "Bearer " + authTokenRef.current },
+          headers: { "Authorization": await authHeader() },
           body: formData,
           signal: controller.signal,
         });
@@ -1329,7 +1328,7 @@ export const useAIChat = () => {
             "Content-Type": "application/json",
             "x-request-id": requestId,
             "x-session-id": sessionId,
-			"Authorization": "Bearer " + authTokenRef.current,
+			"Authorization": await authHeader(),
           },
           body: JSON.stringify(requestBody),
           signal: controller.signal,
@@ -1507,7 +1506,7 @@ export const useAIChat = () => {
       console.log(`[useAIChat] handleCustomQuery: Saving user message to backend via POST to ${saveMessageUrl}`);
       fetch(saveMessageUrl, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Authorization": await authHeader() },
         body: JSON.stringify({
           role: "USER",
           question: query,
@@ -1639,7 +1638,7 @@ export const useAIChat = () => {
               "Content-Type": "application/json",
               "x-request-id": requestId,
               "x-session-id": sessionId,
-			  "Authorization": "Bearer " + authTokenRef.current,
+			  "Authorization": await authHeader(),
             },
             body: JSON.stringify({
               ...sanitizeAIAnswerPayload({
@@ -1929,7 +1928,7 @@ export const useAIChat = () => {
             "Content-Type": "application/json",
             "x-request-id": requestId,
             "x-session-id": sessionId,
-			"Authorization": "Bearer " + authTokenRef.current,
+			"Authorization": await authHeader(),
           },
           body: JSON.stringify(requestBody),
           signal: controller.signal,
