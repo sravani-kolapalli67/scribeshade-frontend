@@ -936,6 +936,19 @@ export default function ActiveSession() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streamHasAudio]);
+  // Warn the user when a screen share was started WITHOUT any audio track.
+  // This happens when sharing a specific application WINDOW (browsers cannot
+  // capture window audio) or a tab without ticking "Share tab audio".
+  useEffect(() => {
+    if (isTauri()) return;
+    if (stream && !streamHasAudio) {
+      toast.error(
+        "No interviewer audio detected. To capture the interviewer's voice, share a browser TAB with \"Share tab audio\" ticked, or share your ENTIRE screen. Sharing a single app window cannot capture audio.",
+        { duration: 10000 },
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stream, streamHasAudio]);
 
   // Surface cpal errors as toasts
   useEffect(() => {
