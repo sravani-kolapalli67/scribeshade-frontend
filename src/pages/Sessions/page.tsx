@@ -1,7 +1,7 @@
- ;
-
+;
 import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { useAuth } from "@clerk/clerk-react";
 import { ColumnDef } from "@tanstack/react-table";
 import { DataTable } from "@/components/data-table/data-table";
 import { Button } from "@/components/ui/button";
@@ -22,7 +22,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-
 import { toast } from "sonner";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
@@ -36,49 +35,40 @@ import {
   invalidateSessions,
   type Session,
 } from "@/store/sessionsSlice";
-
 // Re-export the type so column defs work with the data-table's ExportableData constraint.
 type SessionRow = Session & ExportableData;
-
 export default function Sessions() {
   const navigate = useNavigate();
   const dispatch = useAppDispatch();
+  const { getToken } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const userId = localStorage.getItem("userId");
-
   // ── Redux state ───────────────────────────────────────────────────────────
   const sessions = useAppSelector(selectSessionItems);
   const status = useAppSelector(selectSessionsStatus);
   const hasFetched = useAppSelector(selectSessionsHasFetched);
-
   // ── Local UI state (dialogs, selections) ──────────────────────────────────
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [sessionToDelete, setSessionToDelete] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
-
   const [isBulkDeleteDialogOpen, setIsBulkDeleteDialogOpen] = useState(false);
   const [bulkIdsToDelete, setBulkIdsToDelete] = useState<string[]>([]);
   const [isBulkDeleting, setIsBulkDeleting] = useState(false);
-
   const [isForceDeleteDialogOpen, setIsForceDeleteDialogOpen] = useState(false);
   const [sessionToForceDelete, setSessionToForceDelete] = useState<string | null>(null);
   const [isForceDeleting, setIsForceDeleting] = useState(false);
-
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [isTranscriptDialogOpen, setIsTranscriptDialogOpen] = useState(false);
   const [isAnalyticsDialogOpen, setIsAnalyticsDialogOpen] = useState(false);
   const [selectedSessionForAnalytics, setSelectedSessionForAnalytics] =
     useState<Session | null>(null);
-
   // Credit check states
   const { balance, refresh: refreshBalance } = useCreditsBalance();
   const [isOutOfCreditsOpen, setIsOutOfCreditsOpen] = useState(false);
   const [isBuyCreditsOpen, setIsBuyCreditsOpen] = useState(false);
-
   // ── Fetch params tracked for DataTable filter changes ─────────────────────
   const [currentSearch, setCurrentSearch] = useState("");
   const [currentDateRange, setCurrentDateRange] = useState({ from_date: "", to_date: "" });
-
   // Auto-open the transcript dialog when arriving with ?view=<sessionId>.
   useEffect(() => {
     const viewId = searchParams.get("view");
@@ -87,29 +77,24 @@ export default function Sessions() {
       setIsTranscriptDialogOpen(true);
     }
   }, [searchParams]);
-
   // ── Initial + filter-driven fetch ─────────────────────────────────────────
-  // Fetch sessions when the component mounts or when filters change.
-  // The thunk itself deduplicates — if the params haven't changed, it's a no-op.
   useEffect(() => {
     if (!userId) return;
-    dispatch(
-      fetchSessions({
-        userId,
-        search: currentSearch,
-        from_date: currentDateRange.from_date,
-        to_date: currentDateRange.to_date,
-      }),
-    );
-  }, [dispatch, userId, currentSearch, currentDateRange]);
-
+    getToken().then((token) => {
+      dispatch(
+        fetchSessions({
+          userId,
+          token: token ?? undefined,
+          search: currentSearch,
+          from_date: currentDateRange.from_date,
+          to_date: currentDateRange.to_date,
+        }),
+      );
+    });
+  }, [dispatch, userId, currentSearch, currentDateRange, getToken]);
   // ── DataTable fetchDataFn adapter ─────────────────────────────────────────
-  // The DataTable component expects an async function that returns paginated data.
-  // We feed it from Redux state (already fetched) and do client-side pagination.
-  // This function reference is STABLE (useCallback with [] deps + refs).
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
-
   const fetchDataForTable = useCallback(
     async (params: any) => {
       const page = params.page || 1;
@@ -119,7 +104,6 @@ export default function Sessions() {
       const total_pages = Math.ceil(total_items / limit);
       const startIndex = (page - 1) * limit;
       const paginatedData = items.slice(startIndex, startIndex + limit);
-
       return {
         success: true,
         data: paginatedData,
@@ -131,37 +115,24 @@ export default function Sessions() {
         },
       };
     },
-    // Intentionally empty — uses ref for sessions. This keeps the function identity
-    // stable so DataTable's useEffect doesn't re-trigger on every Redux update.
     [],
   );
-
-  // ── We need to tell DataTable to re-call fetchDataForTable when Redux data changes.
-  // The DataTable watches `fetchDataFn` identity in its useEffect deps. Since our
-  // fetchDataForTable is stable, we use a version counter to create new function identity.
   const [dataVersion, setDataVersion] = useState(0);
-
   useEffect(() => {
     setDataVersion((v) => v + 1);
   }, [sessions]);
-
-  // Stable wrapper that changes identity only when data version changes.
   const stableFetchFn = useMemo(() => {
     const fn = async (params: any) => fetchDataForTable(params);
     return fn;
   }, [dataVersion, fetchDataForTable]);
-
   // ── Delete handlers ───────────────────────────────────────────────────────
-
   const handleDeleteClick = (id: string) => {
     setSessionToDelete(id);
     setIsDeleteDialogOpen(true);
   };
-
   const confirmDelete = async () => {
     if (!sessionToDelete) return;
     setIsDeleting(true);
-
     try {
       const result = await dispatch(deleteSession(sessionToDelete)).unwrap();
       setIsDeleteDialogOpen(false);
@@ -179,7 +150,6 @@ export default function Sessions() {
       setSessionToDelete(null);
     }
   };
-
   const confirmForceDelete = async () => {
     if (!sessionToForceDelete) return;
     setIsForceDeleting(true);
@@ -194,7 +164,6 @@ export default function Sessions() {
       setIsForceDeleteDialogOpen(false);
     }
   };
-
   const confirmBulkDelete = async () => {
     if (bulkIdsToDelete.length === 0) return;
     setIsBulkDeleting(true);
@@ -217,7 +186,6 @@ export default function Sessions() {
       setIsBulkDeleting(false);
     }
   };
-
   // ── Column definitions ────────────────────────────────────────────────────
   const columns: ColumnDef<SessionRow>[] = useMemo(
     () => [
@@ -286,7 +254,7 @@ export default function Sessions() {
             rowStatus === "AUTO_ENDED" ||
             rowStatus === "Ended" ||
             !!row.original.endedAt;
-          const statusConfig: Record<
+          const statusConfig: Record
             string,
             { label: string; className: string }
           > = {
@@ -452,10 +420,7 @@ export default function Sessions() {
     ],
     [],
   );
-
-  // Show skeleton only on the very first load. Subsequent updates keep the table visible.
   const isFirstLoad = status === "loading" && !hasFetched;
-
   return (
     <div className="space-y-6 animate-in fade-in duration-700">
       <DataTable<SessionRow, unknown>
@@ -500,7 +465,6 @@ export default function Sessions() {
           ) : null
         }
       />
-
       {/* Bulk Delete Confirmation Dialog */}
       <Dialog open={isBulkDeleteDialogOpen} onOpenChange={setIsBulkDeleteDialogOpen}>
         <DialogContent className="sm:max-w-md">
@@ -532,7 +496,6 @@ export default function Sessions() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
       {/* Delete Confirmation Dialog */}
       <Dialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
         <DialogContent className="sm:max-w-md">
@@ -565,7 +528,6 @@ export default function Sessions() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
       {/* Force-End + Delete Dialog (session still ACTIVE) */}
       <Dialog open={isForceDeleteDialogOpen} onOpenChange={setIsForceDeleteDialogOpen}>
         <DialogContent className="sm:max-w-md">
@@ -600,7 +562,6 @@ export default function Sessions() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
       <TranscriptDialog
         isOpen={isTranscriptDialogOpen}
         onClose={() => {
@@ -618,7 +579,6 @@ export default function Sessions() {
           handleDeleteClick(id);
         }}
       />
-
       <SessionAnalyticsDialog
         isOpen={isAnalyticsDialogOpen}
         onClose={() => {
@@ -627,13 +587,11 @@ export default function Sessions() {
         }}
         session={selectedSessionForAnalytics}
       />
-
       <OutOfCreditsDialog
         open={isOutOfCreditsOpen}
         onOpenChange={setIsOutOfCreditsOpen}
         onGetCredits={() => setIsBuyCreditsOpen(true)}
       />
-
       <BuyCreditsDialog
         open={isBuyCreditsOpen}
         onOpenChange={setIsBuyCreditsOpen}
